@@ -34,6 +34,26 @@ Every signal must pass a rigorous set of checks before execution:
 *   **Stop Loss:** Technical Stop placed above the Swing High (+ ATR Buffer).
 *   **Target:** Open (Trend Follows until EOD or Trailing Stop Hit).
 
+## 🔬 Microstructure & Auction Theory (The "Why")
+ShortCircuit doesn't just look at candles; it looks at the **Auction Logic**.
+
+### 1. Auction Market Theory (AMT)
+The bot views the market as a mechanism to facilitate trade.
+*   **Look Above and Fail:** If price breaks a key level (Day High) but fails to hold, it signals rejection. The bot shorts this failure targeting a return to value.
+*   **Mean Reversion:** Prices extended >2 SD from VWAP are considered "expensive". The bot shorts these extensions to capture the reversion to the mean.
+
+### 2. Order Flow Dynamics (Tape Reading)
+The `FocusEngine` simulates institutional tape reading:
+*   **Absorption:** Detects when Aggressive Buyers are hitting the Offer but Price isn't moving (Iceberg Orders).
+*   **Exhaustion:** Detects when Volume dries up at new highs (Lack of participants).
+*   **Delta Divergence:** Visualizes when Price makes a New High but Net Buying (Delta) is dropping.
+
+### 3. Smart Trailing (The "Focus Engine")
+Unlike static bots, SC-Quant manages potential winners:
+*   **Latching:** Once a trade is entered, the Focus Engine "Latches" onto it.
+*   **Risk-Free:** Automatically moves SL to Breakeven when Profit = Risk.
+*   **Dynamic Trail:** If Profit > 2R, it aggressively trails the stop to lock in "outlier" moves (3-4% runs).
+
 ---
 
 ## 🛠 Features & Modules
