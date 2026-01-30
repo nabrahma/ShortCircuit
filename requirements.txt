@@ -1,0 +1,5 @@
+fyers-apiv3
+pandas
+pandas_ta
+python-dotenv
+pyTelegramBotAPI

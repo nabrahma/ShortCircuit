@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.env
+access_token.txt
+logs/
+data/
+.vscode/
+.idea/
+*.log
+*.csv
