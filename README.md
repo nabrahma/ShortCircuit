@@ -1,0 +1,109 @@
+# ShortCircuit (SC-Quant) ⚡
+**Institutional-Grade Algorithmic Trading Ecosystem**
+
+> *"The goal of a successful trader is to make the best trades. Money is secondary."* — Alexander Elder
+
+## 📚 About The Project
+**ShortCircuit** is a sophisticated, Python-based algorithmic trading engine engineered for the Indian Equity Markets (NSE). Unlike basic indicator-based bots, ShortCircuit synthesizes **Market Microstructure**, **Auction Market Theory**, and **Statistical Mean Reversion** to identify high-probability intraday setups.
+
+Built on the **Fyers APIv3**, the system is designed for **low-latency execution** and **robust risk management**. It operates as a "Glass Box" system—providing full transparency into its decision-making process via a real-time Telegram dashboard.
+
+### Key Capabilities
+*   **Hybrid Execution:** Switch seamlessly between **Fully Autonomous Mode** (Type `/auto on`) and **Manual Alert Mode** (Human Verification).
+*   **Focus Engine:** A dedicated thread that manages active trades with **Dynamic Trailing Stops** and **Real-Time P&L Tracking**.
+*   **Order Flow Analysis:** Internally calculates Absorption, Exhaustion, and Delta Divergence using tick-data simulation.
+*   **Safety Net:** Automated **Hard Stop Loss** placement, **Time-Based Exits** (3:10 PM), and **Capital Protection** logic.
+
+---
+
+## 🦅 Strategy: "The Sniper" (Phase 24)
+The current active strategy is a Trend-Following system designed to capture large intraday moves (1:3+ Risk/Reward) while filtering out noise.
+
+### The Filter Funnel (6 Gates)
+Every signal must pass a rigorous set of checks before execution:
+1.  **Regime Filter:** Blocks Short trades if Nifty/BankNifty is trending up.
+2.  **Time Protection:** Blocks trading during high-noise (09:15-10:00) and low-volume (12:00-13:00) periods.
+3.  **HTF Confluence:** Verifies structure on the **15-Minute** timeframe (Lower Highs required).
+4.  **VWAP Extension:** Only initiates trades when price is statistically overextended (>2 SD from VWAP).
+5.  **Signal Cap:** Limits exposure to **5 High-Quality Trades** per day to prevent overtrading.
+6.  **Key Levels:** Prioritizes setups at Day High (PDH) or Week High (PWH).
+
+### Setup Logic
+*   **Pattern:** Rejection Candles (Shooting Star, Engulfing) at liquidity zones.
+*   **Entry:** Momentum breakdown of the setup candle.
+*   **Stop Loss:** Technical Stop placed above the Swing High (+ ATR Buffer).
+*   **Target:** Open (Trend Follows until EOD or Trailing Stop Hit).
+
+---
+
+## 🛠 Features & Modules
+
+| Module | Description |
+| :--- | :--- |
+| `main.py` | The central nervous system. Manages threads, scanning loops, and EOD shutdown. |
+| `analyzer.py` | The "Brain". Implements the 6-Gate Filter Funnel and Pattern Recognition. |
+| `focus_engine.py` | The "Manager". Tracks active trades, updates Telegram dashboard, and trails stop losses. |
+| `trade_manager.py` | The "Executor". Handles order placement, sizing (Capital Split), and square-offs. |
+| `telegram_bot.py` | The "Interface". Provides a rich UI for monitoring and commands. |
+
+### 🛡️ Risk Management (Built-in)
+*   **Hard Stop Loss:** A Limit Order (SL-L) is placed **immediately** upon entry. No position is ever left naked.
+*   **Auto-Trailing:** Once profit > 2x Risk, the Focus Engine automatically tightens the Stop Loss.
+*   **Daily Cap:** Maximum 5 trades/day.
+*   **Auto-Square Off:** At **15:10 IST**, the system force-closes all open positions to avoid broker penalties.
+*   **Margin Safety:** Automatically adjusts position sizing (`CAPITAL = 1800`) to prevent "Insufficient Funds" errors on small accounts.
+
+---
+
+## 🚀 Getting Started
+
+### Prerequisites
+*   Python 3.9+
+*   Fyers API Account
+
+### Installation
+1.  Clone the repository:
+    ```bash
+    git clone https://github.com/nabrahma/ShortCircuit.git
+    cd ShortCircuit
+    ```
+2.  Install dependencies:
+    ```bash
+    pip install fyers-apiv3 telebot pandas numpy colorama python-dotenv
+    ```
+3.  Configure Environment:
+    Create a `.env` file in the root:
+    ```env
+    FYERS_CLIENT_ID=your_client_id
+    FYERS_SECRET_ID=your_secret_id
+    FYERS_REDIRECT_URI=https://trade.fyers.in/api-login/redirect-uri/index.html
+    TELEGRAM_BOT_TOKEN=your_bot_token
+    TELEGRAM_CHAT_ID=your_chat_id
+    ```
+
+### Usage
+1.  **Start the Server:**
+    ```bash
+    python main.py
+    ```
+2.  **Authenticate:**
+    Follow the prompt to login to Fyers and paste the `auth_code`.
+3.  **Control via Telegram:**
+    *   `/status` - Check system health.
+    *   `/auto on` - Enable Fully Autonomous Trading.
+    *   `/auto off` - Switch to Manual Alert Mode.
+
+---
+
+## 📊 Performance
+The system logs every signal to `logs/signals.csv`.
+Run the analysis scripts to verify performance:
+```bash
+python scripts/eod_simulation_jan30.py
+```
+*(Recent Result: +60% Win Rate, +38% ROI on Jan 30, 2026)*
+
+---
+
+## 📜 License
+Private Proprietary Software. All Rights Reserved.
