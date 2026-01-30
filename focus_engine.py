@@ -179,6 +179,9 @@ class FocusEngine:
                 }
                 self.fyers.place_order(data=data)
                 
+                # 2. CANCEL PENDING STOP ORDERS
+                self.cleanup_orders(trade['symbol'])
+                
                 # Notify User
                 if self.bot and config.TELEGRAM_CHAT_ID:
                     self.bot.send_message(config.TELEGRAM_CHAT_ID, f"🛑 **STOP LOSS TRIGGERED**\n\n{trade['symbol']} hit stop at {ltp}.\nPosition Closed.")
@@ -188,6 +191,25 @@ class FocusEngine:
 
             self.stop_focus(reason="SL_HIT")
             return
+
+    def cleanup_orders(self, symbol):
+        """
+        Cancels all pending orders for the symbol.
+        Used to remove Stop Loss orders after exit.
+        """
+        try:
+            orderbook = self.fyers.orderbook()
+            if 'orderBook' in orderbook:
+                count = 0
+                for order in orderbook['orderBook']:
+                    if order['symbol'] == symbol and order['status'] in [6]: # 6 = Pending
+                        logger.info(f"Cancelling pending Order {order['id']}")
+                        self.fyers.cancel_order(data={"id": order['id']})
+                        count += 1
+                if count > 0:
+                    logger.info(f"Cleaned up {count} pending orders for {symbol}")
+        except Exception as e:
+            logger.error(f"Cleanup Orders Error: {e}")
 
         # 2. TP1 (BreakEven) Logic
         risk = abs(entry - trade['initial_sl'])

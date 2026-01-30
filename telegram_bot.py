@@ -163,6 +163,9 @@ class ShortCircuitBot:
             # NOW Stop Focus Engine
             self.focus_engine.stop_focus()
             
+            # Clean up Pending Orders (Hard SLs)
+            self.focus_engine.cleanup_orders(symbol)
+            
             result = self.journal.log_exit(trade_id, exit_price)
             
             if result:

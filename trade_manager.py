@@ -122,7 +122,22 @@ class TradeManager:
             positions_response = self.fyers.positions()
             if 'netPositions' not in positions_response:
                 logger.info("No positions to close.")
-                return "No open positions."
+            
+            # 0. CANCEL ALL PENDING ORDERS FIRST
+            try:
+                orders = self.fyers.orderbook()
+                if 'orderBook' in orders:
+                    cleaned = 0
+                    for o in orders['orderBook']:
+                        if o['status'] in [6]: # Pending
+                            self.fyers.cancel_order(data={"id": o['id']})
+                            cleaned += 1
+                    logger.info(f"EOD Cleanup: Cancelled {cleaned} pending orders.")
+            except Exception as e:
+                logger.error(f"EOD Order Cleanup Failed: {e}")
+
+            if 'netPositions' not in positions_response:
+                return "Checked Orders. No open positions."
             
             closed_count = 0
             for pos in positions_response['netPositions']:
