@@ -3,3 +3,5 @@ pandas
 pandas_ta
 python-dotenv
 pyTelegramBotAPI
+colorama
+numpy

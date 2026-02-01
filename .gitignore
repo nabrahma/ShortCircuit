@@ -8,3 +8,7 @@ data/
 .idea/
 *.log
 *.csv
+fyers_mcp_server/
+venv/
+env/
+.DS_Store
