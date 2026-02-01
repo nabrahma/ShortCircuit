@@ -13,6 +13,10 @@ class TradeManager:
         logger.info(f"Auto-Trade set to: {self.auto_trade_enabled}")
         return self.auto_trade_enabled
 
+    def tick_round(self, price, tick=0.05):
+        """Rounds price to nearest tick size."""
+        return round(round(price / tick) * tick, 2)
+
     def execute_logic(self, signal):
         """
         Decides whether to execute instantly or return a manual alert prompt.
@@ -22,9 +26,6 @@ class TradeManager:
         sl = signal['stop_loss']
         
         # Calculate Qty
-        # Risk Management: Sizing = Capital / Price (Leverage usually 5x, but let's stick to Cash or conservative leverage)
-        # User Logic: Target Trade Value ~ 2200 INR
-        
         qty = int(config.CAPITAL / ltp)
         if qty < 1:
             qty = 1
@@ -49,21 +50,22 @@ class TradeManager:
                 }
                 
                 resp_entry = self.fyers.place_order(data=entry_data)
-                logger.info(f"Entry Order Response: {resp_entry}")
                 
-                if "id" in resp_entry:
+                # CRITICAL FIX: Check Status 's' == 'ok'
+                # Fyers returns an 'id' even on rejection sometimes (with negative code)
+                if resp_entry.get("s") == "ok" and "id" in resp_entry:
                     entry_order_id = resp_entry["id"]
+                    logger.info(f"Entry SUCCESS: {resp_entry}")
                     
-                    # 2. Place Safety Stop Loss Order (Buy SL-M)
-                    # Note: NSE often blocks SL-M for Options, but OK for Equity usually.
-                    # Safe fall back: Use SL-Limit with Trigger
-                    sl_trigger = float(sl)
-                    sl_limit = round(sl_trigger * 1.005, 2) # 0.5% buffer for limit
+                    # 2. Place Safety Stop Loss Order (Buy SL-Limit)
+                    # FIX: Round to Valid Tick Size (0.05)
+                    sl_trigger = self.tick_round(float(sl))
+                    sl_limit = self.tick_round(sl_trigger * 1.005) # 0.5% buffer
                     
                     sl_data = {
                         "symbol": symbol,
                         "qty": qty,
-                        "type": 4, # SL-Limit (Safer than SL-M)
+                        "type": 4, # SL-Limit
                         "side": 1, # Buy (Cover)
                         "productType": "INTRADAY",
                         "limitPrice": sl_limit,
@@ -74,7 +76,13 @@ class TradeManager:
                     }
                     try:
                         resp_sl = self.fyers.place_order(data=sl_data)
-                        logger.info(f"SL Order Response: {resp_sl}")
+                        if resp_sl.get("s") == "ok":
+                            logger.info(f"SL Order SUCCESS: {resp_sl}")
+                        else:
+                            logger.error(f"SL Order FAILED: {resp_sl}")
+                            # IMPORTANT: If SL Fails, we should arguably Exit the trade immediately
+                            # But for now, just Alert is critical. Focus Engine handles trailing.
+                            # We could retry or dump.
                     except Exception as e:
                         logger.error(f"Failed to place SL Order: {e}")
                         
@@ -88,9 +96,11 @@ class TradeManager:
                         "msg": f"🚀 Auto-Shorted {symbol} @ ~{ltp} with SL Order"
                     }
                 else:
+                    # ENTRY FAILED
+                    logger.error(f"Entry FAILED: {resp_entry}")
                     return {
                         "status": "ERROR",
-                        "msg": f"❌ Fyers Entry Failed: {resp_entry['message']}"
+                        "msg": f"❌ Entry Failed: {resp_entry.get('message', 'Unknown Error')}"
                     }
                     
             except Exception as e:
@@ -98,6 +108,7 @@ class TradeManager:
                 return {
                     "status": "ERROR",
                     "msg": f"❌ Execution Exception: {e}"
+
                 }
         else:
             # MANUAL MODE

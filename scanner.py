@@ -66,6 +66,64 @@ class FyersScanner:
             logger.error(f"Error fetching NSE symbols: {e}")
             return []
 
+    def check_chart_quality(self, symbol):
+        """
+        Microstructure Filter: Rejects 'gappy' or 'illiquid' charts.
+        Logic: Checks last 60 mins (1min candles).
+        - Rejects if > 30% candles have 0 volume.
+        - Rejects if > 40% candles are 'Flat' (Open == Close) (Dead movement).
+        """
+        try:
+            # Get 1min history
+            import datetime
+            to_date = int(time.time())
+            from_date = to_date - (60 * 60) # Last 1 Hour
+            
+            data = {
+                "symbol": symbol,
+                "resolution": "1",
+                "date_format": "0",
+                "range_from": str(from_date),
+                "range_to": str(to_date),
+                "cont_flag": "1"
+            }
+            
+            # Use history API (needs access to history method, assumed available in fyers instance or via direct call)
+            # FyersConnect usually has .history(data=data)
+            # If not available on self.fyers, we might need a workaround. Assuming it exists.
+            response = self.fyers.history(data=data)
+            
+            if 'candles' in response and len(response['candles']) > 30:
+                candles = response['candles'] # [[ts, o, h, l, c, v], ...]
+                
+                total = len(candles)
+                zero_vol = 0
+                flat_candles = 0 
+                
+                for c in candles:
+                    o, h, l, c_price, v = c[1], c[2], c[3], c[4], c[5]
+                    
+                    if v == 0:
+                        zero_vol += 1
+                        
+                    if o == c_price and h == l: # Completely dead candle
+                        flat_candles += 1
+                        
+                bad_candle_ratio = (zero_vol + flat_candles) / total
+                
+                # Threshold: If > 30% are dead/empty, it's garbage.
+                if bad_candle_ratio > 0.3:
+                    logger.warning(f"⚠️ Quality Reject: {symbol} | Bad Candles: {int(bad_candle_ratio*100)}% (Flat/Zero)")
+                    return False
+                    
+                return True
+                
+            return False # Not enough data = Reject
+            
+        except Exception as e:
+            logger.error(f"Quality Check Error {symbol}: {e}")
+            return False # Fail safe
+
     def scan_market(self):
         """
         Main Scan Logic.
@@ -127,13 +185,18 @@ class FyersScanner:
                     # 2. Volume: > 100k (Hardened Filter)
                     if change_p >= 5.0 and volume > 100000:
                             if ltp > 5: # Relaxed penny filter matching typical app views
-                                logger.info(f"🔥 CANDIDATE: {symbol} | Gain: {change_p}% | Vol: {volume}")
-                                filtered_candidates.append({
-                                    'symbol': symbol,
-                                    'ltp': ltp,
-                                    'volume': volume,
-                                    'change': change_p
-                                })
+                                # QUALITY CHECK (Deep Scan)
+                                # Only check if it looks like a winner to save API calls
+                                if self.check_chart_quality(symbol):
+                                    logger.info(f"🔥 CANDIDATE: {symbol} | Gain: {change_p}% | Vol: {volume}")
+                                    filtered_candidates.append({
+                                        'symbol': symbol,
+                                        'ltp': ltp,
+                                        'volume': volume,
+                                        'change': change_p
+                                    })
+                                else:
+                                    logger.info(f"🗑️ Skipped {symbol} (Poor Microstructure)")
             except Exception as e:
                 logger.error(f"Batch Error: {e}")
                 

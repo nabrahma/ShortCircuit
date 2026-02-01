@@ -11,8 +11,33 @@ Built on the **Fyers APIv3**, the system is designed for **low-latency execution
 ### Key Capabilities
 *   **Hybrid Execution:** Switch seamlessly between **Fully Autonomous Mode** (Type `/auto on`) and **Manual Alert Mode** (Human Verification).
 *   **Focus Engine:** A dedicated thread that manages active trades with **Dynamic Trailing Stops** and **Real-Time P&L Tracking**.
-*   **Order Flow Analysis:** Internally calculates Absorption, Exhaustion, and Delta Divergence using tick-data simulation.
+*   **Microstructure Filter:** Rejects stocks with "gappy" or illiquid charts (Zombie Candles) to ensure clean execution.
 *   **Safety Net:** Automated **Hard Stop Loss** placement, **Time-Based Exits** (3:10 PM), and **Capital Protection** logic.
+
+---
+
+## ✨ Levels of Automation
+
+ShortCircuit is designed as a "Pilot-Assist" system. It handles the high-speed complexity while you stay in command.
+
+### ✅ Fully Automated (The "Bot")
+1.  **Scanning:** Scans 2000+ NSE stocks every minute for Volume & Momentum anomalies.
+2.  **Filtering:** Automatically rejects 99% of stocks based on Trend, Time, and Chart Quality.
+3.  **Execution:**
+    *   Calculates Position Size based on Risk (e.g., ₹2000 per trade).
+    *   Places **Limit Entry** orders.
+    *   Places **Hard Stop Loss** (Rounded to 0.05 tick).
+    *   Aborts if Entry fails (Safety First).
+4.  **Trade Management:**
+    *   Trails Stop Loss to Breakeven at 1:1 Profit.
+    *   Trails aggressively at 1:2 Profit.
+    *   Exits position on Reversal.
+
+### ✋ Manual Control (The "Human")
+1.  **Strategy Selection:** The bot runs the specific "Sniper" logic (Breakdown/Rejection). You cannot change strategy dynamics on the fly without code edits.
+2.  **Authentication:** Daily Fyers Login (OTP/Auth Code) is manual for security.
+3.  **Emergency Kill:** You can stop any trade via Telegram (`/stop` or clicking "Close Trade").
+4.  **Funds:** Adding funds to the broker is manual.
 
 ---
 

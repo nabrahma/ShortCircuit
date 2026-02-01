@@ -3,6 +3,10 @@ import logging
 import threading
 import sys
 import config
+# Force UTF-8 for Console Output (Windows Fix)
+if sys.stdout.encoding != 'utf-8':
+    sys.stdout.reconfigure(encoding='utf-8')
+
 from fyers_connect import FyersConnect
 from scanner import FyersScanner
 from analyzer import FyersAnalyzer

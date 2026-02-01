@@ -93,50 +93,16 @@ class FocusEngine:
 
     def analyze_tape(self, tick_data):
         """
-        Quant Tape Reading via FootprintCalculator.
+        Quant Tape Reading placeholder.
+        Disabled for now as orderflow_engine is not yet implemented.
         """
-        if not hasattr(self, 'footprint_calc'):
-            from orderflow_engine import FootprintCalculator
-            self.footprint_calc = FootprintCalculator()
+        # if not hasattr(self, 'footprint_calc'):
+        #     from orderflow_engine import FootprintCalculator
+        #     self.footprint_calc = FootprintCalculator()
             
-        # Tick Data: {timestamp, ltp, vol}
-        # We need to construct this from what we have. 
-        # Focus Engine has LTP and Volume.
-        # But 'volume' from Quote is Cumulative Day Volume usually?
-        # Fyers 'volume' in quote is 'volume_traded_today'.
-        # We need LAST tick volume.
-        
+        # Placeholder Logic
+        tape_msg = "Neutral (No Engine)"
         t = self.active_trade
-        current_vol = tick_data.get('volume', 0)
-        
-        prev_vol = t.get('last_day_volume', current_vol)
-        tick_vol = current_vol - prev_vol
-        if tick_vol < 0: tick_vol = 0 # reset?
-        
-        t['last_day_volume'] = current_vol
-        
-        # Feed Engine
-        raw_tick = {
-            'ltp': tick_data['ltp'],
-            'vol': tick_vol,
-            'timestamp': datetime.datetime.now()
-        }
-        
-        self.footprint_calc.process_tick(raw_tick)
-        
-        # Check Absorption
-        is_absorption = self.footprint_calc.check_absorption()
-        
-        tape_msg = "Neutral ⚖️"
-        if is_absorption:
-            tape_msg = "⚠️ ABSORPTION (Delta Div)"
-            
-        # Maintain "Wall" check from Liquidity Map?
-        # We can also check Walls here if we have depth data in Focus Engine loop.
-        # Focus Engine loop currently fetches Quotes. 
-        # Making it fetch Depth every 2s might be rate limit heavy?
-        # Let's stick to Footprint here.
-        
         t['tape_alert'] = tape_msg
         return tape_msg
 
