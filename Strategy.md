@@ -53,7 +53,25 @@ Once triggered, the Trade Manager takes over with "军 (Army) Grade" safety:
     - If Auto-Trade is OFF, the bot calculates the levels but waits for you.
     - **Crash Fixed**: Handled specifically to prevent loop crashes.
 
-## 4. Asset Classes
+## 4. Phase 27: Institutional Overlays (The "Pro" Layer)
+We now look beyond Price. We look at **Participation (OI)** and **Value (Profile)**.
+
+### A. OI Divergence (The "Fakeout" Detector)
+- **Logic**: If Price breaks out (Highs), but Open Interest (OI) **DROPS**, it is a "Hollow Move" (Short Covering).
+- **Signal**: `Price UP + OI DOWN` = **Aggressive Short**.
+- *Note: Only active for F&O symbols.*
+
+### B. Developing POC (Value Migration)
+- **Logic**: We calculate the day's Volume Profile live.
+- **Signal**: If Price makes a new High, but the **Point of Control (POC)** stays low (does not migrate up), it is a Value Divergence.
+- **Trigger**: Price > POC + 1% = **Reversion Likely**.
+
+### C. The "Vacuum" Test (Exhaustion)
+- **Old Logic**: We only shorted High Volume rejection (Absorption).
+- **New Logic (Phase 27)**: We now ALSO short **Low Volume Exhaustion**.
+- **Trigger**: If Price is at +2SD VWAP and Volume **DROPS** (Vacuum), we enter. "No one is left to buy."
+
+## 5. Asset Classes
 - **Primary**: Fyers Equity Intraday (NSE:EQ).
 - **Focus**: High Volume, High Liquid stocks only.
 
