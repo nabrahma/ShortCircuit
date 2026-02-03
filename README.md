@@ -1,142 +1,102 @@
 
-# ⚡ ShortCircuit (SC-Quant)
+# ⚡ ShortCircuit: Institutional Grade Algo-Trading System
 
-[![Python](https://img.shields.io/badge/Python-3.9%2B-blue?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
-[![License](https://img.shields.io/badge/License-Apache%202.0-green?style=for-the-badge)](LICENSE)
-[![Platform](https://img.shields.io/badge/Platform-NSE%20(India)-orange?style=for-the-badge)](https://www.nseindia.com)
-[![Status](https://img.shields.io/badge/Status-Production%20Stable-brightgreen?style=for-the-badge)](#)
+![Python](https://img.shields.io/badge/Python-3.11-blue?style=for-the-badge&logo=python)
+![Fyers API](https://img.shields.io/badge/API-Fyers-orange?style=for-the-badge)
+![Status](https://img.shields.io/badge/Status-Battle%20Tested-green?style=for-the-badge)
+![License](https://img.shields.io/badge/License-MIT-lightgrey?style=for-the-badge)
 
-> **"The goal of a successful trader is to make the best trades. Money is secondary."** — *Alexander Elder*
+## 🎯 Overview
 
-ShortCircuit is an institutional-grade algorithmic trading engine engineered for the **Indian Equity Markets (NSE)**. Built on the **Fyers APIv3**, it synthesizes **Market Microstructure**, **Auction Market Theory**, and **Statistical Mean Reversion** to execute high-probability intraday setups with sub-second latency.
+**ShortCircuit** is a high-performance, institutional-grade quantitative trading system designed for the Indian Equities market (NSE). Unlike traditional retail bots that rely on lagging indicators (RSI/MACD), ShortCircuit leverages **Auction Market Theory**, **Order Flow Analysis**, and **Market Profile (TPO)** to identify structural imbalances and institutional exhaustions.
 
-Unlike basic indicator-based bots, ShortCircuit is a **"Glass Box"** system—providing full transparency into its decision-making process via a real-time Telegram dashboard.
+The system is engineered for **Capital Preservation First**, acting as a "Sniper" ensuring only A+ setups with statistical edge are executed.
+
+---
+
+## ✨ Key Features
+
+| Feature | Description |
+| :--- | :--- |
+| **🧠 Institutional Logic** | Integrates **Open Interest (OI) Divergence**, **Developing POC (dPOC)**, and **Volume Vacuums** to filter fakeouts. |
+| **🛡️ 6-Gate Safety** | Every trade must pass 6 strict filters: Regiment, Time, Signal Cap, HTF Confluence, Extension, and Momentum. |
+| **⚡ Circuit Guard** | Real-time **Upper Circuit Protection** blocks trades if price gets within 1.5% of the freeze limit. |
+| **📉 Dynamic Risk** | Uses **ATR-based Volatility Stops** and **Dynamic Tick Sizing** to adjust risk per trade automatically. |
+| **🖥️ Tape Reading** | internal **DOM (Depth of Market)** analyzer detects "Iceberg Orders", "Walls", and "Absorption" in real-time. |
+| **🚨 Emergency Protocol** | "Army Grade" failsafes including **Auto-Square Off**, **Strike Limiters**, and **Loop Crash Recovery**. |
 
 ---
 
 ## 🏗️ Architecture
 
-The system follows a modular, multi-threaded event-driven architecture designed for fault tolerance and speed.
+The system follows a modular, event-driven architecture optimized for speed and stability.
 
 ```mermaid
 graph TD
-    A[Market Scanner] -->|Candidates| B(Filter Engine)
-    B -->|Valid Signal| C{Execution Logic}
-    C -->|Auto Mode| D[Trade Manager]
-    C -->|Manual Mode| E[Telegram Alert]
-    D -->|Order Placed| F[Focus Engine]
-    F -->|Updates| G((Telegram Dashboard))
-    F -->|Trailing SL| H[Broker API]
+    A[Market Data Scanner] -->|Candidates| B(Analyzer Engine)
+    B -->|LTP & OI| C{Gatekeeper Logic}
+    C -->|Pass| D[Phase 27 Validators]
+    D -->|OI/TPO Check| E[Signal Manager]
+    E -->|Trigger| F[Trade Manager]
+    F -->|Order Execution| G((Fyers API))
+    G -->|Status| H[Telegram Bot]
 ```
 
-### Core Modules
-| Module | Role | Description |
-| :--- | :--- | :--- |
-| **Scanner** | `scanner.py` | Scans 2000+ stocks/min for Volume/Momentum anomalies & Microstructure health (Gaps/Dojis). |
-| **Brain** | `analyzer.py` | Implementation of the "Sniper" Strategy. Applies the 6-Gate Filter Funnel. |
-| **Executor** | `trade_manager.py` | Handles Order Sizing, Limit Order placement, and Stop Loss rounding (0.05 tick). |
-| **Focus Engine** | `focus_engine.py` | Dedicated thread per trade. Manages P&L, Trailing Stops, and Tape Reading. |
-| **Interface** | `telegram_bot.py` | Bi-directional control center. Accepts commands (`/stop`, `/auto`) and broadcasts logs. |
+---
+
+## 🚀 Strategy: "The Sniper"
+
+We do not scalp for pennies. We hunt for **Structural Reversals**.
+
+### The Setup
+1.  **Extension**: Price must be > +2 Standard Deviations from VWAP.
+2.  **Structure**: Look for **Shooting Star** or **Bearish Engulfing** at Day Highs.
+3.  **Confirmation (Phase 27)**:
+    *   **OI Divergence**: Price ⬆️ + OI ⬇️ (Short Covering Fakeout).
+    *   **Value Div**: Price > POC + 1% (Value Stuck).
+    *   **Vacuum**: Low Volume Rejection at Highs.
+
+For full details, read the [Strategy Manual](Strategy.md).
 
 ---
 
-## 🦅 Strategy: "The Sniper"
-The engine implements a rigorous Trend-Following system designed to capture large intraday moves (1:3+ Risk/Reward) while filtering out noise.
-
-### The 6-Gate Verification Funnel
-Every signal must pass **all** checks before execution:
-1.  **Regime Filter:** Blocks Counter-Trend trades (e.g., Shorting when Nifty is Trend-Up).
-2.  **Time Protection:** Blocks trading during High Volatility (09:15-10:00) and Lunch Chop (12:00-13:00).
-3.  **HTF Confluence:** Verifies structure on the **15-Minute** timeframe (Lower Highs required).
-4.  **VWAP Extension:** Only initiates trades when price is statistically overextended (>2 SD from VWAP).
-5.  **Microstructure Health:** Rejects "Zombie Charts" (stocks with >30% zero-volume/flat candles).
-6.  **Key Levels:** Prioritizes setups at Day High (PDH) or Week High (PWH).
-
-### 🔬 Auction Market Theory (AMT)
-ShortCircuit doesn't just look at candles; it processes the **Auction Logic**:
-*   **Absorption:** Detects Iceberg Orders (Aggressive Buying vs Passive Selling).
-*   **Exhaustion:** Identifies Volume dry-up at new highs.
-*   **Delta Divergence:** Spots reversals where Price makes a High but Net Delta falls.
-
----
-
-## ✨ Levels of Automation
-ShortCircuit is designed as a **"Pilot-Assist"** system. It handles high-speed complexity while the human stays in command.
-
-### ✅ Fully Autonomous (The "Bot")
-*   **Scanning & Filtering:** 100% Automated.
-*   **Execution:** Calculates Size, Places Entry, Places Stop Loss (Hard Limit).
-*   **Risk Management:** Aborts if Entry fails (No Naked Positions).
-*   **Trade Management:** Auto-trails Stop Loss to Breakeven (1:1) and locks profit (1:2).
-
-### ✋ Manual Control (The "Human")
-*   **Strategy Selection:** "Sniper" Strategy is hard-coded for consistency.
-*   **Authentication:** Daily Fyers Login (OTP) is manual for security.
-*   **Kill Switch:** Emergency Close via Telegram button.
-
----
-
-## 🚀 Getting Started
+## 🛠️ Installation
 
 ### Prerequisites
-*   Python 3.9+
-*   Fyers API Account (with App Created)
-*   Telegram Bot Token
+- Python 3.10+
+- Fyers API V3 Access Token
 
-### Installation
-1.  **Clone the Repository**
-    ```bash
-    git clone https://github.com/nabrahma/ShortCircuit.git
-    cd ShortCircuit
-    ```
+### Setup
+```bash
+# 1. Clone the repository
+git clone https://github.com/nabrahma/ShortCircuit.git
 
-2.  **Install Dependencies**
-    ```bash
-    pip install -r requirements.txt
-    ```
+# 2. Install Dependencies
+pip install -r requirements.txt
 
-3.  **Configuration**
-    Create a `.env` file in the root directory:
-    ```env
-    FYERS_CLIENT_ID=your_client_id
-    FYERS_SECRET_ID=your_secret_id
-    FYERS_REDIRECT_URI=https://trade.fyers.in/api-login/redirect-uri/index.html
-    TELEGRAM_BOT_TOKEN=your_bot_token
-    TELEGRAM_CHAT_ID=your_chat_id
-    CAPITAL=2000 # Capital per trade
-    ```
+# 3. Configure API
+# Edit config.py with your credentials
+```
 
-4.  **Run the Engine**
-    ```bash
-    python main.py
-    ```
+### Usage
+```bash
+# Run the Bot
+python main.py
+```
 
 ---
 
-## 🤝 Contributing
-Contributions are what make the open source community such an amazing place to learn, inspire, and create. Any contributions you make are **greatly appreciated**.
+## 📊 Performance & Logs
 
-1.  Fork the Project
-2.  Create your Feature Branch (`git checkout -b feature/AmazingFeature`)
-3.  Commit your Changes (`git commit -m 'Add some AmazingFeature'`)
-4.  Push to the Branch (`git push origin feature/AmazingFeature`)
-5.  Open a Pull Request
+All signals are logged to `logs/signals.csv` for forensic analysis.
+- **Win Rate Target**: > 65%
+- **Risk:Reward**: 1:2 Minimum
 
 ---
 
 ## ⚠️ Disclaimer
-**Use at your own risk.** Algorithmic trading involves significant financial risk.
-*   This software is for educational purposes only.
-*   The authors are not responsible for any financial losses incurred.
-*   Always test in a controlled environment with small capital before scaling.
+
+*Quantitative trading involves significant financial risk. This software is provided for educational and research purposes only. Use at your own risk.*
 
 ---
-
-## 📜 License
-Distributed under the Apache 2.0 License. See `LICENSE` for more information.
-
----
-
-<p align="center">
-  <img src="https://img.shields.io/badge/Made%20with-❤️%20By%20Nabaskar-Green?style=for-the-badge">
-</p>
+*Built with ⚡ by ShortCircuit Team*

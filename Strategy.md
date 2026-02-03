@@ -71,7 +71,22 @@ We now look beyond Price. We look at **Participation (OI)** and **Value (Profile
 - **New Logic (Phase 27)**: We now ALSO short **Low Volume Exhaustion**.
 - **Trigger**: If Price is at +2SD VWAP and Volume **DROPS** (Vacuum), we enter. "No one is left to buy."
 
-## 5. Asset Classes
+### C. The "Vacuum" Test (Exhaustion)
+- **Concept**: Shorting "Low Volume Extensions".
+- **Trigger**: If Price is at +2SD VWAP and Volume **DROPS** (Vacuum), allow entry.
+
+## 5. Risk & Filters (Safe-Guards)
+
+### A. The "Circuit Guard" (Anti-Trap)
+To prevent getting locked in Upper Circuits (UC):
+1.  **Gain Filter**: We ONLY trade stocks up **6% to 18%**.
+    *   *< 6%*: Too weak (Noise).
+    *   *> 18%*: Too dangerous (High risk of UC lock).
+2.  **Dynamic Freeze Check**:
+    *   The bot reads the real-time `UpperCircuit` limit from the exchange.
+    *   If `LTP > (UpperCircuit * 0.985)` (i.e., within 1.5%), the trade is **BLOCKED**.
+
+### B. Asset Classes
 - **Primary**: Fyers Equity Intraday (NSE:EQ).
 - **Focus**: High Volume, High Liquid stocks only.
 
