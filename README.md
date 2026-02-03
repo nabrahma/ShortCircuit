@@ -99,4 +99,4 @@ All signals are logged to `logs/signals.csv` for forensic analysis.
 *Quantitative trading involves significant financial risk. This software is provided for educational and research purposes only. Use at your own risk.*
 
 ---
-*Built with ⚡ by ShortCircuit Team*
+*Built with ⚡ by Nabaskar*
