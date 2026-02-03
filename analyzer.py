@@ -4,6 +4,7 @@ import datetime
 import csv
 import os
 from typing import Optional, Dict, Any, Tuple
+from collections import deque
 
 from market_context import MarketContext
 from signal_manager import get_signal_manager
@@ -51,6 +52,7 @@ class FyersAnalyzer:
         self.gm_analyst = GodModeAnalyst()
         self.tape_reader = TapeReader()
         self.profile_analyzer = ProfileAnalyzer()
+        self.oi_history = {} # Symbol -> deque of (timestamp, oi, price) use deque(maxlen=20)
 
     def get_history(self, symbol: str, interval: str = "1") -> Optional[pd.DataFrame]:
         """
@@ -80,7 +82,7 @@ class FyersAnalyzer:
             logger.error(f"Error fetching history for {symbol}: {e}")
             return None
 
-    def check_setup(self, symbol: str, ltp: float) -> Optional[Dict[str, Any]]:
+    def check_setup(self, symbol: str, ltp: float, oi: float = 0) -> Optional[Dict[str, Any]]:
         """
         Validates a trading candidate using the God Mode strategy.
         
@@ -255,16 +257,29 @@ class FyersAnalyzer:
                         pro_conf.append(f"{name} Reject 📐")
                         break
         
-        # RVOL
+        # RVOL & Vacuum
         try:
             if len(df) > 20:
                 avg_vol = df['volume'].iloc[-20:-2].mean()
                 setup_vol = df.iloc[-2]['volume']
                 rvol = setup_vol / avg_vol if avg_vol > 0 else 0
+                
                 if rvol > 2.0:
                     pro_conf.append(f"RVOL {rvol:.1f}x 🔊")
+                elif rvol < 0.5 and is_extended:
+                    pro_conf.append(f"Vacuum/Exhaustion 🕯️") # Phase 27
         except Exception:
             pass
+            
+        # Phase 27: Institutional Checks
+        # 1. OI Divergence (Fakeout)
+        self._track_oi(symbol, ltp, oi)
+        is_fakeout, oi_msg = self._check_oi_divergence(symbol, ltp)
+        if is_fakeout: pro_conf.append(oi_msg)
+        
+        # 2. dPOC Divergence (Value Migration)
+        is_dpoc_div, dpoc_msg = self._check_dpoc_divergence(symbol, ltp, df)
+        if is_dpoc_div: pro_conf.append(dpoc_msg)
 
         # Validation Logic logic
         if not is_extended and "TAPE" not in pattern_desc:
@@ -274,6 +289,62 @@ class FyersAnalyzer:
                  return False, []
         
         return True, pro_conf
+
+    def _track_oi(self, symbol, ltp, oi):
+        """Phase 27: Stores recent OI data."""
+        if oi == 0: return
+        
+        if symbol not in self.oi_history:
+            self.oi_history[symbol] = deque(maxlen=20) # Store last 20 scans (~20 mins)
+            
+        self.oi_history[symbol].append({
+            'time': datetime.datetime.now(),
+            'price': ltp,
+            'oi': oi
+        })
+
+    def _check_oi_divergence(self, symbol, ltp):
+        """
+        Phase 27: Checks for Short Covering (Fakeout).
+        Prices UP + OI DOWN = Fakeout.
+        """
+        if symbol not in self.oi_history or len(self.oi_history[symbol]) < 5:
+            return False, ""
+            
+        history = list(self.oi_history[symbol])
+        current = history[-1]
+        past = history[0] # ~15-20 mins ago (depending on scan interval)
+        
+        price_change = current['price'] - past['price']
+        oi_change = current['oi'] - past['oi']
+        
+        # Logic: Price Risng (Extension) but OI Dropping
+        if price_change > 0 and oi_change < 0:
+            drop_pct = (abs(oi_change) / past['oi']) * 100
+            if drop_pct > 0.5: # Significant drop
+                return True, f"OI Fakeout (OI -{drop_pct:.1f}%) 📉"
+                
+        return False, ""
+
+    def _check_dpoc_divergence(self, symbol, ltp, df):
+        """
+        Phase 27: Checks if Developing POC is stuck low while Price is high.
+        """
+        try:
+            dpoc = self.profile_analyzer.get_developing_poc(df)
+            if dpoc == 0: return False, ""
+            
+            # If Price is significantly above dPOC (e.g. > 1%) 
+            # and we are at Day Highs, but dPOC hasn't migrated.
+            # This is hard to prove without historical dPOC, but if Price >> dPOC it implies thin value.
+            
+            dist_pct = (ltp - dpoc) / dpoc * 100
+            if dist_pct > 1.0: # 1% Extension from Value
+                return True, f"Value Div (LTP > POC+{dist_pct:.1f}%)"
+                
+        except:
+            pass
+        return False, ""
 
     def _finalize_signal(self, symbol, ltp, df, pattern_desc, slope, wall_msg):
         """Final HTF checks and logging."""

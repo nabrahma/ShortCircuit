@@ -172,14 +172,16 @@ class FyersScanner:
                             if ltp > 5:
                                 if self.check_chart_quality(symbol):
                                     tick_size = self.symbols.get(symbol, 0.05) # GET TICK
+                                    oi = quote_data.get('oi', 0) # Get Open Interest
                                     
-                                    logger.info(f"🔥 CANDIDATE: {symbol} | Gain: {change_p}% | Tick: {tick_size}")
+                                    logger.info(f"🔥 CANDIDATE: {symbol} | Gain: {change_p}% | Tick: {tick_size} | OI: {oi}")
                                     filtered_candidates.append({
                                         'symbol': symbol,
                                         'ltp': ltp,
                                         'volume': volume,
                                         'change': change_p,
-                                        'tick_size': tick_size # PASS TICK SIZE
+                                        'tick_size': tick_size, # PASS TICK SIZE
+                                        'oi': oi # PASS OPEN INTEREST
                                     })
                                 else:
                                     logger.info(f"🗑️ Skipped {symbol} (Poor Microstructure)")

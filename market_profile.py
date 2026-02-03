@@ -183,3 +183,13 @@ class ProfileAnalyzer:
         
         # Simplified: Large range candle with low volume relative to day?
         pass
+
+    def get_developing_poc(self, df):
+        """
+        Calculates the Point of Control (POC) for the given dataframe.
+        Used to track dPOC migration.
+        """
+        profile = self.calculate_tpo_profile(df)
+        if profile:
+            return profile['poc']
+        return 0

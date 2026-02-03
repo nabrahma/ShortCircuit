@@ -95,9 +95,10 @@ def main():
             for cand in candidates:
                 symbol = cand['symbol']
                 ltp = cand['ltp']
+                oi = cand.get('oi', 0)
                 
                 # Check Technicals
-                signal = analyzer.check_setup(symbol, ltp)
+                signal = analyzer.check_setup(symbol, ltp, oi)
                 
                 if signal:
                     # C. Execute/Alert
