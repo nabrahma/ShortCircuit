@@ -1,50 +1,61 @@
-# Phase 24: Operational Strategy Manual
-> **Last Updated:** Jan 29, 2026 | **Style:** Classical Trend Following (Sniper)
+# Phase 26: Operational Strategy Manual
+> **Last Updated:** Feb 04, 2026 | **Style:** Classical Trend Following (Sniper)
+> **Status:** BATTLE TESTED (Feb 03)
 
 ## 1. Core Philosophy: "The Sniper"
-We have shifted from high-frequency scalping (Machine Gun) to high-conviction trend following (Sniper).
-- **Goal:** Catch 1-2 major moves per day (like `NAHARSPING` +4%).
-- **Risk:** Tight stops on 1-minute chart.
-- **Reward:** Riding the trend on 5/15-minute chart.
+We have shifted from high-frequency scalping to high-conviction trend following.
+- **Goal:** Catch 1-2 major moves per day (e.g., Shorting extended stocks like `SBCL` at Day Highs).
+- **Recent Win:** Correctly identified `SBCL` exhaustion at ₹486 (Day High) before it closed lower.
+- **Safety:** Priorities Capital Preservation over signals.
 
-## 2. The Filter Funnel (How we select)
+## 2. The Filter Funnel (6 Gates)
 Every signal must pass **6 Gates** before reaching you:
 
 1.  **Market Regime (Context)**:
-    - If Nifty/BankNifty is **Trending UP**, we **BLOCK** all Short signals.
-    - We only short on Bearish or Range-bound days.
+    - **Trend Up**: BLOCK Shorts.
+    - **Trend Down**: BLOCK Longs.
+    - **Range**: ALLOW Reversals (Our sweet spot).
 
-2.  **Time of Day (Volatility Protection)**:
-    - **09:15 - 10:00**: BLOCKED (Too chaotic, fakeouts common).
-    - **12:00 - 13:00**: BLOCKED (Lunch time chop/liquidity dry up).
-    - **Best Time**: 10:00 - 11:30 and 13:30 - 14:45.
+2.  **Time of Day (Liquidity Protection)**:
+    - **09:15 - 10:00**: CAUTION (High Volatility).
+    - **12:00 - 13:00**: BLOCKED (Lunch time chop).
+    - **Best Time**: 13:00 - 14:45 (Trend Confirmation).
 
 3.  **Signal Cap (Discipline)**:
     - Max **5 Trades** per day.
-    - **45-minute Cooldown** per stock (prevents over-trading the same symbol).
+    - **45-minute Cooldown** per stock.
 
 4.  **HTF Confluence (The "Pro" Check)**:
-    - Before firing, we check the **15-Minute Chart**.
-    - **Rule:** We only short if the 15m structure shows weakness (Lower Highs or Exhaustion).
-    - If 15m is bullish, we SKIP the 1-minute signal.
+    - **15-Minute Chart Alignment**:
+    - We only short if 15m structure shows **Lower Highs** or **Exhaustion**.
+    - If 15m is bullish, the 1m signal is ignored.
 
 5.  **Technical Extension (Mean Reversion)**:
-    - Price must be away from VWAP (>2 Standard Deviations).
-    - We don't short "cheap" prices; we only short "expensive" extensions.
+    - Price must be >2 SD from VWAP.
+    - "Shorting the Rubber Band" when it's stretched.
 
-6.  **Key Levels**:
-    - We prefer setups at Day Highs (PDH), Week Highs (PWH), or Round Numbers.
+6.  **Tape Reading (The Trigger)**:
+    - **Absorption**: High Volume + No Price Move (Tape Stall).
+    - **Orderbook (DOM)**: Bearish Wall (>2.5x Sellers vs Buyers).
 
-## 3. The Setup (The Trigger)
-Once all filters are passed, we look for:
-- **Pattern**: Shooting Star, Bearish Engulfing, or Evening Star.
-- **Location**: Top of the daily range (HOD).
-- **Trigger**: Candle CLOSE below the setup low.
+## 3. Execution & Safety (New Phase 26 Features)
+Once triggered, the Trade Manager takes over with "军 (Army) Grade" safety:
 
-## 4. Execution
-- **Stop Loss**: Just above the signal candle high (+ ATR buffer).
-- **Target**: Open (Trend Follow). We hold until structure breaks or EOD.
-- **Asset Classes**: Stocks & ETFs (Note: ETFs like AXISGOLD are valid but strictly filtered).
+1.  **Dynamic Tick Size**:
+    - Stops are calculated using the specific tick size of the stock (e.g., 0.05).
+    - Prevents "Invalid Tick Size" rejection errors.
+
+2.  **Smart Retry Logic**:
+    - If SL Order fails, it retries **3 Times**.
+    - If all 3 fail, it triggers **EMERGENCY EXIT** (Market Close) immediately.
+
+3.  **Manual Fallback**:
+    - If Auto-Trade is OFF, the bot calculates the levels but waits for you.
+    - **Crash Fixed**: Handled specifically to prevent loop crashes.
+
+## 4. Asset Classes
+- **Primary**: Fyers Equity Intraday (NSE:EQ).
+- **Focus**: High Volume, High Liquid stocks only.
 
 ---
 
