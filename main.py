@@ -4,8 +4,13 @@ import threading
 import sys
 import config
 # Force UTF-8 for Console Output (Windows Fix)
-if sys.stdout.encoding != 'utf-8':
-    sys.stdout.reconfigure(encoding='utf-8')
+# We use 'replace' to ensure that if a character cannot be encoded, it doesn't crash the bot.
+if sys.platform.startswith('win'):
+    try:
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+    except Exception as e:
+        print(f"Warning: Could not force UTF-8: {e}")
 
 from fyers_connect import FyersConnect
 from scanner import FyersScanner

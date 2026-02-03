@@ -12,3 +12,4 @@ fyers_mcp_server/
 venv/
 env/
 .DS_Store
+_ARCHIVE/

@@ -55,6 +55,16 @@ class ShortCircuitBot:
             logger.info("Startup Motivation Sent.")
         except Exception as e:
             logger.error(f"Failed to send startup msg: {e}")
+
+    def escape_md(self, text):
+        """
+        Escapes special characters for Markdown to prevent Telegram 400 Errors.
+        Chars to escape: _ * [ ] ( ) ~ ` > # + - = | { } . !
+        But for simple 'Markdown' (V1), mainly _ and * are tricky if not balanced.
+        Let's just replace _ with \_ to be safe as patterns have underscores.
+        """
+        if not isinstance(text, str): return str(text)
+        return text.replace("_", "\\_").replace("*", "\\*").replace("`", "\\`")
         
     def get_ltp(self, symbol):
         try:
@@ -228,25 +238,34 @@ class ShortCircuitBot:
                  logger.error(f"Failed to start Auto-Focus: {e}")
             
         elif status == "MANUAL_WAIT":
-            symbol = trade_result['symbol']
+            symbol = self.escape_md(trade_result['symbol'])
+            pattern_pretty = self.escape_md(self.prettify_pattern(trade_result['pattern']))
+            qty = trade_result['qty']
+            ltp = trade_result['ltp']
+            sl = trade_result['stop_loss']
             
             # Rich Format
-            msg = f"🚨 **GOD MODE SIGNAL** 🚨\n({config.CAPITAL} INR Scalp)\n\n"
+            msg = f"🚨 *GOD MODE SIGNAL* 🚨\n({config.CAPITAL} INR Scalp)\n\n"
             msg += f"`{symbol}`\n" # Monospace for Copy
             msg += f"_(Tap to Copy)_\n\n"
             
-            msg += f"📊 **Why**: {self.prettify_pattern(trade_result['pattern'])}\n"
-            msg += f"💰 **Size**: {trade_result['qty']} Qty\n"
-            msg += f"🏷️ **Price**: {trade_result['ltp']}\n"
-            msg += f"🛑 **Stop**: {trade_result['sl']}\n"
+            msg += f"📊 *Why*: {pattern_pretty}\n"
+            msg += f"💰 *Size*: {qty} Qty\n"
+            msg += f"🏷️ *Price*: {ltp}\n"
+            msg += f"🛑 *Stop*: {sl} (Auto-Calc)\n\n"
             
-            # Inline Button
+            msg += f"⚡ *Action Required: Verify Chart & Decide*"
+
+            # Interactive Buttons
+            from telebot import types
             markup = types.InlineKeyboardMarkup()
-            # Pass only symbol to keep callback short
-            btn = types.InlineKeyboardButton("⚡ I Shorted! (Track)", callback_data=f"FOCUS_{symbol}")
-            markup.add(btn)
+            btn_enter = types.InlineKeyboardButton("🚀 ENTER TRADE", callback_data=f"FOCUS_{trade_result['symbol']}")
+            markup.add(btn_enter)
             
-            self.bot.send_message(self.chat_id, msg, reply_markup=markup, parse_mode="Markdown")
+            try:
+                self.bot.send_message(self.chat_id, msg, parse_mode="Markdown", reply_markup=markup)
+            except Exception as e:
+                logger.error(f"Failed to send Manual Alert: {e}")
 
     def start_polling(self):
         logger.info("🤖 Telegram Bot Listening...")

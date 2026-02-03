@@ -20,47 +20,38 @@ class FyersScanner:
             # Using a public list URL for now or if Fyers offers a symbol master API
             # Fyers typically provides a CSV. 
             
-            # Use Fyers standard CSV url
+            # Fyers CSV URL
             url = "https://public.fyers.in/sym_details/NSE_CM.csv"
             
-            # Columns: 0:Exch, 1:SymbolDesc, 2:SymbolDetails, 3:LotSize, 4:MinTick, 5:ISIN, 6:TradingSession, 7:LastUpdate, 8:Expiry, 9:Symbol, 10:Price, 11:ExchangeToken, 12:TickSize, 13:SymbolRoot
-            # We need standard pandas read
+            # Columns (Official Fyers V3 Spec):
+            # 0:Exch, 1:SymbolDesc, 2:SymbolDetails, 3:LotSize, 4:MinTick, 5:ISIN, 6:TradingSession, 7:LastUpdate, 8:Expiry, 9:Symbol, 10:Price, 11:ExchangeToken, 12:TickSize, 13:SymbolRoot
+            # Actually, standard layout varies. We will robustly find the '-EQ' symbol and 'MinTick' (Col 4 or 12).
+            
             df = pd.read_csv(url, header=None)
             
-            # Fyers CSV structure often changes, let's keep it simple.
-            # Col 9 usually has 'NSE:SBIN-EQ' format or just 'SBIN-EQ'
-            # Let's inspect rows. Usually:
-            # "NSE", "RELIANCE INDUSTRIES LTD", "EQ", ... "NSE:RELIANCE-EQ"
+            candidates = {} # Map Symbol -> TickSize
             
-            # Filter for Equity series 'EQ' in the appropriate column (usually col 2 or part of symbol)
-            # Let's assume the last column or specific column has the full trading symbol "NSE:XXXX-EQ"
+            # Index 9 is usually the Symbol (NSE:SBIN-EQ). Index 4 is MinTick (0.05).
+            # Let's verify by iterating.
             
-            # To be safe, look for columns containing "NSE:" and "-EQ"
-            # It's better to iterate through a known column if possible.
-            # Fyers Sym Details: https://public.fyers.in/sym_details/NSE_CM.csv
-            # 13 columns.
-            # 9: Symbol Token / Ticker? 
-            # 13: Symbol "NSE:SBIN-EQ" (Example)
-            
-            # Let's assume the last column (index 13 or similar) has the symbol.
-            # Actually, standard practice for Fyers Scanner:
-            # We want to scan highly liquid names. Scanning 2000 stocks takes time due to rate limits.
-            # Strategy: Scan FNO stocks or Nifty 500 for speed?
-            # User asked for "Market Vacuum".
-            
-            # Let's filter df where column contains "-EQ"
-            
-            candidates = []
             for index, row in df.iterrows():
-                # Loop columns to find symbol format
-                for item in row:
-                    if isinstance(item, str) and item.startswith("NSE:") and item.endswith("-EQ"):
-                        candidates.append(item)
-                        break
-            
-            logger.info(f"Loaded {len(candidates)} Equity Symbols from NSE Master.")
-            print(f"DEBUG: Loaded {len(candidates)} Equity Symbols.")
-            return candidates
+                # Finding the Symbol Column (usually col 9 or 13)
+                symbol = str(row.get(9, "")) # Try Col 9 first
+                if not symbol.endswith("-EQ"):
+                    symbol = str(row.get(13, "")) # Try Col 13
+                
+                if symbol.startswith("NSE:") and symbol.endswith("-EQ"):
+                    # Finding Tick Size (Col 4 or 12 or 2)
+                    try:
+                        tick = float(row.get(4, 0.05)) # Col 4 is often MinTick
+                        if tick == 0: tick = 0.05
+                    except:
+                        tick = 0.05
+                        
+                    candidates[symbol] = tick
+
+            logger.info(f"Loaded {len(candidates)} Equity Symbols with Tick Sizes.")
+            return candidates # Returns Dict {Symbol: Tick}
 
         except Exception as e:
             logger.error(f"Error fetching NSE symbols: {e}")
@@ -93,7 +84,14 @@ class FyersScanner:
             # If not available on self.fyers, we might need a workaround. Assuming it exists.
             response = self.fyers.history(data=data)
             
-            if 'candles' in response and len(response['candles']) > 30:
+            # Check Time: If < 10:00 AM, we won't have 30 candles (Market opens 09:15)
+            import datetime
+            now_dt = datetime.datetime.fromtimestamp(to_date)
+            is_early_morning = now_dt.hour < 10
+            
+            min_candles = 5 if is_early_morning else 30
+            
+            if 'candles' in response and len(response['candles']) >= min_candles:
                 candles = response['candles'] # [[ts, o, h, l, c, v], ...]
                 
                 total = len(candles)
@@ -136,20 +134,18 @@ class FyersScanner:
             if not self.symbols:
                 return []
 
-        # Batching
+        # Batching (Symbols is now a Dict)
+        symbol_list = list(self.symbols.keys()) # EXTRACT KEYS
         filtered_candidates = []
         batch_size = 50
-        total_symbols = len(self.symbols)
+        total_symbols = len(symbol_list)
         
         logger.info(f"Scanning {total_symbols} symbols in batches...")
 
         for i in range(0, total_symbols, batch_size):
-            batch = self.symbols[i:i+batch_size]
-            print(f"Scanning Batch {i}/{total_symbols}...")
+            batch = symbol_list[i:i+batch_size]
+            # print(f"Scanning Batch {i}/{total_symbols}...") # Reduced Noise
             symbols_str = ",".join(batch)
-            
-            # Rate Limit safety (10 req/s allowed, we are safe with 1 batch/s)
-            # time.sleep(0.1) 
             
             try:
                 data = {"symbols": symbols_str}
@@ -159,41 +155,31 @@ class FyersScanner:
                     continue
                     
                 for stock in response["d"]:
-                    # stock['n'] = Symbol
-                    # stock['v'] = LP_Volume
-                    # stock['lp'] = LTP
-                    # stock['chp'] = Change Percent
-                    
-                    # V3 Structure: stock['v'] contains the quote data
                     quote_data = stock.get('v')
                     if not isinstance(quote_data, dict):
                         continue
                         
                     symbol = stock.get('n')
-                    ltp = quote_data.get('lp') # Last Traded Price
-                    volume = quote_data.get('volume') # Volume
-                    change_p = quote_data.get('chp') # Change Percent
-                    
-                    if i == 0:
-                        print(f"DEBUG: {symbol} | LTP: {ltp} | Vol: {volume} | Chg: {change_p}")
+                    ltp = quote_data.get('lp') 
+                    volume = quote_data.get('volume')
+                    change_p = quote_data.get('chp')
                     
                     if ltp is None or volume is None or change_p is None:
                         continue
                         
-                    # FILTER LOGIC
-                    # 1. Gain: 5% to 20%
-                    # 2. Volume: > 100k (Hardened Filter)
+                    # 1. Gain: 5% to 20% | 2. Volume > 100k
                     if change_p >= 5.0 and volume > 100000:
-                            if ltp > 5: # Relaxed penny filter matching typical app views
-                                # QUALITY CHECK (Deep Scan)
-                                # Only check if it looks like a winner to save API calls
+                            if ltp > 5:
                                 if self.check_chart_quality(symbol):
-                                    logger.info(f"🔥 CANDIDATE: {symbol} | Gain: {change_p}% | Vol: {volume}")
+                                    tick_size = self.symbols.get(symbol, 0.05) # GET TICK
+                                    
+                                    logger.info(f"🔥 CANDIDATE: {symbol} | Gain: {change_p}% | Tick: {tick_size}")
                                     filtered_candidates.append({
                                         'symbol': symbol,
                                         'ltp': ltp,
                                         'volume': volume,
-                                        'change': change_p
+                                        'change': change_p,
+                                        'tick_size': tick_size # PASS TICK SIZE
                                     })
                                 else:
                                     logger.info(f"🗑️ Skipped {symbol} (Poor Microstructure)")
@@ -203,9 +189,8 @@ class FyersScanner:
         # Sort by Change % Descending
         filtered_candidates.sort(key=lambda x: x['change'], reverse=True)
         top_gainers = filtered_candidates[:20]
-
         
-        logger.info(f"Scan Complete. Found {len(filtered_candidates)} candidates. Top gainer: {top_gainers[0] if top_gainers else 'None'}")
+        logger.info(f"Scan Complete. Found {len(filtered_candidates)} candidates.")
         
         # Notify Telegram
         # Notify Telegram (DISABLED per user request to reduce noise)

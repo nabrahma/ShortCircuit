@@ -24,13 +24,14 @@ class TradeManager:
         symbol = signal['symbol']
         ltp = signal['ltp']
         sl = signal['stop_loss']
+        tick_size = signal.get('tick_size', 0.05) # Get Dynamic Tick
         
         # Calculate Qty
         qty = int(config.CAPITAL / ltp)
         if qty < 1:
             qty = 1
             
-        logger.info(f"Processing Trade for {symbol}. Qty: {qty}. Auto: {self.auto_trade_enabled}")
+        logger.info(f"Processing Trade for {symbol}. Qty: {qty}. Tick: {tick_size}")
         
         if self.auto_trade_enabled:
             # PLACE ENTRY ORDER
@@ -51,16 +52,15 @@ class TradeManager:
                 
                 resp_entry = self.fyers.place_order(data=entry_data)
                 
-                # CRITICAL FIX: Check Status 's' == 'ok'
-                # Fyers returns an 'id' even on rejection sometimes (with negative code)
                 if resp_entry.get("s") == "ok" and "id" in resp_entry:
                     entry_order_id = resp_entry["id"]
                     logger.info(f"Entry SUCCESS: {resp_entry}")
                     
                     # 2. Place Safety Stop Loss Order (Buy SL-Limit)
-                    # FIX: Round to Valid Tick Size (0.05)
-                    sl_trigger = self.tick_round(float(sl))
-                    sl_limit = self.tick_round(sl_trigger * 1.005) # 0.5% buffer
+                    # Use Dynamic Tick Size
+                    sl_trigger = self.tick_round(float(sl), tick_size)
+                    sl_limit_price = sl_trigger * 1.005 # 0.5% buffer
+                    sl_limit = self.tick_round(sl_limit_price, tick_size)
                     
                     sl_data = {
                         "symbol": symbol,
@@ -74,18 +74,41 @@ class TradeManager:
                         "disclosedQty": 0,
                         "offlineOrder": False,
                     }
-                    try:
-                        resp_sl = self.fyers.place_order(data=sl_data)
-                        if resp_sl.get("s") == "ok":
-                            logger.info(f"SL Order SUCCESS: {resp_sl}")
-                        else:
-                            logger.error(f"SL Order FAILED: {resp_sl}")
-                            # IMPORTANT: If SL Fails, we should arguably Exit the trade immediately
-                            # But for now, just Alert is critical. Focus Engine handles trailing.
-                            # We could retry or dump.
-                    except Exception as e:
-                        logger.error(f"Failed to place SL Order: {e}")
-                        
+                    
+                    sl_placed = False
+                    
+                    # RETRY LOOP (3 Attempts)
+                    for attempt in range(1, 4):
+                        try:
+                            resp_sl = self.fyers.place_order(data=sl_data)
+                            if resp_sl.get("s") == "ok":
+                                logger.info(f"SL Order SUCCESS (Attempt {attempt}): {resp_sl}")
+                                sl_placed = True
+                                break # Exit Loop
+                            else:
+                                logger.warning(f"SL Attempt {attempt} Failed: {resp_sl}")
+                        except Exception as e:
+                            logger.warning(f"SL Attempt {attempt} Exception: {e}")
+                    
+                    # FINAL CHECK
+                    if not sl_placed:
+                        logger.critical(f"🛑 ALL 3 SL ATTEMPTS FAILED for {symbol}. Triggering EMERGENCY EXIT.")
+                        self.emergency_exit(symbol, qty)
+                        return {
+                            "status": "ERROR",
+                            "msg": f"❌ SL Failed (x3). Emergency Exit Triggered for {symbol}."
+                        }
+
+                    return {
+                        "status": "EXECUTED",
+                        "order_id": entry_order_id,
+                        "qty": qty,
+                        "ltp": ltp,
+                        "sl": sl,
+                        "symbol": symbol,
+                        "msg": f"🚀 Auto-Shorted {symbol} @ ~{ltp} with SL Order"
+                    }
+
                     return {
                         "status": "EXECUTED",
                         "order_id": entry_order_id,
@@ -108,8 +131,42 @@ class TradeManager:
                 return {
                     "status": "ERROR",
                     "msg": f"❌ Execution Exception: {e}"
-
                 }
+
+        else:
+             # MANUAL MODE (Auto-Trade Disabled)
+            return {
+                "status": "MANUAL_WAIT",
+                "symbol": symbol,
+                "qty": qty,
+                "value": int(qty * ltp),
+                "ltp": ltp,
+                "sl": sl,
+                "pattern": signal.get('pattern', 'Unknown')
+            }
+
+    def emergency_exit(self, symbol, qty):
+        """
+        Closes a position immediately via Market Order.
+        Used when SL placement fails to prevent naked positions.
+        """
+        try:
+            data = {
+                "symbol": symbol,
+                "qty": qty,
+                "type": 2, # Market
+                "side": 1, # Buy/Cover
+                "productType": "INTRADAY",
+                "limitPrice": 0,
+                "stopPrice": 0,
+                "validity": "DAY",
+                "disclosedQty": 0,
+                "offlineOrder": False
+            }
+            self.fyers.place_order(data=data)
+            logger.info(f"✅ Emergency Exit Placed for {symbol}")
+        except Exception as e:
+            logger.critical(f"🔥 EMERGENCY EXIT FAILED for {symbol}: {e}")
         else:
             # MANUAL MODE
             return {
