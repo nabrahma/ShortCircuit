@@ -167,8 +167,8 @@ class FyersScanner:
                     if ltp is None or volume is None or change_p is None:
                         continue
                         
-                    # 1. Gain: 5% to 20% | 2. Volume > 100k
-                    if change_p >= 5.0 and volume > 100000:
+                    # 1. Gain: 6% to 18% (Avoid Circuit Traps) | 2. Volume > 100k
+                    if 6.0 <= change_p <= 18.0 and volume > 100000:
                             if ltp > 5:
                                 if self.check_chart_quality(symbol):
                                     tick_size = self.symbols.get(symbol, 0.05) # GET TICK

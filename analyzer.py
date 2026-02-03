@@ -96,6 +96,10 @@ class FyersAnalyzer:
         # --- Pre-analysis Filters ---
         if not self._check_filters(symbol):
             return None
+            
+        # --- Circuit & Gap Guard ---
+        if self._check_circuit_guard(symbol, ltp):
+            return None
 
         # --- Data Fetching ---
         df = self.get_history(symbol)
@@ -197,6 +201,33 @@ class FyersAnalyzer:
         v = df['volume'].values
         tp = (df['high'] + df['low'] + df['close']) / 3
         df['vwap'] = (tp * v).cumsum() / v.cumsum()
+
+    def _check_circuit_guard(self, symbol: str, ltp: float) -> bool:
+        """
+        Safety Check: Blocks trade if price is too close to Upper Circuit.
+        Buffer: 1.5% (If LTP > 98.5% of UC, Block).
+        """
+        try:
+            depth_data = self.fyers.depth(data={"symbol": symbol, "ohlcv_flag":"1"})
+            if 'd' in depth_data:
+                quote = depth_data['d'].get(symbol, {})
+                uc = quote.get('upper_ckt', 0)
+                lc = quote.get('lower_ckt', 0)
+                
+                if uc > 0:
+                    buffer_price = uc * 0.985
+                    if ltp >= buffer_price:
+                        logger.warning(f"🛑 CIRCUIT GUARD: {symbol} @ {ltp} (Too close to UC {uc})")
+                        return True
+                        
+                # Also Block if at Lower Circuit (Already dead)
+                if lc > 0 and ltp <= lc * 1.005:
+                     return True
+                     
+        except Exception as e:
+            logger.error(f"Circuit Check Error: {e}")
+            
+        return False
 
     def _is_momentum_too_strong(self, df: pd.DataFrame, slope: float, symbol: str) -> bool:
         """Checks if momentum is too strong to short."""
