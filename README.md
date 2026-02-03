@@ -4,7 +4,7 @@
 ![Python](https://img.shields.io/badge/Python-3.11-blue?style=for-the-badge&logo=python)
 ![Fyers API](https://img.shields.io/badge/API-Fyers-orange?style=for-the-badge)
 ![Status](https://img.shields.io/badge/Status-Battle%20Tested-green?style=for-the-badge)
-![License](https://img.shields.io/badge/License-MIT-lightgrey?style=for-the-badge)
+![License](https://img.shields.io/badge/License-Apache_License_2.0-lightgrey?style=for-the-badge)
 
 ## 🎯 Overview
 
