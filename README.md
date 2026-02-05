@@ -4,7 +4,7 @@
 ![Python](https://img.shields.io/badge/Python-3.11-blue?style=for-the-badge&logo=python)
 ![Fyers API](https://img.shields.io/badge/API-Fyers-orange?style=for-the-badge)
 ![Status](https://img.shields.io/badge/Status-Audit%20Passed-green?style=for-the-badge)
-![License](https://img.shields.io/badge/License-MIT-lightgrey?style=for-the-badge)
+![License](https://img.shields.io/badge/License-Apache%202.0-lightgrey?style=for-the-badge)
 
 ## 🎯 Overview
 
@@ -100,4 +100,4 @@ All signals are logged to `logs/signals.csv` for forensic analysis.
 *Quantitative trading involves significant financial risk. This software is provided for educational and research purposes only. Use at your own risk.*
 
 ---
-*Built with ⚡ by ShortCircuit Team*
+*Built with ⚡ by Nabaskar*
