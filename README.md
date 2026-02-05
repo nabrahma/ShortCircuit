@@ -3,7 +3,7 @@
 
 ![Python](https://img.shields.io/badge/Python-3.11-blue?style=for-the-badge&logo=python)
 ![Fyers API](https://img.shields.io/badge/API-Fyers-orange?style=for-the-badge)
-![Status](https://img.shields.io/badge/Status-Battle%20Tested-green?style=for-the-badge)
+![Status](https://img.shields.io/badge/Status-Audit%20Passed-green?style=for-the-badge)
 ![License](https://img.shields.io/badge/License-MIT-lightgrey?style=for-the-badge)
 
 ## 🎯 Overview
@@ -27,19 +27,20 @@ The system is engineered for **Capital Preservation First**, acting as a "Sniper
 
 ---
 
-## 🏗️ Architecture
+## 🏗️ Architecture (Optimized)
 
-The system follows a modular, event-driven architecture optimized for speed and stability.
+The system follows a modular, **shared-data** architecture optimized for high-speed scanning without "API Explosion".
 
 ```mermaid
 graph TD
-    A[Market Data Scanner] -->|Candidates| B(Analyzer Engine)
-    B -->|LTP & OI| C{Gatekeeper Logic}
-    C -->|Pass| D[Phase 27 Validators]
-    D -->|OI/TPO Check| E[Signal Manager]
-    E -->|Trigger| F[Trade Manager]
-    F -->|Order Execution| G((Fyers API))
-    G -->|Status| H[Telegram Bot]
+    A[Market Data Scanner] -->|Fetch & Cache History| B(Data Lake)
+    B -->|Cached DF| C[Analyzer Engine]
+    C -->|Fetch Depth ONCE| D{Gatekeeper Logic}
+    D -->|Pass| E[Circuit Guard & Tape Reader]
+    E -->|Approved| F[Signal Manager]
+    F -->|Trigger| G[Trade Manager]
+    G -->|Order Execution| H((Fyers API))
+    H -->|Status| I[Telegram Bot]
 ```
 
 ---
