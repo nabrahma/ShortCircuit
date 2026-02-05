@@ -109,15 +109,6 @@ class TradeManager:
                         "msg": f"🚀 Auto-Shorted {symbol} @ ~{ltp} with SL Order"
                     }
 
-                    return {
-                        "status": "EXECUTED",
-                        "order_id": entry_order_id,
-                        "qty": qty,
-                        "ltp": ltp,
-                        "sl": sl,
-                        "symbol": symbol,
-                        "msg": f"🚀 Auto-Shorted {symbol} @ ~{ltp} with SL Order"
-                    }
                 else:
                     # ENTRY FAILED
                     logger.error(f"Entry FAILED: {resp_entry}")
