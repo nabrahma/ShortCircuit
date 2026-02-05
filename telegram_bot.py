@@ -227,15 +227,17 @@ class ShortCircuitBot:
                  qty = trade_result['qty']
                  trade_id = trade_result['order_id']
                  
-                 # Start Focus
-                 self.focus_engine.start_focus(symbol, entry, sl, message_id=track_msg.message_id, trade_id=trade_id)
-                 # Manually inject Qty into active_trade since start_focus doesn't take it (it defaults to 1 usually)
-                 if self.focus_engine.active_trade:
-                     self.focus_engine.active_trade['qty'] = qty
-                     self.focus_engine.active_trade['trade_id'] = trade_id
-                     
+                 
+                 # Start Focus (Pass corrected Qty and TradeID)
+                 self.focus_engine.start_focus(symbol, entry, sl, message_id=track_msg.message_id, trade_id=trade_id, qty=qty)
+                 
              except Exception as e:
                  logger.error(f"Failed to start Auto-Focus: {e}")
+            
+        elif status == "ERROR":
+             # Notify User of Failure
+             err_msg = f"❌ **AUTO-TRADE FAILED** ❌\n\nSymbol: `{trade_result.get('msg', 'Unknown')}`\nCheck Logs."
+             self.bot.send_message(self.chat_id, err_msg, parse_mode="Markdown")
             
         elif status == "MANUAL_WAIT":
             symbol = self.escape_md(trade_result['symbol'])

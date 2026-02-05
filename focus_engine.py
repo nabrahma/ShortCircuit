@@ -17,7 +17,7 @@ class FocusEngine:
         self.is_running = False
         self.bot = telebot.TeleBot(config.TELEGRAM_BOT_TOKEN) if config.TELEGRAM_BOT_TOKEN else None
 
-    def start_focus(self, symbol, entry_price, sl_price, message_id=None, trade_id=None):
+    def start_focus(self, symbol, entry_price, sl_price, message_id=None, trade_id=None, qty=1):
         """
         Latch onto a trade.
         """
@@ -32,6 +32,7 @@ class FocusEngine:
             'initial_sl': sl_price,
             'tp1': tp1,
             'tp2': tp2,
+            'qty': qty, # Store corrected Qty
             'status': 'OPEN',
             'sl_at_be': False,
             'trailing_active': False,
