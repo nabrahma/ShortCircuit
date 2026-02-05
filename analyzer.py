@@ -82,27 +82,38 @@ class FyersAnalyzer:
             logger.error(f"Error fetching history for {symbol}: {e}")
             return None
 
-    def check_setup(self, symbol: str, ltp: float, oi: float = 0) -> Optional[Dict[str, Any]]:
+    def check_setup(self, symbol: str, ltp: float, oi: float = 0, pre_fetched_df: Optional[pd.DataFrame] = None) -> Optional[Dict[str, Any]]:
         """
         Validates a trading candidate using the God Mode strategy.
-        
-        Logic Flow:
-        1. Pre-analysis Filters (Market Regime, Signal Caps, Time)
-        2. Data Fetch & Technical Calculation
-        3. Hard Constraint Check (Day High, Gain %)
-        4. Pattern Recognition (Candle Structure + Tape)
-        5. Confluence Checks (HTF, VWAP Extension, Key Levels)
+        Optimized to use pre-fetched History DF and Shared Depth Data.
         """
         # --- Pre-analysis Filters ---
         if not self._check_filters(symbol):
             return None
             
+        # --- OPTIMIZATION: Shared Depth Data ---
+        # We fetch Depth ONCE here and share it with Circuit Guard and Tape Reader
+        try:
+            full_depth = self.fyers.depth(data={"symbol": symbol, "ohlcv_flag":"1"})
+            # Validate response
+            if 'd' in full_depth and symbol in full_depth['d']:
+                depth_data = full_depth['d'][symbol]
+            else:
+                depth_data = None
+        except:
+            depth_data = None
+            
         # --- Circuit & Gap Guard ---
-        if self._check_circuit_guard(symbol, ltp):
+        # Pass the pre-fetched depth data
+        if self._check_circuit_guard(symbol, ltp, depth_data):
             return None
 
         # --- Data Fetching ---
-        df = self.get_history(symbol)
+        if pre_fetched_df is not None:
+             df = pre_fetched_df
+        else:
+             df = self.get_history(symbol)
+             
         if df is None or df.empty:
             return None
 
@@ -164,7 +175,7 @@ class FyersAnalyzer:
 
             if valid_signal:
                 valid_signal, pro_conf_msgs = self._check_pro_confluence(
-                    symbol, df, prev_df, slope, is_extended, vwap_sd, pattern_desc
+                    symbol, df, prev_df, slope, is_extended, vwap_sd, pattern_desc, depth_data
                 )
                 if pro_conf_msgs:
                     pattern_desc += f" + {', '.join(pro_conf_msgs)}"
@@ -202,15 +213,19 @@ class FyersAnalyzer:
         tp = (df['high'] + df['low'] + df['close']) / 3
         df['vwap'] = (tp * v).cumsum() / v.cumsum()
 
-    def _check_circuit_guard(self, symbol: str, ltp: float) -> bool:
+    def _check_circuit_guard(self, symbol: str, ltp: float, quote: dict = None) -> bool:
         """
         Safety Check: Blocks trade if price is too close to Upper Circuit.
-        Buffer: 1.5% (If LTP > 98.5% of UC, Block).
+        Uses cached quote/depth data if available.
         """
         try:
-            depth_data = self.fyers.depth(data={"symbol": symbol, "ohlcv_flag":"1"})
-            if 'd' in depth_data:
-                quote = depth_data['d'].get(symbol, {})
+            if not quote:
+                 # Fallback to API call if not provided (should be avoided)
+                 depth_data = self.fyers.depth(data={"symbol": symbol, "ohlcv_flag":"1"})
+                 if 'd' in depth_data:
+                     quote = depth_data['d'].get(symbol, {})
+            
+            if quote:
                 uc = quote.get('upper_ckt', 0)
                 lc = quote.get('lower_ckt', 0)
                 
@@ -254,7 +269,7 @@ class FyersAnalyzer:
         range_pos = (prev_close - micro_low) / denom
         return range_pos > 0.70
 
-    def _check_pro_confluence(self, symbol, df, prev_df, slope, is_extended, vwap_sd, pattern_desc) -> Tuple[bool, list]:
+    def _check_pro_confluence(self, symbol, df, prev_df, slope, is_extended, vwap_sd, pattern_desc, depth_data=None) -> Tuple[bool, list]:
         """Verifies secondary confirmation signals."""
         pro_conf = []
         
@@ -264,11 +279,18 @@ class FyersAnalyzer:
         
         # Tape Wall (DOM)
         try:
-            depth_data = self.fyers.depth(data={"symbol": symbol, "ohlcv_flag":"1"})
-            if 'd' in depth_data:
-                _, d_msg = self.tape_reader.analyze_depth(depth_data['d'][symbol])
+            # Use cached depth data if available
+            if depth_data:
+                _, d_msg = self.tape_reader.analyze_depth(depth_data)
                 if "Wall" in d_msg:
                     pro_conf.append(f"Dom: {d_msg}")
+            else:
+                 # Fallback (Should be rare)
+                 dp = self.fyers.depth(data={"symbol": symbol, "ohlcv_flag":"1"})
+                 if 'd' in dp:
+                     _, d_msg = self.tape_reader.analyze_depth(dp['d'][symbol])
+                     if "Wall" in d_msg:
+                        pro_conf.append(f"Dom: {d_msg}")
         except Exception:
             pass
 

@@ -112,11 +112,16 @@ class FyersScanner:
                 # Threshold: If > 30% are dead/empty, it's garbage.
                 if bad_candle_ratio > 0.3:
                     logger.warning(f"⚠️ Quality Reject: {symbol} | Bad Candles: {int(bad_candle_ratio*100)}% (Flat/Zero)")
-                    return False
+                    return False, None
                     
-                return True
+                # Return Success AND the Dataframe (Reuse Strategy)
+                # We need to construct the DF similar to analyzer.get_history for compatibility
+                cols = ["epoch", "open", "high", "low", "close", "volume"]
+                df = pd.DataFrame(response["candles"], columns=cols)
+                df['datetime'] = pd.to_datetime(df['epoch'], unit='s').dt.tz_localize('UTC').dt.tz_convert('Asia/Kolkata')
+                return True, df
                 
-            return False # Not enough data = Reject
+            return False, None # Not enough data
             
         except Exception as e:
             logger.error(f"Quality Check Error {symbol}: {e}")
@@ -170,7 +175,10 @@ class FyersScanner:
                     # 1. Gain: 6% to 18% (Avoid Circuit Traps) | 2. Volume > 100k
                     if 6.0 <= change_p <= 18.0 and volume > 100000:
                             if ltp > 5:
-                                if self.check_chart_quality(symbol):
+                                # Optimized: Get DF from quality check
+                                is_good_quality, history_df = self.check_chart_quality(symbol)
+                                
+                                if is_good_quality:
                                     tick_size = self.symbols.get(symbol, 0.05) # GET TICK
                                     oi = quote_data.get('oi', 0) # Get Open Interest
                                     
@@ -180,8 +188,9 @@ class FyersScanner:
                                         'ltp': ltp,
                                         'volume': volume,
                                         'change': change_p,
-                                        'tick_size': tick_size, # PASS TICK SIZE
-                                        'oi': oi # PASS OPEN INTEREST
+                                        'tick_size': tick_size,
+                                        'oi': oi,
+                                        'history_df': history_df # CACHED DATAFRAME
                                     })
                                 else:
                                     logger.info(f"🗑️ Skipped {symbol} (Poor Microstructure)")

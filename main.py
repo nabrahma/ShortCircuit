@@ -98,7 +98,8 @@ def main():
                 oi = cand.get('oi', 0)
                 
                 # Check Technicals
-                signal = analyzer.check_setup(symbol, ltp, oi)
+                history_df = cand.get('history_df') # Get Cached DF
+                signal = analyzer.check_setup(symbol, ltp, oi, history_df)
                 
                 if signal:
                     # C. Execute/Alert
