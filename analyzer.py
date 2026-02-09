@@ -12,6 +12,7 @@ from htf_confluence import HTFConfluence
 from god_mode_logic import GodModeAnalyst
 from tape_reader import TapeReader
 from market_profile import ProfileAnalyzer
+from ml_logger import get_ml_logger
 
 logger = logging.getLogger(__name__)
 
@@ -444,11 +445,62 @@ class FyersAnalyzer:
         sl_price = df.iloc[-2]['high'] + buffer
 
         # Logging
-        logger.info(f"✅ GOD MODE SIGNAL: {symbol} | {pattern_desc}")
+        logger.info(f"[OK] GOD MODE SIGNAL: {symbol} | {pattern_desc}")
         logger.info(f"   HTF: {htf_msg}")
         
         meta_str = f"Slope:{slope:.1f}, {wall_msg}, ATR:{atr:.2f}, {htf_msg}, {level_msg}"
         log_signal(symbol, ltp, pattern_desc, sl_price, meta_str)
+        
+        # ===== ML DATA LOGGING =====
+        try:
+            ml_logger = get_ml_logger()
+            prev_candle = df.iloc[-2]
+            
+            # Calculate candle metrics
+            body = abs(prev_candle['close'] - prev_candle['open'])
+            total_range = prev_candle['high'] - prev_candle['low']
+            upper_wick = prev_candle['high'] - max(prev_candle['open'], prev_candle['close'])
+            lower_wick = min(prev_candle['open'], prev_candle['close']) - prev_candle['low']
+            
+            # VWAP
+            vwap = df['vwap'].iloc[-1] if 'vwap' in df.columns else ltp
+            vwap_dist = ((ltp - vwap) / vwap) * 100 if vwap > 0 else 0
+            
+            # Volume
+            vol_avg = df['volume'].iloc[-20:].mean() if len(df) > 20 else df['volume'].mean()
+            rvol = prev_candle['volume'] / vol_avg if vol_avg > 0 else 1
+            
+            # Features dict
+            features = {
+                "prev_close": df.iloc[0]['open'],  # Approximation
+                "day_high": df['high'].max(),
+                "day_low": df['low'].min(),
+                "gain_pct": ((ltp - df.iloc[0]['open']) / df.iloc[0]['open']) * 100,
+                
+                "vwap": vwap,
+                "vwap_distance_pct": vwap_dist,
+                "vwap_sd": self.gm_analyst.calculate_vwap_bands(df.iloc[:-1]),
+                "vwap_slope": slope,
+                
+                "volume_current": prev_candle['volume'],
+                "volume_avg_20": vol_avg,
+                "rvol": rvol,
+                
+                "pattern": pattern_desc.split(" + ")[0],  # Base pattern only
+                "candle_body_pct": (body / total_range * 100) if total_range > 0 else 0,
+                "upper_wick_pct": (upper_wick / total_range * 100) if total_range > 0 else 0,
+                "lower_wick_pct": (lower_wick / total_range * 100) if total_range > 0 else 0,
+                
+                "num_confirmations": pattern_desc.count(",") + 1 if "+" in pattern_desc else 0,
+                "confirmations": pattern_desc.split(" + ")[1:] if " + " in pattern_desc else [],
+                
+                "nifty_trend": self.market_context.get_trend_label() if hasattr(self.market_context, 'get_trend_label') else "UNKNOWN",
+            }
+            
+            obs_id = ml_logger.log_observation(symbol, ltp, features)
+            logger.info(f"   [ML] Logged observation: {obs_id}")
+        except Exception as e:
+            logger.warning(f"   [ML] Logging error: {e}")
         
         # Record & Return
         self.signal_manager.record_signal(symbol, ltp, sl_price, pattern_desc)
