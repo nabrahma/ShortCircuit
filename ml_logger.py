@@ -73,7 +73,7 @@ FEATURE_COLUMNS = [
     "num_confirmations", # Number of pro_conf items
     "confirmations",    # JSON list of confirmations
     
-    # Luckshury Flags
+    # Orderflow Flags
     "is_round_number",  # Near psychological level
     "is_bad_high",      # Heavy sellers at high
     "is_trapped",       # Trapped positions detected

@@ -1,11 +1,11 @@
 # Phase 30: Operational Strategy Manual
 > **Last Updated:** Feb 09, 2026 | **Style:** Classical Trend Following (Sniper)
-> **Status:** BATTLE TESTED + LUCKSHURY UPGRADES
+> **Status:** BATTLE TESTED + ORDERFLOW UPGRADES
 
 ## 1. Core Philosophy: "The Sniper"
 We trade high-conviction reversals at extended levels.
 - **Goal:** Catch 1-2 major moves per day (Shorting extended stocks at Day Highs).
-- **Edge:** Multi-gate filtering + Luckshury orderflow principles.
+- **Edge:** Multi-gate filtering + Orderflow principles.
 - **Safety:** Capital Preservation > Signals.
 
 ---
@@ -68,13 +68,13 @@ Every signal must pass **8 sequential gates**. Failure at any gate = NO TRADE.
 │  ├─ OI Divergence (Price UP + OI DOWN = Fakeout)            │
 │  └─ dPOC Divergence (Value not migrating)                   │
 ├─────────────────────────────────────────────────────────────┤
-│  GATE 7: Luckshury Principles (Orderflow Edge)              │
-│  ├─ #9 Round Number: Near 100, 500, 1000... → +Conf         │
-│  ├─ #3 Large Wick: >60% wick = strong rejection → +Conf     │
-│  ├─ #2 Bad High: Heavy sellers at day high → +Conf          │
-│  ├─ #5 Trapped Positions: High vol at top + drop → +Conf    │
-│  ├─ #10 Absorption: High vol, no progress → +Conf           │
-│  ├─ #1 Bad Low: Heavy buyers at day low → **BLOCK TRADE**   │
+│  GATE 7: Orderflow Checks                                   │
+│  ├─ Round Number: Near 100, 500, 1000... → +Conf            │
+│  ├─ Large Wick: >60% wick = strong rejection → +Conf        │
+│  ├─ Bad High: Heavy sellers at day high → +Conf             │
+│  ├─ Trapped Positions: High vol at top + drop → +Conf       │
+│  ├─ Absorption: High vol, no progress → +Conf               │
+│  ├─ Bad Low: Heavy buyers at day low → **BLOCK TRADE**      │
 │  └─ Output: Confirmation list OR blocked                    │
 ├─────────────────────────────────────────────────────────────┤
 │  GATE 8: HTF Confluence (15-Minute Check)                   │
@@ -113,28 +113,22 @@ Every signal must pass **8 sequential gates**. Failure at any gate = NO TRADE.
 | 4 | Pre-Filters | `analyzer.py` | Signal Cap + Regime | Block |
 | 5 | Technical Setup | `analyzer.py` | Pattern + Extension | Skip |
 | 6 | Pro Confluence | `analyzer.py` | Confirmation stack | Refuse |
-| 7 | Luckshury Checks | `tape_reader.py` | Orderflow | Block (Bad Low) |
+| 7 | Orderflow Checks | `tape_reader.py` | Orderflow | Block (Bad Low) |
 | 8 | HTF Confluence | `htf_confluence.py` | 15m alignment | Block |
 | 9 | Circuit Guard | `trade_manager.py` | UC proximity | Block |
 
 ---
 
-## 4. Luckshury Principles Implemented
+## 4. Orderflow Principles Implemented
 
-Based on Luckshury's 10 orderflow rules:
-
-| # | Principle | Implemented | Effect |
-|---|-----------|-------------|--------|
-| 1 | Too much buying at low = bad low | ✅ `detect_bad_low()` | **BLOCKS trade** |
-| 2 | Too much selling at high = bad high | ✅ `detect_bad_high()` | Adds confirmation |
-| 3 | Large wicks get partially filled | ✅ `detect_large_wick()` | Adds confirmation |
-| 4 | Delta ≠ positioning, OI + delta does | ⚠️ Partial (OI only) | OI Divergence |
-| 5 | Trapped positions fuel reversals | ✅ `detect_trapped_positions()` | Adds confirmation |
-| 6 | Tight candles + one-sided delta | ⚠️ Partial | Absorption detection |
-| 7 | Aggressive selling in range | ❌ Need volume profile | - |
-| 8 | OI + liquidations identify zones | ⚠️ Partial (OI only) | OI Divergence |
-| 9 | Round numbers attract liquidity | ✅ `check_round_number()` | Adds confirmation |
-| 10 | Aggression without progression | ✅ `detect_aggression_no_progress()` | Adds confirmation |
+| Principle | Implemented | Effect |
+|-----------|-------------|--------|
+| Too much buying at low = bad low | ✅ `detect_bad_low()` | **BLOCKS trade** |
+| Too much selling at high = bad high | ✅ `detect_bad_high()` | Adds confirmation |
+| Large wicks get partially filled | ✅ `detect_large_wick()` | Adds confirmation |
+| Trapped positions fuel reversals | ✅ `detect_trapped_positions()` | Adds confirmation |
+| Round numbers attract liquidity | ✅ `check_round_number()` | Adds confirmation |
+| Aggression without progression | ✅ `detect_aggression_no_progress()` | Adds confirmation |
 
 ---
 
@@ -170,7 +164,7 @@ Max Position = 10% of Capital
 | `main.py` | Entry point, orchestrates scan-analyze loop |
 | `scanner.py` | Gates 1-3: Finds momentum candidates |
 | `analyzer.py` | Gates 4-8: Validates setups with confluence |
-| `tape_reader.py` | Gate 7: Luckshury orderflow checks |
+| `tape_reader.py` | Gate 7: Orderflow checks |
 | `htf_confluence.py` | Gate 8: 15-minute structure check |
 | `trade_manager.py` | Gate 9 + Execution: Places orders safely |
 | `focus_engine.py` | Live tracking: Dynamic SL/TP management |
@@ -179,6 +173,7 @@ Max Position = 10% of Capital
 | `god_mode_logic.py` | VWAP, RSI, Fibonacci calculations |
 | `market_profile.py` | POC, VAH, dPOC calculations |
 | `telegram_bot.py` | Alerts and manual trade confirmation |
+| `ml_logger.py` | ML data collection for training |
 
 ---
 
@@ -202,7 +197,7 @@ Max Position = 10% of Capital
 ✅ 45-min Cooldown
 ✅ HTF Confirmation (15m)
 ✅ Circuit Guard (UC proximity)
-✅ Luckshury Bad Low Block
+✅ Orderflow Bad Low Block
 ✅ OI Divergence
 ✅ dPOC Divergence
 ❌ Time Filter (REMOVED - stocks can hover then move)
@@ -212,4 +207,4 @@ Max Position = 10% of Capital
 
 # Appendix: The Original Microstructure Thesis
 
-[See sections below for detailed theory on Auction Market Theory, Order Flow, and DOM analysis...]
+[See original Strategy.md for detailed theory on Auction Market Theory, Order Flow, and DOM analysis...]

@@ -330,7 +330,7 @@ class FyersAnalyzer:
         is_dpoc_div, dpoc_msg = self._check_dpoc_divergence(symbol, ltp, df)
         if is_dpoc_div: pro_conf.append(dpoc_msg)
         
-        # ===== LUCKSHURY PRINCIPLES =====
+        # ===== ORDERFLOW PRINCIPLES =====
         try:
             # #9: Round Number
             is_round, round_msg = self.tape_reader.check_round_number(ltp)
@@ -342,23 +342,23 @@ class FyersAnalyzer:
             
             # #2: Bad High (good for shorts)
             is_bad_high, bh_msg = self.tape_reader.detect_bad_high(df, depth_data)
-            if is_bad_high: pro_conf.append(f"[LUCK] {bh_msg}")
+            if is_bad_high: pro_conf.append(f"[OF] {bh_msg}")
             
             # #1: Bad Low (AVOID shorting)
             is_bad_low, bl_msg = self.tape_reader.detect_bad_low(df, depth_data)
             if is_bad_low:
-                logger.info(f"BLOCKED by Luckshury: {symbol} - {bl_msg}")
+                logger.info(f"BLOCKED by Orderflow: {symbol} - {bl_msg}")
                 return False, []  # Block the trade!
             
             # #5: Trapped Positions
             is_trapped, trap_msg = self.tape_reader.detect_trapped_positions(df)
-            if is_trapped: pro_conf.append(f"[LUCK] {trap_msg}")
+            if is_trapped: pro_conf.append(f"[OF] {trap_msg}")
             
             # #10: Aggression without Progress
             is_absorb, absorb_msg = self.tape_reader.detect_aggression_no_progress(df)
-            if is_absorb: pro_conf.append(f"[LUCK] {absorb_msg}")
+            if is_absorb: pro_conf.append(f"[OF] {absorb_msg}")
         except Exception as e:
-            logger.warning(f"Luckshury check error: {e}")
+            logger.warning(f"Orderflow check error: {e}")
 
         # Validation Logic logic
         if not is_extended and "TAPE" not in pattern_desc:

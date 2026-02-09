@@ -120,11 +120,11 @@ class TapeReader:
             logger.error(f"Depth Error: {e}")
             return 0, "Error"
 
-    # ===== LUCKSHURY PRINCIPLES =====
+    # ===== ORDERFLOW PRINCIPLES =====
 
     def check_round_number(self, ltp):
         """
-        Luckshury #9: Round numbers attract liquidity for reversals.
+        Orderflow: Round numbers attract liquidity for reversals.
         Checks if price is near a psychological level (100, 500, 1000, etc.)
         """
         if ltp <= 0:
@@ -154,7 +154,7 @@ class TapeReader:
 
     def detect_large_wick(self, df, lookback=5):
         """
-        Luckshury #3: Large wicks frequently get partially filled.
+        Orderflow: Large wicks frequently get partially filled.
         Detects if recent candle has large upper wick (rejection) that may get filled.
         """
         if df is None or len(df) < lookback:
@@ -181,7 +181,7 @@ class TapeReader:
 
     def detect_bad_high(self, df, depth_data=None):
         """
-        Luckshury #2: Too much selling at a high = bad high.
+        Orderflow: Too much selling at a high = bad high.
         Detects if we're at day high with heavy sell pressure (good short zone).
         """
         if df is None or len(df) < 10:
@@ -217,7 +217,7 @@ class TapeReader:
 
     def detect_bad_low(self, df, depth_data=None):
         """
-        Luckshury #1: Too much buying at a low = bad low.
+        Orderflow: Too much buying at a low = bad low.
         Detects if we're at day low with heavy buy pressure (avoid shorting here).
         """
         if df is None or len(df) < 10:
@@ -253,7 +253,7 @@ class TapeReader:
 
     def detect_trapped_positions(self, df, lookback=10):
         """
-        Luckshury #5: Trapped positions fuel best reversals.
+        Orderflow: Trapped positions fuel best reversals.
         Detects SFP-like patterns where buyers got trapped at highs.
         """
         if df is None or len(df) < lookback:
@@ -284,7 +284,7 @@ class TapeReader:
 
     def detect_aggression_no_progress(self, df, lookback=5):
         """
-        Luckshury #10: Aggression without progression = absorption.
+        Orderflow: Aggression without progression = absorption.
         High volume but price going nowhere = hidden limit order absorbing.
         """
         if df is None or len(df) < lookback + 5:
