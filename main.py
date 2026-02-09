@@ -31,7 +31,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 def main():
-    logger.info("--- ⚡ Starting ShortCircuit (Fyers Edition) ---")
+    logger.info("--- [BOT] Starting ShortCircuit (Fyers Edition) ---")
 
     # 1. Authentication
     fyers_conn = FyersConnect()
@@ -52,7 +52,7 @@ def main():
     t_bot.daemon = True
     t_bot.start()
 
-    logger.info("✅ System Initialized. Loop Starting...")
+    logger.info("[OK] System Initialized. Loop Starting...")
     
     # 3.1 Send Motivation
     try:
@@ -65,7 +65,7 @@ def main():
     
     while True:
         try:
-            logger.info("📡 Scanning Market...")
+            logger.info("[SCAN] Scanning Market...")
             start_time = time.time()
             
             # CHECK TIME FOR AUTO-EXIT
@@ -74,12 +74,12 @@ def main():
             now = datetime.datetime.now()
             current_time = now.strftime("%H:%M")
             if current_time >= config.SQUARE_OFF_TIME:
-                logger.warning(f"⏰ Market Close Time ({current_time}). Initiating Square-off.")
+                logger.warning(f"[TIME] Market Close Time ({current_time}). Initiating Square-off.")
                 msg = trade_manager.close_all_positions()
                 
                 # Notify Telegram
                 try:
-                    bot.bot.send_message(bot.chat_id, f"🛑 **MARKET CLOSED**\n\n{msg}\n\nSystem Shutdown. See you tomorrow! 🦅", parse_mode="Markdown")
+                    bot.bot.send_message(bot.chat_id, f"[STOP] **MARKET CLOSED**\n\n{msg}\n\nSystem Shutdown. See you tomorrow!", parse_mode="Markdown")
                 except:
                     pass
                     

@@ -46,9 +46,9 @@ class ShortCircuitBot:
         import random
         quote = random.choice(self.quotes)
         msg = (
-            f"☀️ *Good Morning, Trader!* 🦅\n\n"
+            f"Good Morning, Trader!\n\n"
             f"_{quote}_\n\n"
-            f"⚡ System Online & Scanning..."
+            f"[BOT] System Online & Scanning..."
         )
         try:
             self.bot.send_message(self.chat_id, msg, parse_mode="Markdown")
@@ -79,11 +79,11 @@ class ShortCircuitBot:
     def register_handlers(self):
         @self.bot.message_handler(commands=['start', 'help'])
         def send_welcome(message):
-            self.bot.reply_to(message, "⚡ ShortCircuit (Fyers Edition) Ready.\nCommands:\n/status - Check Bot State\n/auto on - Enable Auto Trading\n/auto off - Disable Auto Trading")
+            self.bot.reply_to(message, "[BOT] ShortCircuit (Fyers Edition) Ready.\nCommands:\n/status - Check Bot State\n/auto on - Enable Auto Trading\n/auto off - Disable Auto Trading")
 
         @self.bot.message_handler(commands=['status'])
         def status(message):
-            mode = "🟢 AUTO-TRADE" if self.trade_manager.auto_trade_enabled else "🟡 MANUAL-ALERT"
+            mode = "[ON] AUTO-TRADE" if self.trade_manager.auto_trade_enabled else "[OFF] MANUAL-ALERT"
             self.bot.reply_to(message, f"Status Report:\nMode: {mode}\nScanner: Active")
 
         @self.bot.message_handler(commands=['auto'])
@@ -93,10 +93,10 @@ class ShortCircuitBot:
                 cmd = args[1].lower()
                 if cmd == 'on':
                     self.trade_manager.set_auto_trade(True)
-                    self.bot.reply_to(message, "🚀 Auto-Trading ENABLED. Be careful.")
+                    self.bot.reply_to(message, "[EXEC] Auto-Trading ENABLED. Be careful.")
                 elif cmd == 'off':
                     self.trade_manager.set_auto_trade(False)
-                    self.bot.reply_to(message, "🛡️ Auto-Trading DISABLED. Switch to Manual Alerts.")
+                    self.bot.reply_to(message, "[SAFE] Auto-Trading DISABLED. Switch to Manual Alerts.")
                 else:
                     self.bot.reply_to(message, "Usage: /auto on OR /auto off")
             else:
@@ -130,15 +130,15 @@ class ShortCircuitBot:
             trade_id = self.journal.log_entry(symbol, qty, entry_price, "Manual-Telegram")
             
             if trade_id:
-                self.bot.answer_callback_query(call.id, f"✅ Trade Logged! ID: {trade_id}")
+                self.bot.answer_callback_query(call.id, f"[OK] Trade Logged! ID: {trade_id}")
                 
                 # Update Message to "Tracking Mode"
                 new_text = call.message.text
-                new_text += f"\n\n🦅 **ENTRY LOGGED** @ {entry_price}\nStarting Focus Engine..."
+                new_text += f"\n\n[SFP] **ENTRY LOGGED** @ {entry_price}\nStarting Focus Engine..."
                 
                 # Replace Button with CLOSE
                 markup = types.InlineKeyboardMarkup()
-                btn_close = types.InlineKeyboardButton("🔴 Close Trade", callback_data=f"EXIT_{trade_id}")
+                btn_close = types.InlineKeyboardButton("[X] Close Trade", callback_data=f"EXIT_{trade_id}")
                 markup.add(btn_close)
                 
                 # Edit first to acknowledge entry
@@ -150,7 +150,7 @@ class ShortCircuitBot:
                 self.focus_engine.start_focus(symbol, entry_price, entry_price * 1.01, message_id=sent_msg.message_id, trade_id=trade_id)
                 
             else:
-                 self.bot.answer_callback_query(call.id, "❌ Error logging trade.")
+                 self.bot.answer_callback_query(call.id, "[FAIL] Error logging trade.")
 
         # 2. EXIT TRADE
         elif call.data.startswith("EXIT_"):
@@ -181,23 +181,23 @@ class ShortCircuitBot:
             if result:
                 pnl = result['pnl']
                 pct = result['pnl_pct']
-                icon = "🟢" if pnl > 0 else "🔴"
+                icon = "[+]" if pnl > 0 else "[-]"
                 
                 self.bot.answer_callback_query(call.id, f"Trade Closed. P&L: {pnl}")
                 
                 # Send Receipt
-                receipt = f"🧾 **Trade Closed**\n"
-                receipt += f"🆔 `{trade_id}`\n"
-                receipt += f"📉 Entry: {result['entry']}\n"
-                receipt += f"📈 Exit: {result['exit']}\n"
-                receipt += f"{icon} **P&L**: ₹{pnl:.2f} ({pct:.2f}%)"
+                receipt = f"[RECEIPT] **Trade Closed**\n"
+                receipt += f"ID: `{trade_id}`\n"
+                receipt += f"Entry: {result['entry']}\n"
+                receipt += f"Exit: {result['exit']}\n"
+                receipt += f"{icon} **P&L**: Rs.{pnl:.2f} ({pct:.2f}%)"
                 
                 self.bot.send_message(self.chat_id, receipt, parse_mode="Markdown")
                 
                 # Remove Button to prevent double close
                 self.bot.edit_message_reply_markup(chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=None)
             else:
-                self.bot.answer_callback_query(call.id, "❌ Error closing trade (ID not found?)")
+                self.bot.answer_callback_query(call.id, "[FAIL] Error closing trade (ID not found?)")
 
                 
     def prettify_pattern(self, raw_pat):
@@ -219,7 +219,7 @@ class ShortCircuitBot:
              # Or just use the alert message ID?
              try:
                  # Send a separate "Tracking" dashboard message
-                 track_msg = self.bot.send_message(self.chat_id, "📡 Initializing Auto-Trail...")
+                 track_msg = self.bot.send_message(self.chat_id, "[SCAN] Initializing Auto-Trail...")
                  
                  symbol = trade_result['symbol']
                  entry = float(trade_result['ltp'])
@@ -236,7 +236,7 @@ class ShortCircuitBot:
             
         elif status == "ERROR":
              # Notify User of Failure
-             err_msg = f"❌ **AUTO-TRADE FAILED** ❌\n\nSymbol: `{trade_result.get('msg', 'Unknown')}`\nCheck Logs."
+             err_msg = f"[FAIL] **AUTO-TRADE FAILED**\n\nSymbol: `{trade_result.get('msg', 'Unknown')}`\nCheck Logs."
              self.bot.send_message(self.chat_id, err_msg, parse_mode="Markdown")
             
         elif status == "MANUAL_WAIT":
@@ -247,21 +247,21 @@ class ShortCircuitBot:
             sl = trade_result['stop_loss']
             
             # Rich Format
-            msg = f"🚨 *GOD MODE SIGNAL* 🚨\n({config.CAPITAL} INR Scalp)\n\n"
+            msg = f"[SIGNAL] *GOD MODE SIGNAL*\n({config.CAPITAL} INR Scalp)\n\n"
             msg += f"`{symbol}`\n" # Monospace for Copy
             msg += f"_(Tap to Copy)_\n\n"
             
-            msg += f"📊 *Why*: {pattern_pretty}\n"
-            msg += f"💰 *Size*: {qty} Qty\n"
-            msg += f"🏷️ *Price*: {ltp}\n"
-            msg += f"🛑 *Stop*: {sl} (Auto-Calc)\n\n"
+            msg += f"[WHY]: {pattern_pretty}\n"
+            msg += f"[SIZE]: {qty} Qty\n"
+            msg += f"[PRICE]: {ltp}\n"
+            msg += f"[STOP]: {sl} (Auto-Calc)\n\n"
             
-            msg += f"⚡ *Action Required: Verify Chart & Decide*"
+            msg += f"[ACTION] *Verify Chart & Decide*"
 
             # Interactive Buttons
             from telebot import types
             markup = types.InlineKeyboardMarkup()
-            btn_enter = types.InlineKeyboardButton("🚀 ENTER TRADE", callback_data=f"FOCUS_{trade_result['symbol']}")
+            btn_enter = types.InlineKeyboardButton("[GO] ENTER TRADE", callback_data=f"FOCUS_{trade_result['symbol']}")
             markup.add(btn_enter)
             
             try:
@@ -270,5 +270,5 @@ class ShortCircuitBot:
                 logger.error(f"Failed to send Manual Alert: {e}")
 
     def start_polling(self):
-        logger.info("🤖 Telegram Bot Listening...")
+        logger.info("[BOT] Telegram Bot Listening...")
         self.bot.infinity_polling()

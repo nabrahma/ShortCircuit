@@ -175,7 +175,7 @@ class FyersAnalyzer:
 
             if valid_signal:
                 valid_signal, pro_conf_msgs = self._check_pro_confluence(
-                    symbol, df, prev_df, slope, is_extended, vwap_sd, pattern_desc, depth_data
+                    symbol, df, prev_df, slope, is_extended, vwap_sd, pattern_desc, depth_data, ltp, oi
                 )
                 if pro_conf_msgs:
                     pattern_desc += f" + {', '.join(pro_conf_msgs)}"
@@ -186,7 +186,7 @@ class FyersAnalyzer:
         return None
 
     def _check_filters(self, symbol: str) -> bool:
-        """Runs pre-analysis checks: Signal Manager, Market Regime, Time."""
+        """Runs pre-analysis checks: Signal Manager, Market Regime."""
         # 1. Signal Manager
         can_signal, reason = self.signal_manager.can_signal(symbol)
         if not can_signal:
@@ -198,13 +198,8 @@ class FyersAnalyzer:
         if not allow_short:
             logger.info(f"BLOCKED by Market Regime: {symbol} - {reason}")
             return False
-            
-        # 3. Time of Day
-        time_ok, reason = self.market_context.is_favorable_time_for_shorts()
-        if not time_ok:
-            logger.info(f"BLOCKED by Time Filter: {symbol} - {reason}")
-            return False
-            
+        
+        # Time filter REMOVED per user request (stocks may hover, then move later)
         return True
 
     def _enrich_dataframe(self, df: pd.DataFrame):
@@ -269,7 +264,7 @@ class FyersAnalyzer:
         range_pos = (prev_close - micro_low) / denom
         return range_pos > 0.70
 
-    def _check_pro_confluence(self, symbol, df, prev_df, slope, is_extended, vwap_sd, pattern_desc, depth_data=None) -> Tuple[bool, list]:
+    def _check_pro_confluence(self, symbol, df, prev_df, slope, is_extended, vwap_sd, pattern_desc, depth_data=None, ltp=0, oi=0) -> Tuple[bool, list]:
         """Verifies secondary confirmation signals."""
         pro_conf = []
         
@@ -296,8 +291,8 @@ class FyersAnalyzer:
 
         # Technicals
         if slope < 5: pro_conf.append("VWAP Flat")
-        if self.gm_analyst.check_rsi_divergence(prev_df): pro_conf.append("RSI Div 📉")
-        if is_extended: pro_conf.append(f"VWAP +{vwap_sd:.1f}SD 📏")
+        if self.gm_analyst.check_rsi_divergence(prev_df): pro_conf.append("RSI Div [DOWN]")
+        if is_extended: pro_conf.append(f"VWAP +{vwap_sd:.1f}SD [EXT]")
 
         # Fibonacci
         fibs = self.gm_analyst.calculate_fib_levels(prev_df)
@@ -307,7 +302,7 @@ class FyersAnalyzer:
                 if name == 'trend': continue
                 if abs(setup_high - level) <= (level * 0.001):
                     if fibs.get('trend') == 'DOWN' and df.iloc[-2]['close'] < level:
-                        pro_conf.append(f"{name} Reject 📐")
+                        pro_conf.append(f"{name} Reject [FIB]")
                         break
         
         # RVOL & Vacuum
@@ -318,9 +313,9 @@ class FyersAnalyzer:
                 rvol = setup_vol / avg_vol if avg_vol > 0 else 0
                 
                 if rvol > 2.0:
-                    pro_conf.append(f"RVOL {rvol:.1f}x 🔊")
+                    pro_conf.append(f"RVOL {rvol:.1f}x [VOL]")
                 elif rvol < 0.5 and is_extended:
-                    pro_conf.append(f"Vacuum/Exhaustion 🕯️") # Phase 27
+                    pro_conf.append(f"Vacuum/Exhaustion [EXHT]") # Phase 27
         except Exception:
             pass
             
@@ -333,6 +328,36 @@ class FyersAnalyzer:
         # 2. dPOC Divergence (Value Migration)
         is_dpoc_div, dpoc_msg = self._check_dpoc_divergence(symbol, ltp, df)
         if is_dpoc_div: pro_conf.append(dpoc_msg)
+        
+        # ===== LUCKSHURY PRINCIPLES =====
+        try:
+            # #9: Round Number
+            is_round, round_msg = self.tape_reader.check_round_number(ltp)
+            if is_round: pro_conf.append(f"Round: {round_msg}")
+            
+            # #3: Large Wick (potential fill)
+            is_wick, wick_msg = self.tape_reader.detect_large_wick(df)
+            if is_wick: pro_conf.append(f"Wick: {wick_msg}")
+            
+            # #2: Bad High (good for shorts)
+            is_bad_high, bh_msg = self.tape_reader.detect_bad_high(df, depth_data)
+            if is_bad_high: pro_conf.append(f"[LUCK] {bh_msg}")
+            
+            # #1: Bad Low (AVOID shorting)
+            is_bad_low, bl_msg = self.tape_reader.detect_bad_low(df, depth_data)
+            if is_bad_low:
+                logger.info(f"BLOCKED by Luckshury: {symbol} - {bl_msg}")
+                return False, []  # Block the trade!
+            
+            # #5: Trapped Positions
+            is_trapped, trap_msg = self.tape_reader.detect_trapped_positions(df)
+            if is_trapped: pro_conf.append(f"[LUCK] {trap_msg}")
+            
+            # #10: Aggression without Progress
+            is_absorb, absorb_msg = self.tape_reader.detect_aggression_no_progress(df)
+            if is_absorb: pro_conf.append(f"[LUCK] {absorb_msg}")
+        except Exception as e:
+            logger.warning(f"Luckshury check error: {e}")
 
         # Validation Logic logic
         if not is_extended and "TAPE" not in pattern_desc:

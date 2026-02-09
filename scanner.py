@@ -61,8 +61,9 @@ class FyersScanner:
         """
         Microstructure Filter: Rejects 'gappy' or 'illiquid' charts.
         Logic: Checks last 60 mins (1min candles).
-        - Rejects if > 30% candles have 0 volume.
-        - Rejects if > 40% candles are 'Flat' (Open == Close) (Dead movement).
+        - Rejects if > 50% candles have 0 volume (truly illiquid).
+        - Rejects if > 50% candles are 'Doji' (body < 0.1% of price).
+        - PASSES if insufficient data (don't reject liquid stocks due to API lag).
         """
         try:
             # Get 1min history
@@ -79,9 +80,6 @@ class FyersScanner:
                 "cont_flag": "1"
             }
             
-            # Use history API (needs access to history method, assumed available in fyers instance or via direct call)
-            # FyersConnect usually has .history(data=data)
-            # If not available on self.fyers, we might need a workaround. Assuming it exists.
             response = self.fyers.history(data=data)
             
             # Check Time: If < 10:00 AM, we won't have 30 candles (Market opens 09:15)
@@ -89,43 +87,47 @@ class FyersScanner:
             now_dt = datetime.datetime.fromtimestamp(to_date)
             is_early_morning = now_dt.hour < 10
             
-            min_candles = 5 if is_early_morning else 30
+            min_candles = 5 if is_early_morning else 15  # Reduced from 30 to 15
             
             if 'candles' in response and len(response['candles']) >= min_candles:
                 candles = response['candles'] # [[ts, o, h, l, c, v], ...]
                 
                 total = len(candles)
                 zero_vol = 0
-                flat_candles = 0 
+                doji_candles = 0 
                 
                 for c in candles:
                     o, h, l, c_price, v = c[1], c[2], c[3], c[4], c[5]
                     
                     if v == 0:
                         zero_vol += 1
+                    
+                    # Doji = body is < 0.1% of price (virtually no movement)
+                    body_size = abs(o - c_price)
+                    if o > 0 and (body_size / o) < 0.001:
+                        doji_candles += 1
                         
-                    if o == c_price and h == l: # Completely dead candle
-                        flat_candles += 1
-                        
-                bad_candle_ratio = (zero_vol + flat_candles) / total
+                bad_candle_ratio = (zero_vol + doji_candles) / total
                 
-                # Threshold: If > 30% are dead/empty, it's garbage.
-                if bad_candle_ratio > 0.3:
-                    logger.warning(f"⚠️ Quality Reject: {symbol} | Bad Candles: {int(bad_candle_ratio*100)}% (Flat/Zero)")
+                # Threshold: If > 50% are dead/doji, it's choppy garbage.
+                if bad_candle_ratio > 0.5:
+                    logger.warning(f"[SKIP] Quality Reject: {symbol} | Bad Candles: {int(bad_candle_ratio*100)}% (Doji/Zero)")
                     return False, None
                     
                 # Return Success AND the Dataframe (Reuse Strategy)
-                # We need to construct the DF similar to analyzer.get_history for compatibility
                 cols = ["epoch", "open", "high", "low", "close", "volume"]
                 df = pd.DataFrame(response["candles"], columns=cols)
                 df['datetime'] = pd.to_datetime(df['epoch'], unit='s').dt.tz_localize('UTC').dt.tz_convert('Asia/Kolkata')
                 return True, df
-                
-            return False, None # Not enough data
+            
+            # CHANGED: If insufficient data, PASS the stock (don't reject)
+            # We assume liquid stocks may have API delays
+            logger.info(f"[INFO] {symbol}: Insufficient candle data ({len(response.get('candles', []))}), allowing...")
+            return True, None  # PASS with no cached DF
             
         except Exception as e:
             logger.error(f"Quality Check Error {symbol}: {e}")
-            return False # Fail safe
+            return True, None  # PASS on error (fail-open)
 
     def scan_market(self):
         """
@@ -182,7 +184,7 @@ class FyersScanner:
                                     tick_size = self.symbols.get(symbol, 0.05) # GET TICK
                                     oi = quote_data.get('oi', 0) # Get Open Interest
                                     
-                                    logger.info(f"🔥 CANDIDATE: {symbol} | Gain: {change_p}% | Tick: {tick_size} | OI: {oi}")
+                                    logger.info(f"[CANDIDATE] {symbol} | Gain: {change_p}% | Tick: {tick_size} | OI: {oi}")
                                     filtered_candidates.append({
                                         'symbol': symbol,
                                         'ltp': ltp,
@@ -193,7 +195,7 @@ class FyersScanner:
                                         'history_df': history_df # CACHED DATAFRAME
                                     })
                                 else:
-                                    logger.info(f"🗑️ Skipped {symbol} (Poor Microstructure)")
+                                    logger.info(f"[SKIP] {symbol} (Poor Microstructure)")
             except Exception as e:
                 logger.error(f"Batch Error: {e}")
                 

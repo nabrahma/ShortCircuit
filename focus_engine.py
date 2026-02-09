@@ -43,7 +43,7 @@ class FocusEngine:
         }
         
         self.is_running = True
-        logger.info(f"🎯 FOCUS MODE ACTIVATED: {symbol} | Entry: {entry_price} | ID: {trade_id}")
+        logger.info(f"[FOCUS] FOCUS MODE ACTIVATED: {symbol} | Entry: {entry_price} | ID: {trade_id}")
         
         # Send Initial Dashboard
         self.update_dashboard(initial=True)
@@ -126,7 +126,7 @@ class FocusEngine:
             
         # 1. Check SL HIT (Hard or Trailing)
         if ltp >= current_sl:
-            logger.warning(f"🛑 SL HIT: {ltp} (Stop: {current_sl})")
+            logger.warning(f"[STOP] SL HIT: {ltp} (Stop: {current_sl})")
             trade['status'] = 'SL HIT'
             
             # EXECUTE EXIT
@@ -151,7 +151,7 @@ class FocusEngine:
                 
                 # Notify User
                 if self.bot and config.TELEGRAM_CHAT_ID:
-                    self.bot.send_message(config.TELEGRAM_CHAT_ID, f"🛑 **STOP LOSS TRIGGERED**\n\n{trade['symbol']} hit stop at {ltp}.\nPosition Closed.")
+                    self.bot.send_message(config.TELEGRAM_CHAT_ID, f"[STOP] **STOP LOSS TRIGGERED**\n\n{trade['symbol']} hit stop at {ltp}.\nPosition Closed.")
                     
             except Exception as e:
                 logger.error(f"Failed to Auto-Exit on SL: {e}")
@@ -183,19 +183,19 @@ class FocusEngine:
         if not trade['sl_at_be'] and pnl_points >= risk:
             trade['sl'] = entry
             trade['sl_at_be'] = True
-            logger.info("✅ Moves to BreakEven")
+            logger.info("[OK] Moves to BreakEven")
 
         # 3. TP2 (Trailing) Logic
         if not trade['trailing_active'] and pnl_points >= (2 * risk):
             trade['trailing_active'] = True
-            logger.info("🚀 Trailing Activated")
+            logger.info("[EXEC] Trailing Activated")
             
         # 4. Dynamic Trailing
         if trade['trailing_active']:
             potential_sl = ltp + (risk * 0.5) 
             if potential_sl < current_sl:
                 trade['sl'] = potential_sl
-                logger.info(f"⬇️ Trail Tightened to {potential_sl}")
+                logger.info(f"[TRAIL] Trail Tightened to {potential_sl}")
 
 
     def update_dynamic_constraints(self, ltp, day_high, vwap):
@@ -228,36 +228,36 @@ class FocusEngine:
         # PnL Calc
         pnl_points = entry - ltp
         pnl_cash = pnl_points * t.get('qty', 1) 
-        emoji = "🟢" if pnl_points > 0 else "🔴"
+        emoji = "[+]" if pnl_points > 0 else "[-]"
         
         # Orderflow Indicators
         ba_ratio = t.get('bid_ask_ratio', 1.0)
-        ba_sentiment = "Bearish 🐻" if ba_ratio < 0.8 else "Bullish 🐂" if ba_ratio > 1.2 else "Neutral ⚖️"
+        ba_sentiment = "Bearish [BEAR]" if ba_ratio < 0.8 else "Bullish [BULL]" if ba_ratio > 1.2 else "Neutral [--]"
         
         vwap_dist = t.get('vwap_dist', 0)
-        vwap_status = "Extended 🚀" if vwap_dist > 1.5 else "Mean Rev 🧘"
+        vwap_status = "Extended [EXT]" if vwap_dist > 1.5 else "Mean Rev [MR]"
         
         # Tape Alert
-        tape_msg = t.get('tape_alert', "Neutral ⚖️")
+        tape_msg = t.get('tape_alert', "Neutral [--]")
         
         msg = (
-            f"🎯 *LIVE FOCUS: {t['symbol']}* 🎯\n"
-            f"-----------------------------\n"
-            f"💰 P&L: *₹{pnl_cash:.2f}* {emoji} ({pnl_points:.2f} pts)\n"
-            f"📉 LTP: *{ltp}* (Entry: {entry})\n"
-            f"-----------------------------\n"
-            f"📼 *Tape Reading (Quant)*\n"
-            f"• Action: *{tape_msg}*\n"
-            f"• Sentiment: *{ba_sentiment}* ({ba_ratio})\n"
-            f"-----------------------------\n"
-            f"📊 *Stats*\n"
-            f"• VWAP Dist: *{vwap_dist}%* ({vwap_status})\n"
-            f"• Vol Spike: {'⚠️ YES' if t.get('vol_spike') else 'No'}\n"
-            f"-----------------------------\n"
-            f"🛡️ *Smart Constraints*\n"
-            f"• Dyn SL: *{t.get('dynamic_sl', 0)}* (Sugg)\n"
-            f"• Dyn TP: *{t.get('dynamic_tp', 0)}* (Liq)\n"
-            f"-----------------------------\n"
+            f"[FOCUS] *LIVE FOCUS: {t['symbol']}*\\n"
+            f"-----------------------------\\n"
+            f"P&L: *Rs.{pnl_cash:.2f}* {emoji} ({pnl_points:.2f} pts)\\n"
+            f"LTP: *{ltp}* (Entry: {entry})\\n"
+            f"-----------------------------\\n"
+            f"*Tape Reading (Quant)*\\n"
+            f"- Action: *{tape_msg}*\\n"
+            f"- Sentiment: *{ba_sentiment}* ({ba_ratio})\\n"
+            f"-----------------------------\\n"
+            f"*Stats*\\n"
+            f"- VWAP Dist: *{vwap_dist}%* ({vwap_status})\\n"
+            f"- Vol Spike: {'[WARN] YES' if t.get('vol_spike') else 'No'}\\n"
+            f"-----------------------------\\n"
+            f"*Smart Constraints*\\n"
+            f"- Dyn SL: *{t.get('dynamic_sl', 0)}* (Sugg)\\n"
+            f"- Dyn TP: *{t.get('dynamic_tp', 0)}* (Liq)\\n"
+            f"-----------------------------\\n"
             f"Updated: {datetime.datetime.now().strftime('%H:%M:%S')}"
         )
         
@@ -273,7 +273,7 @@ class FocusEngine:
         # trade_id is needed for the callback.
         # We need to store trade_id in active_trade
         trade_id = t.get('trade_id', 'UNKNOWN')
-        btn = types.InlineKeyboardButton("🔴 Close Trade & Capture", callback_data=f"EXIT_{trade_id}")
+        btn = types.InlineKeyboardButton("[X] Close Trade & Capture", callback_data=f"EXIT_{trade_id}")
         markup.add(btn)
         
         try:
@@ -300,7 +300,7 @@ class FocusEngine:
         
         # Phase 20: SFP Watch Trigger
         if reason == "SL_HIT" and trade:
-            logger.info("🦅 SFP WATCH ACTIVATED: Monitoring for Fakeout...")
+            logger.info("[SFP] SFP WATCH ACTIVATED: Monitoring for Fakeout...")
             # Start SFP Thread
             threading.Thread(target=self.sfp_watch_loop, args=(trade,), daemon=True).start()
 
@@ -328,7 +328,7 @@ class FocusEngine:
                     
                     # LOGIC: If Price breaks back BELOW Entry (Short Logic)
                     if ltp < entry_price:
-                        logger.info(f"⚠️ SFP TRIGGERED: {symbol} is back below {entry_price}")
+                        logger.info(f"[WARN] SFP TRIGGERED: {symbol} is back below {entry_price}")
                         self.send_sfp_alert(trade, ltp)
                         return # Stop Watching
                         
@@ -347,12 +347,12 @@ class FocusEngine:
         entry = trade['entry']
         
         msg = (
-            f"⚠️ **FAKE OUT DETECTED! (SFP)** ⚠️\n\n"
-            f"🦅 **{symbol}** trapped buyers!\n"
+            f"[WARN] **FAKE OUT DETECTED! (SFP)**\n\n"
+            f"[SFP] **{symbol}** trapped buyers!\n"
             f"Price is back below Entry.\n\n"
-            f"📉 LTP: *{ltp}*\n"
-            f"🧱 Key Level: *{entry}*\n\n"
-            f"⚡ **RE-ENTER SHORT NOW** ⚡"
+            f"LTP: *{ltp}*\n"
+            f"Key Level: *{entry}*\n\n"
+            f"[ACTION] **RE-ENTER SHORT NOW**"
         )
         
         # Send as NEW Message (High Importance)

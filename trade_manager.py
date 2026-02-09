@@ -92,11 +92,11 @@ class TradeManager:
                     
                     # FINAL CHECK
                     if not sl_placed:
-                        logger.critical(f"🛑 ALL 3 SL ATTEMPTS FAILED for {symbol}. Triggering EMERGENCY EXIT.")
+                        logger.critical(f"[STOP] ALL 3 SL ATTEMPTS FAILED for {symbol}. Triggering EMERGENCY EXIT.")
                         self.emergency_exit(symbol, qty)
                         return {
                             "status": "ERROR",
-                            "msg": f"❌ SL Failed (x3). Emergency Exit Triggered for {symbol}."
+                            "msg": f"[FAIL] SL Failed (x3). Emergency Exit Triggered for {symbol}."
                         }
 
                     return {
@@ -106,7 +106,7 @@ class TradeManager:
                         "ltp": ltp,
                         "sl": sl,
                         "symbol": symbol,
-                        "msg": f"🚀 Auto-Shorted {symbol} @ ~{ltp} with SL Order"
+                        "msg": f"[EXEC] Auto-Shorted {symbol} @ ~{ltp} with SL Order"
                     }
 
                 else:
@@ -114,14 +114,14 @@ class TradeManager:
                     logger.error(f"Entry FAILED: {resp_entry}")
                     return {
                         "status": "ERROR",
-                        "msg": f"❌ Entry Failed: {resp_entry.get('message', 'Unknown Error')}"
+                        "msg": f"[FAIL] Entry Failed: {resp_entry.get('message', 'Unknown Error')}"
                     }
                     
             except Exception as e:
                 logger.error(f"Execution Exception: {e}")
                 return {
                     "status": "ERROR",
-                    "msg": f"❌ Execution Exception: {e}"
+                    "msg": f"[FAIL] Execution Exception: {e}"
                 }
 
         else:
@@ -155,9 +155,9 @@ class TradeManager:
                 "offlineOrder": False
             }
             self.fyers.place_order(data=data)
-            logger.info(f"✅ Emergency Exit Placed for {symbol}")
+            logger.info(f"[OK] Emergency Exit Placed for {symbol}")
         except Exception as e:
-            logger.critical(f"🔥 EMERGENCY EXIT FAILED for {symbol}: {e}")
+            logger.critical(f"[CRIT] EMERGENCY EXIT FAILED for {symbol}: {e}")
         else:
             # MANUAL MODE
             return {
@@ -175,7 +175,7 @@ class TradeManager:
         Closes all open intraday positions.
         Used for EOD Auto-Square Off.
         """
-        logger.warning("🚨 INITIATING AUTO-SQUARE OFF...")
+        logger.warning("[ALERT] INITIATING AUTO-SQUARE OFF...")
         try:
             # 1. Fetch Positions
             positions_response = self.fyers.positions()
