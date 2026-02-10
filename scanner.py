@@ -66,10 +66,10 @@ class FyersScanner:
         - PASSES if insufficient data (don't reject liquid stocks due to API lag).
         """
         try:
-            # Get 1min history
+            # Get 1min history - Last 30 minutes (not 60) to avoid stale consolidation
             import datetime
             to_date = int(time.time())
-            from_date = to_date - (60 * 60) # Last 1 Hour
+            from_date = to_date - (30 * 60)  # Last 30 Minutes (changed from 60)
             
             data = {
                 "symbol": symbol,
@@ -77,17 +77,17 @@ class FyersScanner:
                 "date_format": "0",
                 "range_from": str(from_date),
                 "range_to": str(to_date),
-                "cont_flag": "1"
+               "cont_flag": "1"
             }
             
             response = self.fyers.history(data=data)
             
-            # Check Time: If < 10:00 AM, we won't have 30 candles (Market opens 09:15)
+            # Check Time: If < 10:00 AM, we won't have many candles (Market opens 09:15)
             import datetime
             now_dt = datetime.datetime.fromtimestamp(to_date)
             is_early_morning = now_dt.hour < 10
             
-            min_candles = 5 if is_early_morning else 15  # Reduced from 30 to 15
+            min_candles = 5 if is_early_morning else 10  # Reduced from 15 (30min has ~10-30 candles)
             
             if 'candles' in response and len(response['candles']) >= min_candles:
                 candles = response['candles'] # [[ts, o, h, l, c, v], ...]
