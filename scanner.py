@@ -94,24 +94,18 @@ class FyersScanner:
                 
                 total = len(candles)
                 zero_vol = 0
-                doji_candles = 0 
                 
                 for c in candles:
-                    o, h, l, c_price, v = c[1], c[2], c[3], c[4], c[5]
+                    v = c[5]  # volume
                     
                     if v == 0:
                         zero_vol += 1
-                    
-                    # Doji = body is < 0.3% of price (true indecision, not normal consolidation)
-                    body_size = abs(o - c_price)
-                    if o > 0 and (body_size / o) < 0.003:
-                        doji_candles += 1
                         
-                bad_candle_ratio = (zero_vol + doji_candles) / total
+                zero_vol_ratio = zero_vol / total
                 
-                # Threshold: If > 50% are dead/doji, it's choppy garbage.
-                if bad_candle_ratio > 0.5:
-                    logger.warning(f"[SKIP] Quality Reject: {symbol} | Bad Candles: {int(bad_candle_ratio*100)}% (Doji<0.3%/ZeroVol)")
+                # Threshold: If > 50% have zero volume, it's illiquid/choppy
+                if zero_vol_ratio > 0.5:
+                    logger.warning(f"[SKIP] Quality Reject: {symbol} | Zero Volume: {int(zero_vol_ratio*100)}%")
                     return False, None
                     
                 # Return Success AND the Dataframe (Reuse Strategy)
