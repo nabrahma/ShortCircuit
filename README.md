@@ -68,7 +68,7 @@ GATE 2 → Momentum Envelope
          6-18% gain threshold (circuit-trap elimination)
 
 GATE 3 → Microstructure Quality Assurance
-         Liquidity screening | Tick consistency analysis
+         Zero-Volume analysis | 30-min rolling liquidity check (Smart Lookback)
 
 GATE 4 → Regime Context Validation
          Daily signal cap (5) | Market trend alignment
@@ -302,8 +302,9 @@ ShortCircuit is designed for **personal use** by sophisticated traders. The syst
 ## Technical Specifications
 
 **Data Processing**
-- Real-time market data ingestion (3-minute scan intervals)
+- Real-time market data ingestion (1-minute scan intervals)
 - 1-minute OHLCV resolution for pattern detection
+- Microstructure filtering with 30-minute adaptive lookback
 - 15-minute HTF validation
 - Sub-50ms Telegram notification latency
 
