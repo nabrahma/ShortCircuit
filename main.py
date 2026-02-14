@@ -47,12 +47,19 @@ def main():
     trade_manager = TradeManager(fyers)
     bot = ShortCircuitBot(trade_manager)
 
-    # Phase 41: Multi-Edge Detector (lazy init)
+    # Phase 41.1: Multi-Edge Detector + Performance Tracker (lazy init)
     multi_edge = None
+    tracker = None
     if config.MULTI_EDGE_ENABLED:
         from multi_edge_detector import MultiEdgeDetector
         multi_edge = MultiEdgeDetector(config.ENABLED_DETECTORS)
         logger.info("[INIT] Multi-Edge Detection System ENABLED")
+    if getattr(config, 'ENABLE_DETECTOR_TRACKING', False):
+        from detector_performance_tracker import DetectorPerformanceTracker
+        tracker = DetectorPerformanceTracker(
+            getattr(config, 'DETECTOR_LOG_PATH', 'logs/detector_performance.csv')
+        )
+        logger.info("[INIT] Detector Performance Tracker ENABLED")
 
     # 3. Start Telegram Thread
     t_bot = threading.Thread(target=bot.start_polling)
@@ -108,7 +115,7 @@ def main():
                 history_df = cand.get('history_df')
 
                 if config.MULTI_EDGE_ENABLED and multi_edge is not None:
-                    # --- Phase 41 Path: Multi-Edge Detection ---
+                    # --- Phase 41.1 Path: Multi-Edge Detection ---
                     edge_candidate = {
                         'symbol': symbol,
                         'ltp': ltp,
@@ -141,6 +148,13 @@ def main():
                     
                     # 2. Add to Gate (Starts Monitor Thread)
                     bot.focus_engine.add_pending_signal(signal)
+
+                    # 3. Phase 41.1: Track detector performance
+                    if tracker and signal.get('edges_detected'):
+                        signal_id = f"{symbol}_{int(time.time())}"
+                        signal['signal_id'] = signal_id  # Attach for later tracking
+                        detector_names = [e['trigger'] for e in signal.get('edges_detected', [])]
+                        tracker.log_signal_generated(signal_id, detector_names, symbol)
                     
             elapsed = time.time() - start_time
             sleep_time = max(0, SCAN_INTERVAL - elapsed)

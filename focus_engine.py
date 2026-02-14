@@ -127,9 +127,10 @@ class FocusEngine:
                     logger.info(f"🚫 [INVALIDATED] {symbol} hit {inval_price} before entry. Removed.")
                     del self.pending_signals[symbol]
                     
-                # C. TIMEOUT (45 Mins)
-                elif (time.time() - timestamp) > (45 * 60):
-                     logger.info(f"⌛ [TIMEOUT] {symbol} pending for >45m. Removed.")
+                # C. TIMEOUT (configurable, default 15 mins — Phase 41.1)
+                elif (time.time() - timestamp) > (config.VALIDATION_TIMEOUT_MINUTES * 60):
+                     timeout_min = config.VALIDATION_TIMEOUT_MINUTES
+                     logger.info(f"⌛ [TIMEOUT] {symbol} pending for >{timeout_min}m. Removed.")
                      del self.pending_signals[symbol]
                      
             except Exception as e:

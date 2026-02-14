@@ -1,13 +1,19 @@
 """
-Multi-Edge Detection System — Phase 41
-Detects 8 independent institutional edges in parallel, scores confidence,
-and packages results for the analyzer pipeline.
+Multi-Edge Detection System — Phase 41.1
+Detects 5 institutional edges in parallel (reduced from 8 in Phase 41),
+scores confidence via weighted confluence, and packages results for
+the analyzer pipeline.
+
+Removed in 41.1: OI Divergence Proxy, TPO Poor High, Momentum Exhaustion.
+Simplified in 41.1: Failed Auction (60→30 candle minimum).
+Added in 41.1: Weighted confluence scoring via config.EDGE_WEIGHTS.
 
 Feature-flag controlled: config.MULTI_EDGE_ENABLED (default False).
 Each detector is individually toggleable via config.ENABLED_DETECTORS.
 """
 import logging
 import numpy as np
+import config
 from typing import Optional, Dict, Any, List
 
 logger = logging.getLogger(__name__)
@@ -48,9 +54,10 @@ class MultiEdgeDetector:
             ("ABSORPTION",           self._detect_absorption),
             ("BAD_HIGH",             self._detect_bad_high),
             ("FAILED_AUCTION",       self._detect_failed_auction),
-            ("OI_DIVERGENCE_PROXY",  self._detect_oi_divergence_proxy),
-            ("TPO_POOR_HIGH",        self._detect_poor_high),
-            ("MOMENTUM_EXHAUSTION",  self._detect_momentum_exhaustion),
+            # Phase 41.1: Removed — see commented-out implementations below
+            # ("OI_DIVERGENCE_PROXY",  self._detect_oi_divergence_proxy),
+            # ("TPO_POOR_HIGH",        self._detect_poor_high),
+            # ("MOMENTUM_EXHAUSTION",  self._detect_momentum_exhaustion),
         ]
 
         for name, fn in detectors:
@@ -73,30 +80,37 @@ class MultiEdgeDetector:
     # ------------------------------------------------------------------
     def _score_and_package(self, edges: list, candidate: dict) -> Optional[dict]:
         """
-        Assigns overall confidence based on edge count and individual
-        confidence levels.
+        Phase 41.1 — Weighted confluence scoring.
 
-        Rules
-        -----
-        3+ edges                          → EXTREME
-        2 edges                           → HIGH  (confluence)
-        1 edge HIGH or EXTREME            → HIGH
-        1 edge MEDIUM                     → None  (rejected)
+        Uses config.EDGE_WEIGHTS to compute a total score.
+        Thresholds (from config):
+            ≥ CONFIDENCE_THRESHOLD_EXTREME  → EXTREME
+            ≥ CONFIDENCE_THRESHOLD_HIGH     → HIGH
+            ≥ CONFIDENCE_THRESHOLD_MEDIUM + 2 edges → HIGH  (confluence bonus)
+            Single MEDIUM edge → rejected
         """
+        weights = getattr(config, 'EDGE_WEIGHTS', {})
+        total_score = sum(weights.get(e['trigger'], 1.0) for e in edges)
         edge_count = len(edges)
-        confidences = [e["confidence"] for e in edges]
 
-        if edge_count >= 3:
+        thresh_extreme = getattr(config, 'CONFIDENCE_THRESHOLD_EXTREME', 5.0)
+        thresh_high = getattr(config, 'CONFIDENCE_THRESHOLD_HIGH', 3.0)
+        thresh_medium = getattr(config, 'CONFIDENCE_THRESHOLD_MEDIUM', 2.0)
+
+        if total_score >= thresh_extreme:
             overall = "EXTREME"
-        elif edge_count == 2:
+        elif total_score >= thresh_high:
             overall = "HIGH"
-        elif edge_count == 1:
-            if confidences[0] in ("HIGH", "EXTREME"):
+        elif total_score >= thresh_medium and edge_count >= 2:
+            overall = "HIGH"  # confluence bonus
+        elif total_score >= 1.5:
+            # Check if any edge is individually HIGH/EXTREME
+            if any(e['confidence'] in ('HIGH', 'EXTREME') for e in edges):
                 overall = "HIGH"
             else:
-                return None  # single MEDIUM edge → reject
+                return None  # all MEDIUM edges, reject
         else:
-            return None
+            return None  # score too low
 
         # Entry trigger = lowest of all edge-specific triggers
         entry_triggers = [
@@ -108,6 +122,7 @@ class MultiEdgeDetector:
             "edges": edges,
             "confidence": overall,
             "edge_count": edge_count,
+            "weighted_score": total_score,
             "primary_trigger": edges[0]["trigger"],
             "entry_trigger": entry_trigger,
             "recommended_sl": self._calculate_unified_sl(edges, candidate),
@@ -390,205 +405,188 @@ class MultiEdgeDetector:
         }
 
     # ==================================================================
-    # DETECTOR 5 — FAILED AUCTION
+    # DETECTOR 5 — FAILED AUCTION  (Simplified in Phase 41.1)
     # ==================================================================
     def _detect_failed_auction(self, c: dict) -> Optional[dict]:
+        """
+        Simplified: Recent range breakout that failed.
+        Works from 9:45 AM onwards (30-candle minimum, down from 60).
+        """
         df = c["history_df"]
-        if len(df) < 60:
+        if len(df) < 30:
             return None
 
-        balance = df.iloc[-60:-30]
-        bh = balance["high"].max()
-        bl = balance["low"].min()
-        br = bh - bl
+        # Define recent range from 10-30 candles ago
+        range_df = df.iloc[-30:-10]
+        range_high = range_df["high"].max()
+        range_low = range_df["low"].min()
 
-        if br < c["ltp"] * 0.01:
+        # Was there a breakout attempt in last 10 candles?
+        recent = df.tail(10)
+        breakout_occurred = any(c_row.high > range_high for c_row in recent.itertuples())
+        if not breakout_occurred:
             return None
 
-        recent = df.tail(30)
-        breakout_idx = None
-        for i, row in enumerate(recent.itertuples()):
-            if row.high > bh:
-                breakout_idx = i
-                break
-
-        if breakout_idx is None:
-            return None
-
-        acceptance = recent.iloc[breakout_idx:]
-        accept_count = int((acceptance["close"] > bh).sum())
-        if accept_count < 2:
-            return None
-
+        # Check if price has failed back below range high
         ltp = c["ltp"]
-        if ltp >= bh:
-            return None
+        if ltp >= range_high * 0.998:
+            return None  # Still above — not a failure
 
-        confidence = "HIGH" if accept_count >= 3 else "MEDIUM"
+        # Count how many candles held above (acceptance quality)
+        held_above = sum(1 for c_row in recent.itertuples() if c_row.close > range_high)
+        confidence = "HIGH" if held_above >= 3 else "MEDIUM"
 
         return {
             "trigger": "FAILED_AUCTION",
             "confidence": confidence,
-            "entry_level": bh * 0.998,
+            "entry_level": range_high * 0.998,
             "reasoning": (
-                f"Broke above {bh:.2f}, held for {accept_count} candles, "
+                f"Broke above {range_high:.2f}, held {held_above} candles, "
                 f"now failed back to {ltp:.2f}"
             ),
             "metrics": {
-                "balance_high": bh,
-                "balance_low": bl,
-                "acceptance_candles": accept_count,
-                "sl_level": bh * 1.005,
+                "range_high": range_high,
+                "range_low": range_low,
+                "held_candles": held_above,
+                "sl_level": range_high * 1.005,
             },
         }
 
     # ==================================================================
-    # DETECTOR 6 — OI DIVERGENCE PROXY
+    # DETECTOR 6 — OI DIVERGENCE PROXY  (COMMENTED OUT — Phase 41.1)
+    # Rationale: Always MEDIUM confidence, fires on lunch-hour chop,
+    # news reactions, HFT activity.  Without real OI data this is noise.
     # ==================================================================
-    def _detect_oi_divergence_proxy(self, c: dict) -> Optional[dict]:
-        df = c["history_df"]
-        if len(df) < 25:
-            return None
-
-        recent = df.tail(5)
-        p_start = recent.iloc[0]["close"]
-        p_end = recent.iloc[-1]["close"]
-        momentum = ((p_end - p_start) / p_start) * 100
-
-        recent_vol = recent["volume"].sum()
-        base_vol = df["volume"].iloc[-25:-5].sum()
-        if base_vol == 0:
-            return None
-
-        surge = recent_vol / (base_vol / 4)  # normalise to 5-candle window
-
-        if surge <= 3.0 or momentum >= 0.5:
-            return None
-
-        return {
-            "trigger": "OI_DIVERGENCE_PROXY",
-            "confidence": "MEDIUM",
-            "entry_level": recent.iloc[-1]["low"],
-            "reasoning": (
-                f"Volume surge {surge:.1f}x but momentum only "
-                f"{momentum:.2f}% = weak rally, potential exhaustion"
-            ),
-            "metrics": {
-                "volume_surge": surge,
-                "momentum_pct": momentum,
-            },
-        }
+    # def _detect_oi_divergence_proxy(self, c: dict) -> Optional[dict]:
+    #     df = c["history_df"]
+    #     if len(df) < 25:
+    #         return None
+    #     recent = df.tail(5)
+    #     p_start = recent.iloc[0]["close"]
+    #     p_end = recent.iloc[-1]["close"]
+    #     momentum = ((p_end - p_start) / p_start) * 100
+    #     recent_vol = recent["volume"].sum()
+    #     base_vol = df["volume"].iloc[-25:-5].sum()
+    #     if base_vol == 0:
+    #         return None
+    #     surge = recent_vol / (base_vol / 4)
+    #     if surge <= 3.0 or momentum >= 0.5:
+    #         return None
+    #     return {
+    #         "trigger": "OI_DIVERGENCE_PROXY",
+    #         "confidence": "MEDIUM",
+    #         "entry_level": recent.iloc[-1]["low"],
+    #         "reasoning": (
+    #             f"Volume surge {surge:.1f}x but momentum only "
+    #             f"{momentum:.2f}% = weak rally, potential exhaustion"
+    #         ),
+    #         "metrics": {"volume_surge": surge, "momentum_pct": momentum},
+    #     }
 
     # ==================================================================
-    # DETECTOR 7 — TPO POOR HIGH
+    # DETECTOR 7 — TPO POOR HIGH  (COMMENTED OUT — Phase 41.1)
+    # Rationale: O(n×50) nested loop = 50-100ms/candidate overhead.
+    # 50-bucket granularity on wide price ranges = 95% information loss.
+    # Bad High detector already covers this scenario with orderflow.
     # ==================================================================
-    def _detect_poor_high(self, c: dict) -> Optional[dict]:
-        df = c["history_df"]
-        ltp = c["ltp"]
-        day_high = c["day_high"]
-
-        if ltp < day_high * 0.995:
-            return None
-
-        profile = self._tpo_profile(df)
-        if not profile:
-            return None
-
-        closest = min(profile.keys(), key=lambda x: abs(x - ltp))
-        tpo_here = profile[closest]
-        avg_tpo = sum(profile.values()) / len(profile)
-
-        if avg_tpo == 0 or tpo_here >= avg_tpo * 0.4:
-            return None
-
-        return {
-            "trigger": "TPO_POOR_HIGH",
-            "confidence": "MEDIUM",
-            "entry_level": closest * 0.999,
-            "reasoning": (
-                f"Price at {ltp:.2f} has thin TPO acceptance "
-                f"({tpo_here} vs avg {avg_tpo:.0f}) = vulnerable level"
-            ),
-            "metrics": {
-                "tpo_count": tpo_here,
-                "avg_tpo": avg_tpo,
-                "tpo_ratio": tpo_here / avg_tpo,
-            },
-        }
-
-    @staticmethod
-    def _tpo_profile(df) -> dict:
-        price_min = df["low"].min()
-        price_max = df["high"].max()
-        rng = price_max - price_min
-        if rng == 0:
-            return {}
-        num = 50
-        tick = rng / num
-        counts: Dict[float, int] = {}
-        for row in df.itertuples():
-            lo = int((row.low - price_min) / tick)
-            hi = int((row.high - price_min) / tick)
-            for b in range(lo, min(hi + 1, num)):
-                level = round(price_min + b * tick, 2)
-                counts[level] = counts.get(level, 0) + 1
-        return counts
+    # def _detect_poor_high(self, c: dict) -> Optional[dict]:
+    #     df = c["history_df"]
+    #     ltp = c["ltp"]
+    #     day_high = c["day_high"]
+    #     if ltp < day_high * 0.995:
+    #         return None
+    #     profile = self._tpo_profile(df)
+    #     if not profile:
+    #         return None
+    #     closest = min(profile.keys(), key=lambda x: abs(x - ltp))
+    #     tpo_here = profile[closest]
+    #     avg_tpo = sum(profile.values()) / len(profile)
+    #     if avg_tpo == 0 or tpo_here >= avg_tpo * 0.4:
+    #         return None
+    #     return {
+    #         "trigger": "TPO_POOR_HIGH",
+    #         "confidence": "MEDIUM",
+    #         "entry_level": closest * 0.999,
+    #         "reasoning": (
+    #             f"Price at {ltp:.2f} has thin TPO acceptance "
+    #             f"({tpo_here} vs avg {avg_tpo:.0f}) = vulnerable level"
+    #         ),
+    #         "metrics": {
+    #             "tpo_count": tpo_here,
+    #             "avg_tpo": avg_tpo,
+    #             "tpo_ratio": tpo_here / avg_tpo,
+    #         },
+    #     }
+    #
+    # @staticmethod
+    # def _tpo_profile(df) -> dict:
+    #     price_min = df["low"].min()
+    #     price_max = df["high"].max()
+    #     rng = price_max - price_min
+    #     if rng == 0:
+    #         return {}
+    #     num = 50
+    #     tick = rng / num
+    #     counts: Dict[float, int] = {}
+    #     for row in df.itertuples():
+    #         lo = int((row.low - price_min) / tick)
+    #         hi = int((row.high - price_min) / tick)
+    #         for b in range(lo, min(hi + 1, num)):
+    #             level = round(price_min + b * tick, 2)
+    #             counts[level] = counts.get(level, 0) + 1
+    #     return counts
 
     # ==================================================================
-    # DETECTOR 8 — MOMENTUM EXHAUSTION
+    # DETECTOR 8 — MOMENTUM EXHAUSTION  (COMMENTED OUT — Phase 41.1)
+    # Rationale: Logically redundant with Gate 7 (Train Filter).
+    # Gate 7 blocks aggressive momentum; this detects exhausted momentum.
+    # Checking the SAME phenomenon from opposite angles creates confusion.
+    # Existing patterns (Shooting Star, Momentum Breakdown, Evening Star)
+    # already capture exhaustion setups.
     # ==================================================================
-    def _detect_momentum_exhaustion(self, c: dict) -> Optional[dict]:
-        df = c["history_df"]
-        ltp = c["ltp"]
-        vwap = c.get("vwap", 0)
-
-        if vwap == 0 or len(df) < 20:
-            return None
-
-        std = df["close"].std()
-        if std == 0:
-            return None
-        vwap_sd = (ltp - vwap) / std
-
-        # Count consecutive green candles (from most recent backward)
-        consec_green = 0
-        for row in df.iloc[::-1].itertuples():
-            if row.close > row.open:
-                consec_green += 1
-            else:
-                break
-
-        if vwap_sd <= 2.5 or consec_green < 7:
-            return None
-
-        recent_vol = df["volume"].tail(5).mean()
-        prior_vol = df["volume"].iloc[-20:-5].mean()
-        vol_declining = prior_vol > 0 and recent_vol < prior_vol * 0.7
-
-        round_numbers = [50, 100, 150, 200, 250, 500, 1000, 1500, 2000, 2500, 5000]
-        near_round = any(
-            abs(ltp - rn) / ltp < 0.005 for rn in round_numbers if ltp > 0
-        )
-
-        if vol_declining and near_round:
-            confidence = "HIGH"
-        elif vol_declining or near_round:
-            confidence = "MEDIUM"
-        else:
-            confidence = "MEDIUM"
-
-        return {
-            "trigger": "MOMENTUM_EXHAUSTION",
-            "confidence": confidence,
-            "entry_level": df.iloc[-1]["low"],
-            "reasoning": (
-                f"Extended {vwap_sd:.1f}σ above VWAP after "
-                f"{consec_green} green candles. Vol declining: {vol_declining}"
-            ),
-            "metrics": {
-                "vwap_extension_sd": vwap_sd,
-                "consecutive_green": consec_green,
-                "volume_declining": vol_declining,
-                "near_round_number": near_round,
-            },
-        }
+    # def _detect_momentum_exhaustion(self, c: dict) -> Optional[dict]:
+    #     df = c["history_df"]
+    #     ltp = c["ltp"]
+    #     vwap = c.get("vwap", 0)
+    #     if vwap == 0 or len(df) < 20:
+    #         return None
+    #     std = df["close"].std()
+    #     if std == 0:
+    #         return None
+    #     vwap_sd = (ltp - vwap) / std
+    #     consec_green = 0
+    #     for row in df.iloc[::-1].itertuples():
+    #         if row.close > row.open:
+    #             consec_green += 1
+    #         else:
+    #             break
+    #     if vwap_sd <= 2.5 or consec_green < 7:
+    #         return None
+    #     recent_vol = df["volume"].tail(5).mean()
+    #     prior_vol = df["volume"].iloc[-20:-5].mean()
+    #     vol_declining = prior_vol > 0 and recent_vol < prior_vol * 0.7
+    #     round_numbers = [50, 100, 150, 200, 250, 500, 1000, 1500, 2000, 2500, 5000]
+    #     near_round = any(
+    #         abs(ltp - rn) / ltp < 0.005 for rn in round_numbers if ltp > 0
+    #     )
+    #     if vol_declining and near_round:
+    #         confidence = "HIGH"
+    #     elif vol_declining or near_round:
+    #         confidence = "MEDIUM"
+    #     else:
+    #         confidence = "MEDIUM"
+    #     return {
+    #         "trigger": "MOMENTUM_EXHAUSTION",
+    #         "confidence": confidence,
+    #         "entry_level": df.iloc[-1]["low"],
+    #         "reasoning": (
+    #             f"Extended {vwap_sd:.1f}σ above VWAP after "
+    #             f"{consec_green} green candles. Vol declining: {vol_declining}"
+    #         ),
+    #         "metrics": {
+    #             "vwap_extension_sd": vwap_sd,
+    #             "consecutive_green": consec_green,
+    #             "volume_declining": vol_declining,
+    #             "near_round_number": near_round,
+    #         },
+    #     }

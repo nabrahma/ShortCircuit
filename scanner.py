@@ -125,11 +125,15 @@ class FyersScanner:
 
     def scan_market(self):
         """
-        Main Scan Logic.
+        Main Scan Logic (Phase 41.1 — Parallel fetch).
         1. Get Symbols
         2. Batch Request Quotes (50 at a time)
-        3. Filter (Gain 5-20%, Vol > 100k, LTP > 50)
+        3. Filter (Gain 6-18%, Vol > 100k, LTP > 5)
+        4. Parallel fetch history + quality check for all candidates
         """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        import config
+
         if not self.symbols:
             self.symbols = self.fetch_nse_symbols()
             if not self.symbols:
@@ -137,15 +141,15 @@ class FyersScanner:
 
         # Batching (Symbols is now a Dict)
         symbol_list = list(self.symbols.keys()) # EXTRACT KEYS
-        filtered_candidates = []
+        pre_candidates = []  # Pass gain/volume/price filter, pending quality
         batch_size = 50
         total_symbols = len(symbol_list)
         
         logger.info(f"Scanning {total_symbols} symbols in batches...")
 
+        # Phase A: Batch quote scan (serial — cheap API calls)
         for i in range(0, total_symbols, batch_size):
             batch = symbol_list[i:i+batch_size]
-            # print(f"Scanning Batch {i}/{total_symbols}...") # Reduced Noise
             symbols_str = ",".join(batch)
             
             try:
@@ -168,31 +172,55 @@ class FyersScanner:
                     if ltp is None or volume is None or change_p is None:
                         continue
                         
-                    # 1. Gain: 6% to 18% (Avoid Circuit Traps) | 2. Volume > 100k
-                    if 6.0 <= change_p <= 18.0 and volume > 100000:
-                            if ltp > 5:
-                                # Optimized: Get DF from quality check
-                                is_good_quality, history_df = self.check_chart_quality(symbol)
-                                
-                                if is_good_quality:
-                                    tick_size = self.symbols.get(symbol, 0.05) # GET TICK
-                                    oi = quote_data.get('oi', 0) # Get Open Interest
-                                    
-                                    logger.info(f"[CANDIDATE] {symbol} | Gain: {change_p}% | Tick: {tick_size} | OI: {oi}")
-                                    filtered_candidates.append({
-                                        'symbol': symbol,
-                                        'ltp': ltp,
-                                        'volume': volume,
-                                        'change': change_p,
-                                        'tick_size': tick_size,
-                                        'oi': oi,
-                                        'history_df': history_df # CACHED DATAFRAME
-                                    })
-                                else:
-                                    logger.info(f"[SKIP] {symbol} (Poor Microstructure)")
+                    # Filter: Gain 6-18%, Vol > 100k, LTP > 5
+                    if 6.0 <= change_p <= 18.0 and volume > 100000 and ltp > 5:
+                        tick_size = self.symbols.get(symbol, 0.05)
+                        oi = quote_data.get('oi', 0)
+                        pre_candidates.append({
+                            'symbol': symbol,
+                            'ltp': ltp,
+                            'volume': volume,
+                            'change': change_p,
+                            'tick_size': tick_size,
+                            'oi': oi,
+                        })
             except Exception as e:
                 logger.error(f"Batch Error: {e}")
-                
+
+        if not pre_candidates:
+            logger.info("No pre-candidates passed filter.")
+            return []
+
+        logger.info(f"Pre-filter: {len(pre_candidates)} candidates. Starting parallel quality check...")
+
+        # Phase B: Parallel history + quality check
+        filtered_candidates = []
+        max_workers = getattr(config, 'SCANNER_PARALLEL_WORKERS', 10)
+
+        def fetch_quality(candidate):
+            """Fetch history + quality for a single candidate."""
+            return self.check_chart_quality(candidate['symbol'])
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(fetch_quality, c): c for c in pre_candidates}
+
+            for future in as_completed(futures):
+                candidate = futures[future]
+                try:
+                    is_good, history_df = future.result(timeout=5)
+                    if is_good:
+                        candidate['history_df'] = history_df
+                        logger.info(
+                            f"[CANDIDATE] {candidate['symbol']} | "
+                            f"Gain: {candidate['change']}% | "
+                            f"Tick: {candidate['tick_size']} | OI: {candidate['oi']}"
+                        )
+                        filtered_candidates.append(candidate)
+                    else:
+                        logger.info(f"[SKIP] {candidate['symbol']} (Poor Microstructure)")
+                except Exception as e:
+                    logger.error(f"Quality check failed for {candidate['symbol']}: {e}")
+
         # Sort by Change % Descending
         filtered_candidates.sort(key=lambda x: x['change'], reverse=True)
         top_gainers = filtered_candidates[:20]

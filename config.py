@@ -21,22 +21,49 @@ AUTO_TRADE = False # Default off
 # System Config
 LOG_FILE = "logs/bot.log"
 SQUARE_OFF_TIME = "15:10" # HH:MM (24-hour format)
+VALIDATION_TIMEOUT_MINUTES = 15  # Phase 41.1: Reduced from 45
 
-# --- Phase 41: Multi-Edge Detection System ---
+# --- Phase 41.1: Multi-Edge Detection System ---
 MULTI_EDGE_ENABLED = False  # Master switch (set True to activate)
 CONFIDENCE_THRESHOLD = "MEDIUM"  # Minimum confidence to proceed
 
-# Individual Detector Toggles
+# Individual Detector Toggles (Phase 41.1: 5 active, 3 removed)
 ENABLED_DETECTORS = {
     "PATTERN": True,            # P0 — Existing 6-pattern engine (always on)
-    "TRAPPED_POSITION": False,  # P1 — Trapped longs via volume + depth
-    "ABSORPTION": False,        # P1 — Hidden limit sellers at highs
-    "BAD_HIGH": False,          # P1 — DOM sell-wall + rejection wick
-    "FAILED_AUCTION": False,    # P2 — Failed breakout via balance area
-    "OI_DIVERGENCE_PROXY": False,  # P3 — Volume-momentum divergence
-    "TPO_POOR_HIGH": False,     # P3 — Thin acceptance zones
-    "MOMENTUM_EXHAUSTION": False,  # P0 — VWAP extension + green run
+    "TRAPPED_POSITION": True,   # P0 — Trapped longs via volume + depth
+    "ABSORPTION": True,         # P0 — Hidden limit sellers at highs
+    "BAD_HIGH": True,           # P0 — DOM sell-wall + rejection wick
+    "FAILED_AUCTION": True,     # P1 — Simplified in 41.1 (30-candle min)
+    # REMOVED in Phase 41.1:
+    # "OI_DIVERGENCE_PROXY": False,   # Was P3 — noise without real OI
+    # "TPO_POOR_HIGH": False,         # Was P3 — 50-100ms overhead, 95% info loss
+    # "MOMENTUM_EXHAUSTION": False,   # Was P0 — redundant with Gate 7
 }
 
 LOG_MULTI_EDGE_DETAILS = True  # Log all edge detection attempts
 
+# --- Phase 41.1: Weighted Confluence Scoring ---
+EDGE_WEIGHTS = {
+    "ABSORPTION": 3.0,                  # Rare, extreme conviction
+    "BAD_HIGH": 2.0,                    # Orderflow + price rejection = strong
+    "TRAPPED_LONGS": 2.0,               # High conviction institutional trap
+    "PATTERN_SHOOTING_STAR": 1.5,       # Strong pattern
+    "PATTERN_MOMENTUM_BREAKDOWN": 1.5,  # Strong pattern
+    "PATTERN_BEARISH_ENGULFING": 1.0,   # Standard pattern
+    "PATTERN_EVENING_STAR": 1.0,        # Standard pattern
+    "PATTERN_VOLUME_TRAP": 1.0,         # Standard pattern
+    "PATTERN_ABSORPTION_DOJI": 2.0,     # Actually absorption-class
+    "FAILED_AUCTION": 1.0,              # Common setup
+}
+
+# Weighted confidence thresholds
+CONFIDENCE_THRESHOLD_EXTREME = 5.0
+CONFIDENCE_THRESHOLD_HIGH = 3.0
+CONFIDENCE_THRESHOLD_MEDIUM = 2.0
+
+# --- Phase 41.1: Performance Tracking ---
+ENABLE_DETECTOR_TRACKING = True
+DETECTOR_LOG_PATH = "logs/detector_performance.csv"
+
+# --- Phase 41.1: Scanner Optimization ---
+SCANNER_PARALLEL_WORKERS = 10  # Max concurrent API calls
