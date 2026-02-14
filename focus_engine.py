@@ -11,11 +11,176 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 logger = logging.getLogger("FocusEngine")
 
 class FocusEngine:
-    def __init__(self):
+    def __init__(self, trade_manager=None):
         self.fyers = FyersConnect().authenticate()
+        self.trade_manager = trade_manager # For executing validated trades
         self.active_trade = None # {symbol, entry, sl, tp1, tp2, quantity, start_time, message_id}
         self.is_running = False
         self.bot = telebot.TeleBot(config.TELEGRAM_BOT_TOKEN) if config.TELEGRAM_BOT_TOKEN else None
+        
+        # Validation Gate (Phase 37)
+        self.pending_signals = {} # {symbol: {signal_data, entry_trigger, invalidation_trigger, timestamp}}
+        self.monitoring_active = False
+        self.monitor_thread = None
+        
+        # Auto-Recovery on Init
+        self.attempt_recovery()
+        
+        # Validation Gate (Phase 37)
+        self.pending_signals = {} # {symbol: {signal_data, entry_trigger, invalidation_trigger, timestamp}}
+
+    def add_pending_signal(self, signal_data):
+        """
+        Phase 37: Adds a signal to the Validation Gate.
+        It will ONLY be executed if Price breaks Signal Low (Short).
+        """
+        symbol = signal_data['symbol']
+        signal_low = signal_data.get('signal_low')
+        if not signal_low:
+            logger.error(f"Cannot validate {symbol}: Missing signal_low")
+            return
+
+        # Define Triggers
+        # Short Logic: Trigger if Price < Low
+        entry_trigger = signal_low
+        # Invalidate if Price > High (Stop Loss hit before entry)
+        invalidation_trigger = signal_data.get('stop_loss', signal_low * 1.01)
+
+        self.pending_signals[symbol] = {
+            'data': signal_data,
+            'trigger': entry_trigger,
+            'invalidate': invalidation_trigger,
+            'timestamp': time.time()
+        }
+        logger.info(f"[GATE] Added {symbol} to Validation Gate. Trigger: < {entry_trigger}")
+        
+        # Start Background Monitor if not running
+        if not self.monitoring_active:
+            self.start_pending_monitor()
+
+    def start_pending_monitor(self):
+        """Starts the background thread for validation checks."""
+        self.monitoring_active = True
+        self.monitor_thread = threading.Thread(target=self.monitor_pending_loop, daemon=True)
+        self.monitor_thread.start()
+        logger.info("[GATE] Validation Monitor Started.")
+
+    def monitor_pending_loop(self):
+        """
+        Background loop to check pending signals every 2 seconds.
+        """
+        while self.monitoring_active:
+            if not self.pending_signals:
+                time.sleep(5) # Sleep longer if empty
+                continue
+                
+            try:
+                self.check_pending_signals(self.trade_manager)
+            except Exception as e:
+                logger.error(f"Monitor Loop Error: {e}")
+                
+            time.sleep(2) # 2s Interval
+
+    def check_pending_signals(self, trade_manager):
+        """
+        Phase 37: Monitors pending signals for Validation Trigger.
+        Called from Main Loop.
+        """
+        if not self.pending_signals: return
+
+        # Create copy to avoid runtime error during modification
+        current_pending = list(self.pending_signals.items())
+        
+        for symbol, pending in current_pending:
+            try:
+                # 1. Fetch LTP
+                data = {"symbols": symbol}
+                resp = self.fyers.quotes(data=data)
+                if 'd' not in resp or not resp['d']: continue
+                
+                ltp = resp['d'][0]['v']['lp']
+                
+                trigger_price = pending['trigger']
+                inval_price = pending['invalidate']
+                timestamp = pending['timestamp']
+                
+                # A. CHECK TRIGGER (VALIDATION CONFIRMED)
+                # For Short: LTP < Trigger (Signal Low)
+                if ltp < trigger_price:
+                    logger.info(f"✅ [VALIDATED] {symbol} broke {trigger_price} @ {ltp}. EXECUTING!")
+                    
+                    # 1. Execute Logic
+                    res = trade_manager.execute_logic(pending['data'])
+                    
+                    # 2. Alert User (via Alert callback handling in Main or Bot)
+                    # We can't easily call bot.send_alert here without circular deps or callback passing.
+                    # But trade_manager.execute_logic returns the result dict.
+                    # We should probably pass the result back to main.py? 
+                    # Actually, check_pending_signals is called from main.py.
+                    # We can return a list of executed results!
+                    
+                    del self.pending_signals[symbol]
+                    return res # Return result to Main for alerting
+                    
+                # B. CHECK INVALIDATION (STOP HIT BEFORE ENTRY)
+                elif ltp > inval_price:
+                    logger.info(f"🚫 [INVALIDATED] {symbol} hit {inval_price} before entry. Removed.")
+                    del self.pending_signals[symbol]
+                    
+                # C. TIMEOUT (45 Mins)
+                elif (time.time() - timestamp) > (45 * 60):
+                     logger.info(f"⌛ [TIMEOUT] {symbol} pending for >45m. Removed.")
+                     del self.pending_signals[symbol]
+                     
+            except Exception as e:
+                logger.error(f"Validation Check Error {symbol}: {e}")
+        
+        return None
+
+    def attempt_recovery(self):
+        """
+        Scans Fyers for open positions and pending orders to 'adopt' orphaned trades.
+        """
+        try:
+            logger.info("[RECOVERY] Scanning for orphaned trades...")
+            positions = self.fyers.positions()
+            
+            if 'netPositions' not in positions: return
+            
+            for p in positions['netPositions']:
+                qty = p['netQty']
+                if qty != 0:
+                    symbol = p['symbol']
+                    logger.info(f"[RECOVERY] Found Open Position: {symbol} Qty: {qty}")
+                    
+                    # Determine Entry Price
+                    entry_price = float(p['avgPrice']) # buyAvg or sellAvg depending on side
+                    if qty < 0:
+                        entry_price = float(p['sellAvg']) # Short Entry
+                    
+                    # Find Pending SL Order
+                    sl_price = entry_price * 1.01 # Default fallback
+                    orders = self.fyers.orderbook()
+                    if 'orderBook' in orders:
+                        for o in orders['orderBook']:
+                            if o['symbol'] == symbol and o['status'] == 6: # Pending
+                                # Assume this is SL
+                                sl_price = float(o['stopPrice']) if o['stopPrice'] > 0 else float(o['limitPrice'])
+                                logger.info(f"[RECOVERY] Found Pending SL Order: {sl_price}")
+                                break
+                    
+                    # Start Focus
+                    # We pass message_id=None so it sends a new dashboard
+                    self.start_focus(symbol, entry_price, sl_price, message_id=None, trade_id="RECOVERY", qty=abs(qty))
+                    
+                    if self.bot and config.TELEGRAM_CHAT_ID:
+                         self.bot.send_message(config.TELEGRAM_CHAT_ID, f"♻️ **RECOVERY MODE**\nAdopting Trade: {symbol}")
+                    
+                    # We only support 1 active trade for now in Focus Engine
+                    break 
+                    
+        except Exception as e:
+            logger.error(f"[RECOVERY] Failed: {e}")
 
     def start_focus(self, symbol, entry_price, sl_price, message_id=None, trade_id=None, qty=1):
         """
@@ -131,6 +296,18 @@ class FocusEngine:
             
             # EXECUTE EXIT
             try:
+                # CRITICAL FIX: Check if we are already flat (Hard SL filled?)
+                # If Net Qty is 0, DO NOT BUY AGAIN.
+                pos = self.fyers.positions()
+                if 'netPositions' in pos:
+                    for p in pos['netPositions']:
+                         if p['symbol'] == trade['symbol']:
+                             if p['netQty'] == 0:
+                                 logger.warning(f"[SKIP] Position already closed (Hard SL?). Skipping redundant exit.")
+                                 self.stop_focus(reason="SL_HIT")
+                                 return
+                             break
+                
                 # Close Position (Buy Market)
                 data = {
                     "symbol": trade['symbol'],
@@ -216,6 +393,36 @@ class FocusEngine:
         # If below VWAP, target previous support (mock logic for now without history)
         t['dynamic_tp'] = round(ltp * 0.98, 2) # Arbitrary 2% scalp target for visuals
 
+    def force_refresh(self):
+        """
+        Manually syncs state with Broker.
+        """
+        if not self.active_trade: return
+        
+        try:
+            # Check Net Position
+            r = self.fyers.positions()
+            if 'netPositions' in r:
+                symbol = self.active_trade['symbol']
+                net_qty = 0
+                for p in r['netPositions']:
+                    if p['symbol'] == symbol:
+                        net_qty = p['netQty']
+                        break
+                
+                # If closed externally
+                if net_qty == 0:
+                    logger.info("[REFRESH] Position found CLOSED.")
+                    self.stop_focus(reason="MANUAL_APP_CLOSE")
+                    return
+            
+            # If still open, just update dashboard
+            self.update_dashboard()
+            logger.info("[REFRESH] Dashboard Updated.")
+            
+        except Exception as e:
+            logger.error(f"Refresh Error: {e}")
+
     def update_dashboard(self, initial=False):
         if not self.bot or not config.TELEGRAM_CHAT_ID: return
         
@@ -228,66 +435,66 @@ class FocusEngine:
         # PnL Calc
         pnl_points = entry - ltp
         pnl_cash = pnl_points * t.get('qty', 1) 
-        emoji = "[+]" if pnl_points > 0 else "[-]"
+        emoji = "🟢" if pnl_points > 0 else "🔴"
         
-        # Orderflow Indicators
+        # ROI Calculation (5x Leverage)
+        # Margin Used = (Price * Qty) / 5
+        margin_used = (entry * t.get('qty', 1)) / 5
+        roi_pct = (pnl_cash / margin_used) * 100 if margin_used > 0 else 0.0
+        
+        # Orderflow Indicators (Simplified)
         ba_ratio = t.get('bid_ask_ratio', 1.0)
-        ba_sentiment = "Bearish [BEAR]" if ba_ratio < 0.8 else "Bullish [BULL]" if ba_ratio > 1.2 else "Neutral [--]"
+        ba_sentiment = "Bearish" if ba_ratio < 0.8 else "Bullish" if ba_ratio > 1.2 else "Neutral"
+        tape_msg = t.get('tape_alert', "Neutral").replace(" (No Engine)", "")
         
-        vwap_dist = t.get('vwap_dist', 0)
-        vwap_status = "Extended [EXT]" if vwap_dist > 1.5 else "Mean Rev [MR]"
+        # Dynamic Levels
+        dyn_sl = t.get('dynamic_sl', 0)
+        dyn_tp = t.get('dynamic_tp', 0)
         
-        # Tape Alert
-        tape_msg = t.get('tape_alert', "Neutral [--]")
-        
+        # BlackRock Style Dashboard
         msg = (
-            f"[FOCUS] *LIVE FOCUS: {t['symbol']}*\\n"
-            f"-----------------------------\\n"
-            f"P&L: *Rs.{pnl_cash:.2f}* {emoji} ({pnl_points:.2f} pts)\\n"
-            f"LTP: *{ltp}* (Entry: {entry})\\n"
-            f"-----------------------------\\n"
-            f"*Tape Reading (Quant)*\\n"
-            f"- Action: *{tape_msg}*\\n"
-            f"- Sentiment: *{ba_sentiment}* ({ba_ratio})\\n"
-            f"-----------------------------\\n"
-            f"*Stats*\\n"
-            f"- VWAP Dist: *{vwap_dist}%* ({vwap_status})\\n"
-            f"- Vol Spike: {'[WARN] YES' if t.get('vol_spike') else 'No'}\\n"
-            f"-----------------------------\\n"
-            f"*Smart Constraints*\\n"
-            f"- Dyn SL: *{t.get('dynamic_sl', 0)}* (Sugg)\\n"
-            f"- Dyn TP: *{t.get('dynamic_tp', 0)}* (Liq)\\n"
-            f"-----------------------------\\n"
-            f"Updated: {datetime.datetime.now().strftime('%H:%M:%S')}"
+            f"**{t['symbol']}** | Live P&L (5x)\n"
+            f"**Rs.{pnl_cash:,.2f}** {emoji} ({roi_pct:+.2f}%)\n"
+            f"_{pnl_points:+.2f} pts_\n\n"
+            
+            f"LTP: **{ltp}** | Entry: {entry}\n\n"
+            
+            f"**STATUS**\n"
+            f"Action: {tape_msg}\n"
+            f"Sentiment: {ba_sentiment} ({ba_ratio})\n\n"
+            
+            f"**RISK**\n"
+            f"Stop: {dyn_sl}\n"
+            f"Target: {dyn_tp}\n\n"
+            
+            f"_[Updated: {datetime.datetime.now().strftime('%H:%M:%S')}]_"
         )
         
-        # Keyboard is managed by the Bot (Close Button), we just edit text.
-        # BUT, if we edit text, we might lose the markup if we don't pass it again?
-        # Telebot edit_message_text removes markup if not provided?
-        # Actually usually it keeps it if reply_markup is Not specified? 
-        # No, usually it clears it. We need to preserve the button.
-        # We need to construct the "Close Trade" button here too.
-        
+        # Buttons
         from telebot import types
         markup = types.InlineKeyboardMarkup()
-        # trade_id is needed for the callback.
-        # We need to store trade_id in active_trade
         trade_id = t.get('trade_id', 'UNKNOWN')
-        btn = types.InlineKeyboardButton("[X] Close Trade & Capture", callback_data=f"EXIT_{trade_id}")
-        markup.add(btn)
+        
+        btn_refresh = types.InlineKeyboardButton("🔄 Refresh", callback_data=f"REFRESH_{trade_id}")
+        btn_close = types.InlineKeyboardButton("❌ Close Position", callback_data=f"EXIT_{trade_id}")
+        
+        markup.row(btn_refresh, btn_close)
         
         try:
             if initial or not t['message_id']:
-                # Initial send is handled by Bot usually? 
-                # No, flow is: Bot sends Alert -> User Clicks -> Bot edits to "Logged".
-                # THEN we want to START flashing this message.
-                # So we are editing the SAME message ID.
                 if t['message_id']:
                      self.bot.edit_message_text(msg, config.TELEGRAM_CHAT_ID, t['message_id'], parse_mode="Markdown", reply_markup=markup)
             else:
                  self.bot.edit_message_text(msg, config.TELEGRAM_CHAT_ID, t['message_id'], parse_mode="Markdown", reply_markup=markup)
         except Exception as e:
-            logger.error(f"Telegram Dashboard Error: {e}")
+            # NETWORK ERROR HANDLING (Crucial for Stability)
+            # If Telegram fails, we Log and Continue. We DO NOT CRASH.
+            if "message is not modified" in str(e):
+                pass # Ignore trivial
+            elif "Connection" in str(e) or "HTTPS" in str(e) or "400" in str(e):
+                logger.warning(f"[NET] Telegram Update Failed (Retrying next tick): {e}")
+            else:
+                logger.error(f"Telegram Dashboard Error: {e}")
 
     def stop_focus(self, reason="STOPPED"):
         # self.update_dashboard() # Final Update (Risk of threading race if called from loop?)
@@ -358,6 +565,3 @@ class FocusEngine:
         # Send as NEW Message (High Importance)
         self.bot.send_message(config.TELEGRAM_CHAT_ID, msg, parse_mode="Markdown")
 
-if __name__ == "__main__":
-    # Test
-    pass

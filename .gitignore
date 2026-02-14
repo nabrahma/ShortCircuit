@@ -1,15 +1,49 @@
+# === Python ===
 __pycache__/
 *.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# === Environment ===
 .env
-access_token.txt
-logs/
-data/
-.vscode/
-.idea/
-*.log
-*.csv
-fyers_mcp_server/
 venv/
 env/
+.venv/
+
+# === IDE ===
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# === Credentials & Tokens ===
+access_token.txt
+
+# === Runtime Data ===
+logs/*
+!logs/.gitkeep
+data/*
+!data/.gitkeep
+
+# === Generated Files ===
+*.log
+*.csv
+*.parquet
+*.txt
+!requirements.txt
+!LICENSE
+
+# === OS ===
 .DS_Store
+Thumbs.db
+
+# === Legacy / Archive ===
 _ARCHIVE/
+scripts/
+tests/
+fyers_mcp_server/
+
+# === AI / Agent ===
+.gemini/

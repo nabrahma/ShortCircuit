@@ -23,7 +23,16 @@ class TradeManager:
         """
         symbol = signal['symbol']
         ltp = signal['ltp']
-        sl = signal['stop_loss']
+        # CRITICAL FIX: Handle missing SL key to prevent loop crash
+        sl = signal.get('stop_loss', 0.0)
+        
+        if sl == 0.0:
+            logger.error(f"[CRITICAL] Missing Stop Loss for {symbol}. Aborting Trade.")
+            return {
+                "status": "ERROR",
+                "msg": f"[FAIL] Malformed Signal: Missing Stop Loss for {symbol}"
+            }
+
         tick_size = signal.get('tick_size', 0.05) # Get Dynamic Tick
         
         # Calculate Qty
@@ -158,17 +167,6 @@ class TradeManager:
             logger.info(f"[OK] Emergency Exit Placed for {symbol}")
         except Exception as e:
             logger.critical(f"[CRIT] EMERGENCY EXIT FAILED for {symbol}: {e}")
-        else:
-            # MANUAL MODE
-            return {
-                "status": "MANUAL_WAIT",
-                "symbol": symbol,
-                "qty": qty,
-                "value": int(qty * ltp),
-                "ltp": ltp,
-                "sl": sl,
-                "pattern": signal['pattern']
-            }
 
     def close_all_positions(self):
         """

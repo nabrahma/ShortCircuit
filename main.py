@@ -102,9 +102,15 @@ def main():
                 signal = analyzer.check_setup(symbol, ltp, oi, history_df)
                 
                 if signal:
-                    # C. Execute/Alert
-                    result = trade_manager.execute_logic(signal)
-                    bot.send_alert(result)
+                    # C. Validation Phase (Phase 37)
+                    # Instead of executing immediately, we send to FocusEngine for "Acceptance" check.
+                    logger.info(f"[SIGNAL] {symbol} Candidate Found. Sending to Validation Gate.")
+                    
+                    # 1. Alert User (Pending)
+                    bot.send_validation_alert(signal) 
+                    
+                    # 2. Add to Gate (Starts Monitor Thread)
+                    bot.focus_engine.add_pending_signal(signal)
                     
             elapsed = time.time() - start_time
             sleep_time = max(0, SCAN_INTERVAL - elapsed)

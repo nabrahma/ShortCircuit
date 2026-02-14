@@ -81,26 +81,36 @@ class GodModeAnalyst:
             
         return structure, z_score_vol
 
-    def check_constraints(self, ltp, day_high, trend_gain):
+    def check_constraints(self, ltp, day_high, trend_gain, open_price):
         """
         The "Ethos" Check.
         Phase 13: Pullback Scalper Rules.
         """
-        if trend_gain < 7.0:
-            return False, f"Gain {trend_gain:.1f}% too low (< 7%)"
+        # 1. Trend Strength
+        # LOGIC FIX (Phase 38): Check Day's MAX Gain, not just current gain.
+        # If stock hit +8% earlier, it's a Trend Day, even if it retraced to +3%.
+        max_gain_pct = ((day_high - open_price) / open_price) * 100
+        
+        is_strong_trend = trend_gain >= 5.0
+        was_strong_trend = max_gain_pct >= 7.0
+        
+        if not is_strong_trend and not was_strong_trend:
+             return False, f"Weak Trend. Curr: {trend_gain:.1f}%, Max: {max_gain_pct:.1f}% (< 7%)"
             
         if trend_gain > 15.0:
             return False, f"Gain {trend_gain:.1f}% too high (> 15%) - Circuit Risk"
             
         # 2. Smart Day High Proximity
-        # Base: Allow 3.0% pullback (Discretionary vs Mechanical).
-        # Turbo: If Gain > 10%, allow 5.0% pullback.
+        # Base: Allow 4.0% pullback.
+        # Turbo: If Max Gain > 10%, allow 6.0% pullback (Deep retracement allowed).
         
         dist_from_high_pct = (day_high - ltp) / day_high * 100
         
-        allowed_dist = 3.0 
-        if trend_gain > 10.0:
-            allowed_dist = 5.0
+        allowed_dist = 4.0 
+        if max_gain_pct > 10.0:
+            allowed_dist = 6.0
+        elif was_strong_trend: 
+             allowed_dist = 6.0 # Allow deeper pullback if we verified it was a strong trend
             
         if dist_from_high_pct > allowed_dist:
              return False, f"Too far from High ({dist_from_high_pct:.2f}%) > {allowed_dist}%"
@@ -173,12 +183,11 @@ class GodModeAnalyst:
         # Prev Green, Curr Red, Curr Body > Prev Body, Curr Open > Prev Close
         if d2 == 1 and d3 == -1:
             if b3 > b2 and c3['close'] < c2['open']:
-                # Filter: Significant size (not tiny candles)
-                 return "BEARISH_ENGULFING", z_score
+                # Filter: Significant size (not tiny candles) or Volume
+                if z_score > 0: # Ensure at least average volume
+                     return "BEARISH_ENGULFING", z_score
                  
-        # Pattern 2: Evening Star (Green -> Doji -> Red)
-        # C1 Green, C2 Small Body (Gap Up ideally), C3 Red (closes deep into C1)
-        if d1 == 1 and b2 < (r2 * 0.3) and d3 == -1:
+        if d2 == 1 and b2 < (r2 * 0.3) and d3 == -1:
              if c3['close'] < (c1['open'] + c1['close'])/2: # Closes below midpoint of C1
                  return "EVENING_STAR", z_score
 
@@ -190,6 +199,38 @@ class GodModeAnalyst:
         # Pattern 4: Doji / Absorption
         if z_score > 2.0 and b3 < (c3['close'] * 0.0005):
             return "ABSORPTION_DOJI", z_score
+
+        # Pattern 5: MOMENTUM BREAKDOWN (The "Flush") - Phase 38
+        # Big Red Candle + High Vol + Closing at Lows (No lower wick)
+        # Body must be > 1.2x Average Body (Relaxed from 1.5x)
+        avg_body = df['high'].iloc[-20:-1].sub(df['low'].iloc[-20:-1]).abs().mean()
+        if avg_body == 0: avg_body = 0.1
+        
+        is_big_red = d3 == -1 and b3 > (1.2 * avg_body) 
+        # Vol check: relaxed to > 1.5 if body is HUGE (> 2x), or > 1.2 if just Big Red
+        # If Body > 1.5x, allow Z > 1.2. If Body > 2.0x, allow Z > 1.0.
+        # EXTREME: If Body > 3.0x Avg, allow ANY Volume (Vacuum Flush)
+        
+        is_high_vol = False
+        if z_score > 2.0: is_high_vol = True
+        elif b3 > 1.5 * avg_body and z_score > 1.2: is_high_vol = True
+        elif b3 > 3.0 * avg_body: is_high_vol = True # Vacuum Flush
+        
+        # Wick check: Allow up to 35% lower wick (some buying pressure is normal)
+        closes_at_low = (c3['close'] - c3['low']) < (r3 * 0.35) 
+    
+        if is_big_red and is_high_vol and closes_at_low:
+            return "MOMENTUM_BREAKDOWN", z_score
+
+        # Pattern 6: VOLUME TRAP (Failed Breakout) - Phase 38
+        # Prev: Green + High Vol (Attempted Breakout)
+        # Curr: Red + Closes below Prev Low (Trap)
+        prev_vol = c2['volume']
+        prev_z = (prev_vol - avg_vol) / std_vol if std_vol > 0 else 0
+        
+        if d2 == 1 and prev_z > 1.5: # Prev was pushing up with vol
+            if d3 == -1 and c3['close'] < c2['low']: # Curr flushed it
+                return "VOLUME_TRAP", z_score
             
         return "NORMAL", z_score
 
@@ -338,30 +379,3 @@ class GodModeAnalyst:
             
         return levels
 
-if __name__ == "__main__":
-    # Test
-    gm = GodModeAnalyst()
-    
-    # Mock Data
-    data = {
-        'close': [100, 100.1, 100.2, 100.1, 100.05],
-        'volume': [1000, 1200, 1100, 5000, 1000], # Spike at end
-        'open': [100, 100.1, 100.2, 100.3, 100.04],
-        'high': [100.1, 100.2, 100.3, 100.5, 100.05], # Long wick at end
-        'low': [99.9, 100.1, 100.1, 100.1, 100.00]
-    }
-    df = pd.DataFrame(data)
-    
-    # Calc Slope
-    slope, status = gm.calculate_vwap_slope(df, window=5)
-    print(f"Slope: {slope:.2f} ({status})")
-    
-    # Calc Structure (Last candle 4: High vol 1000? No 1000 is small vs 5000)
-    # Let's test the massive vol candle (index 3)
-    df_slice = df.iloc[:4]
-    struct, z = gm.detect_structure(df_slice)
-    print(f"Structure (Candle 3): {struct} (Z-Vol: {z:.2f})")
-    
-    # Check Constraints
-    ok, msg = gm.check_constraints(ltp=100.1, day_high=102, trend_gain=9.0)
-    print(f"Constraints: {ok} -> {msg}")

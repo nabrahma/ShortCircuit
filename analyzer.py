@@ -88,67 +88,78 @@ class FyersAnalyzer:
         Validates a trading candidate using the God Mode strategy.
         Optimized to use pre-fetched History DF and Shared Depth Data.
         """
-        # --- Pre-analysis Filters ---
-        if not self._check_filters(symbol):
-            return None
-            
-        # --- OPTIMIZATION: Shared Depth Data ---
-        # We fetch Depth ONCE here and share it with Circuit Guard and Tape Reader
-        try:
-            full_depth = self.fyers.depth(data={"symbol": symbol, "ohlcv_flag":"1"})
-            # Validate response
-            if 'd' in full_depth and symbol in full_depth['d']:
-                depth_data = full_depth['d'][symbol]
-            else:
-                depth_data = None
-        except:
-            depth_data = None
-            
-        # --- Circuit & Gap Guard ---
-        # Pass the pre-fetched depth data
-        if self._check_circuit_guard(symbol, ltp, depth_data):
-            return None
 
-        # --- Data Fetching ---
+        
+        # 1. Pre-analysis Filters
+        if not self._check_filters(symbol):
+
+            return None
+            
+        # 2. Data Fetching
         if pre_fetched_df is not None:
              df = pre_fetched_df
+             # Ensure we're working with a copy to avoid side effects
+             df = df.copy()
         else:
              df = self.get_history(symbol)
              
         if df is None or df.empty:
-            return None
 
-        # --- Technical Calculations ---
+            return None
+            
+        # Define prev_df (used for structural analysis components that need history context)
+        # Note: df includes the current candle 'i'. prev_df is history up to 'i-1'.
+        prev_df = df.iloc[:-1]
+
+        # 3. Technical Calculations & Context
         self._enrich_dataframe(df)
         
         day_high = df['high'].max()
         open_price = df.iloc[0]['open']
         gain_pct = ((ltp - open_price) / open_price) * 100
         
-        # --- Hard Constraints ---
-        ok, _ = self.gm_analyst.check_constraints(ltp, day_high, gain_pct)
+        # 4. Hard Constraints (The "Ethos" Check)
+        # LOGIC FIX (Phase 38): Pass open_price to valid Max Day Gain
+        ok, msg = self.gm_analyst.check_constraints(ltp, day_high, gain_pct, open_price)
+        
         if not ok:
             return None
-            
-        slope, _ = self.gm_analyst.calculate_vwap_slope(df.iloc[-30:])
+        
 
-        # --- Momentum Safeguard (Train Filter) ---
-        if self._is_momentum_too_strong(df, slope, symbol):
+
+        # 5. Circuit Guard (Requires Depth)
+        # We fetch Depth ONCE here and share it with Circuit Guard and Tape Reader
+        depth_data = None
+        try:
+            full_depth = self.fyers.depth(data={"symbol": symbol, "ohlcv_flag":"1"})
+            # Validate response
+            if 'd' in full_depth and symbol in full_depth['d']:
+                depth_data = full_depth['d'][symbol]
+        except:
+            pass
+            
+        if self._check_circuit_guard(symbol, ltp, depth_data):
             return None
 
-        # --- Pattern Recognition ---
-        # Analyze the 'setup' candle (previous completed candle)
-        prev_df = df.iloc[:-1]
-        struct, _ = self.gm_analyst.detect_structure_advanced(prev_df)
+        # 6. Momentum Safeguard (Train Filter)
+        slope, _ = self.gm_analyst.calculate_vwap_slope(df.iloc[-30:])
+        if self._is_momentum_too_strong(df, slope, symbol):
+             if symbol == "NSE:CLSEL-EQ": print("[DEBUG] Blocked by Momentum/Train Filter")
+             return None
+
+        # 7. Pattern Recognition
+        struct, z_score = self.gm_analyst.detect_structure_advanced(df)
         
         # Tape Analysis (Stall Detection only, Absorption disabled)
-        is_stalled, _ = self.tape_reader.detect_stall(prev_df)
-
-        # Sniper Zone Analysis
-        prev_candle = df.iloc[-2]
-        is_sniper_zone = self._check_sniper_zone(df)
-
-        # --- Signal Validity Logic ---
+        is_stalled, _ = self.tape_reader.detect_stall(df)
+        
+        if len(df) > 1:
+            prev_candle = df.iloc[-2]
+            is_sniper_zone = self._check_sniper_zone(df)
+        else:
+            prev_candle = df.iloc[0] # Fallback
+            is_sniper_zone = False
+        
         valid_signal = False
         pattern_desc = ""
         
@@ -162,9 +173,10 @@ class FyersAnalyzer:
             is_extended = vwap_sd > 2.0
             
             # Structural Patterns
-            if struct in ["SHOOTING_STAR", "BEARISH_ENGULFING", "EVENING_STAR"]:
+            if struct in ["SHOOTING_STAR", "BEARISH_ENGULFING", "EVENING_STAR", "MOMENTUM_BREAKDOWN", "VOLUME_TRAP"]:
                 valid_signal = True
                 pattern_desc = struct
+            
             # Sniper Doji
             elif struct == "ABSORPTION_DOJI" and is_sniper_zone:
                 valid_signal = True
@@ -175,6 +187,8 @@ class FyersAnalyzer:
                 pattern_desc = "TAPESTALL (Drift)"
 
             if valid_signal:
+                # SPECIAL CASE: Momentum/Trap patterns don't need "Pro Confluence" if Volume is already high
+                # But let's check basic confluence anyway
                 valid_signal, pro_conf_msgs = self._check_pro_confluence(
                     symbol, df, prev_df, slope, is_extended, vwap_sd, pattern_desc, depth_data, ltp, oi
                 )
@@ -513,5 +527,6 @@ class FyersAnalyzer:
             'pattern': pattern_desc,
             'stop_loss': sl_price, 
             'day_high': df['high'].max(),
+            'signal_low': df.iloc[-2]['low'], # CRITICAL: Validation Level
             'meta': meta_str
         }

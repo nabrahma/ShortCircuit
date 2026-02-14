@@ -19,7 +19,7 @@ class ShortCircuitBot:
         self.fyers = FyersConnect().authenticate()
         
         # Focus Engine for Live Dashboard
-        self.focus_engine = FocusEngine()
+        self.focus_engine = FocusEngine(trade_manager)
         
         # Register Handlers
         self.register_handlers()
@@ -199,6 +199,17 @@ class ShortCircuitBot:
             else:
                 self.bot.answer_callback_query(call.id, "[FAIL] Error closing trade (ID not found?)")
 
+        # 3. REFRESH DASHBOARD
+        elif call.data.startswith("REFRESH_"):
+            trade_id = call.data.split("_")[1]
+            try:
+                # 1. Trigger Engine Refresh
+                self.focus_engine.force_refresh()
+                self.bot.answer_callback_query(call.id, "🔄 Dashboard Refreshed")
+            except Exception as e:
+                logger.error(f"Refresh Handler Error: {e}")
+                self.bot.answer_callback_query(call.id, "[FAIL] Refresh Error")
+
                 
     def prettify_pattern(self, raw_pat):
         if "ABSORPTION" in raw_pat: return "Institutional Absorption (High Vol, Stuck Price)"
@@ -268,6 +279,27 @@ class ShortCircuitBot:
                 self.bot.send_message(self.chat_id, msg, parse_mode="Markdown", reply_markup=markup)
             except Exception as e:
                 logger.error(f"Failed to send Manual Alert: {e}")
+
+    def send_validation_alert(self, signal):
+        """
+        Phase 37: Notify user that a signal is in the Validation Gate.
+        """
+        symbol = self.escape_md(signal['symbol'])
+        pattern = self.escape_md(self.prettify_pattern(signal['pattern']))
+        trigger = signal.get('signal_low', 0)
+        
+        msg = (
+            f"🛡️ **VALIDATION GATE ACTIVATED**\n\n"
+            f"Symbol: `{symbol}`\n"
+            f"Pattern: {pattern}\n\n"
+            f"**STATUS: PENDING** ⏳\n"
+            f"Waiting for Price < **{trigger}**\n"
+            f"_(Entry blocked until confirmation)_"
+        )
+        try:
+            self.bot.send_message(self.chat_id, msg, parse_mode="Markdown")
+        except Exception as e:
+            logger.error(f"Validation Alert Error: {e}")
 
     def start_polling(self):
         logger.info("[BOT] Telegram Bot Listening...")

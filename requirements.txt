@@ -1,7 +1,6 @@
 fyers-apiv3
 pandas
-pandas_ta
+numpy
 python-dotenv
 pyTelegramBotAPI
-colorama
-numpy
+pyarrow

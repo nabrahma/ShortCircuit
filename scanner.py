@@ -199,30 +199,8 @@ class FyersScanner:
         
         logger.info(f"Scan Complete. Found {len(filtered_candidates)} candidates.")
         
-        # Notify Telegram
-        # Notify Telegram (DISABLED per user request to reduce noise)
-        # try:
-        #     import telebot
-        #     import config
-            
-        #     if config.TELEGRAM_BOT_TOKEN and config.TELEGRAM_CHAT_ID:
-        #         bot = telebot.TeleBot(config.TELEGRAM_BOT_TOKEN)
-                
-        #         msg = "🚀 *Market Status: Top Gainers (EOD)* 🚀\n\n"
-        #         for stock in top_gainers:
-        #             symbol_clean = stock['symbol'].replace('NSE:', '').replace('-EQ', '')
-        #             msg += f"• *{symbol_clean}*: {stock['change']}% (Vol: {stock['volume'] :,})\n"
-                
-        #         if not top_gainers:
-        #             msg += "No significant gainers found."
-                    
-        #         # bot.send_message(config.TELEGRAM_CHAT_ID, msg, parse_mode="Markdown")
-        #         # print("✅ Telegram Notification Sent!")
-        #     else:
-        #         print("⚠️ Telegram credentials missing in config.")
-                
-        # except Exception as e:
-        #     print(f"❌ Telegram Error: {e}")
+
+
             
         return top_gainers
 
