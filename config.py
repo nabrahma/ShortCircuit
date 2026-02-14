@@ -67,3 +67,32 @@ DETECTOR_LOG_PATH = "logs/detector_performance.csv"
 
 # --- Phase 41.1: Scanner Optimization ---
 SCANNER_PARALLEL_WORKERS = 10  # Max concurrent API calls
+
+# ============================================================================
+# SCALPER RISK MANAGEMENT (Phase 41.2)
+# ============================================================================
+
+# Feature flag — Set to True to enable new scalper system
+USE_SCALPER_RISK_MANAGEMENT = False  # DEFAULT: OFF (backward compatible)
+
+# Stop Loss Configuration
+SCALPER_STOP_TICK_BUFFER = 12           # Ticks above setup candle high
+SCALPER_STOP_HUNT_BUFFER_PCT = 0.003    # 0.3% hunt protection buffer
+SCALPER_STOP_HUNT_BUFFER_ENABLED = True
+
+# Breakeven Configuration
+SCALPER_BREAKEVEN_TRIGGER_PCT = 0.003   # 0.3% profit triggers breakeven
+
+# Trailing Stop Configuration
+SCALPER_TRAILING_DISTANCE_INITIAL = 0.002     # 0.2% behind price
+SCALPER_TRAILING_DISTANCE_AFTER_TP1 = 0.0015  # 0.15% (tighter after TP1)
+SCALPER_TRAILING_DISTANCE_AFTER_TP2 = 0.001   # 0.1% (very tight after TP2)
+
+# Take Profit Targets
+SCALPER_TP1_PCT = 0.015  # 1.5% — Close 50%
+SCALPER_TP2_PCT = 0.025  # 2.5% — Close another 25% (75% total)
+SCALPER_TP3_PCT = 0.035  # 3.5% — Close all remaining
+
+# Simulation & Analysis
+ENABLE_EOD_SIMULATION = True
+SIMULATION_LOG_PATH = "logs/eod_simulation.csv"

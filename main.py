@@ -30,6 +30,61 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
+def scalper_position_monitor(scalper_manager, trade_manager, fyers, bot, stop_event):
+    """
+    Phase 41.2: Background thread that polls LTP every 2s and manages
+    the scalper position (breakeven, trailing, TP scale-out, stop).
+    """
+    while not stop_event.is_set():
+        try:
+            pos = scalper_manager.active_position
+            if pos is None:
+                time.sleep(2)
+                continue
+
+            # Fetch LTP
+            resp = fyers.quotes(data={"symbols": pos.symbol})
+            if 'd' not in resp or not resp['d']:
+                time.sleep(2)
+                continue
+
+            current_ltp = resp['d'][0]['v']['lp']
+            action = scalper_manager.update_position(current_ltp)
+
+            if action['action'] == 'UPDATE_STOP':
+                trade_manager.update_stop_loss(pos.symbol, action['new_stop'])
+
+            elif action['action'] == 'CLOSE_PARTIAL':
+                trade_manager.close_partial_position(
+                    pos.symbol, action['quantity'], action['reason']
+                )
+                try:
+                    msg = (f"[SCALPER] {action['reason']}: Closed {action['quantity']} "
+                           f"shares @ ₹{action['price']:.2f}")
+                    bot.bot.send_message(bot.chat_id, msg)
+                except Exception:
+                    pass
+
+            elif action['action'] in ('STOP_HIT', 'CLOSE_ALL'):
+                # Full close — either stopped out or TP3 home run
+                trade_manager.close_partial_position(
+                    pos.symbol, action['quantity'], action['reason']
+                )
+                try:
+                    emoji = "🏠" if action['reason'] == 'TP3_HOME_RUN' else "🛑"
+                    msg = (f"{emoji} [SCALPER] {action['reason']}: "
+                           f"Closed ALL @ ₹{action['price']:.2f}")
+                    bot.bot.send_message(bot.chat_id, msg)
+                except Exception:
+                    pass
+
+        except Exception as e:
+            logger.error(f"Scalper monitor error: {e}")
+
+        time.sleep(2)
+
+
 def main():
     logger.info("--- [BOT] Starting ShortCircuit (Fyers Edition) ---")
 
@@ -61,6 +116,25 @@ def main():
         )
         logger.info("[INIT] Detector Performance Tracker ENABLED")
 
+    # Phase 41.2: Scalper Position Manager (lazy init)
+    scalper_manager = None
+    scalper_stop_event = threading.Event()
+    if getattr(config, 'USE_SCALPER_RISK_MANAGEMENT', False):
+        from scalper_position_manager import ScalperPositionManager
+        scalper_manager = ScalperPositionManager(trade_manager)
+        logger.info("[INIT] ✓ Scalper Risk Management ENABLED (Phase 41.2)")
+
+        # Start position monitoring thread
+        scalper_thread = threading.Thread(
+            target=scalper_position_monitor,
+            args=(scalper_manager, trade_manager, fyers, bot, scalper_stop_event),
+            daemon=True
+        )
+        scalper_thread.start()
+        logger.info("[INIT] Scalper position monitor thread started")
+    else:
+        logger.info("[INIT] Legacy Risk Management (Phase 41.1)")
+
     # 3. Start Telegram Thread
     t_bot = threading.Thread(target=bot.start_polling)
     t_bot.daemon = True
@@ -89,6 +163,7 @@ def main():
             current_time = now.strftime("%H:%M")
             if current_time >= config.SQUARE_OFF_TIME:
                 logger.warning(f"[TIME] Market Close Time ({current_time}). Initiating Square-off.")
+                scalper_stop_event.set()  # Stop scalper monitor thread
                 msg = trade_manager.close_all_positions()
                 
                 # Notify Telegram
@@ -155,7 +230,17 @@ def main():
                         signal['signal_id'] = signal_id  # Attach for later tracking
                         detector_names = [e['trigger'] for e in signal.get('edges_detected', [])]
                         tracker.log_signal_generated(signal_id, detector_names, symbol)
-                    
+
+                    # 4. Phase 41.2: If scalper is enabled and trade executes,
+                    #    start scalper position management.
+                    #    Note: The actual trade execution happens inside
+                    #    focus_engine.check_pending_signals() when validation fires.
+                    #    The scalper manager monitors via its own thread.
+                    if scalper_manager and signal.get('setup_high'):
+                        # Store scalper-relevant fields on the signal for
+                        # use by the validation gate's execution callback.
+                        signal['_scalper_manager'] = scalper_manager
+
             elapsed = time.time() - start_time
             sleep_time = max(0, SCAN_INTERVAL - elapsed)
             logger.info(f"Cycle finished in {elapsed:.2f}s. Sleeping {sleep_time:.2f}s")
@@ -163,6 +248,7 @@ def main():
 
         except KeyboardInterrupt:
             logger.info("Manually Stopped.")
+            scalper_stop_event.set()
             break
         except Exception as e:
             logger.error(f"Loop Error: {e}")
@@ -170,3 +256,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

@@ -168,6 +168,101 @@ class TradeManager:
         except Exception as e:
             logger.critical(f"[CRIT] EMERGENCY EXIT FAILED for {symbol}: {e}")
 
+    def close_partial_position(self, symbol: str, quantity: int, reason: str) -> dict:
+        """
+        Phase 41.2: Close partial position for TP scale-out.
+
+        Args:
+            symbol: NSE:SYMBOL-EQ format
+            quantity: Number of shares to close
+            reason: 'TP1_HIT', 'TP2_HIT', etc.
+
+        Returns:
+            dict with status, fill_price, filled_qty
+        """
+        logger.info(f"[SCALPER] Closing {quantity} shares of {symbol} ({reason})")
+
+        order_data = {
+            "symbol": symbol,
+            "qty": quantity,
+            "type": 2,       # Market order
+            "side": 1,       # Buy (cover short)
+            "productType": "INTRADAY",
+            "limitPrice": 0,
+            "stopPrice": 0,
+            "validity": "DAY",
+            "disclosedQty": 0,
+            "offlineOrder": False,
+        }
+
+        try:
+            response = self.fyers.place_order(data=order_data)
+
+            if response.get("s") == "ok" and "id" in response:
+                order_id = response["id"]
+                logger.info(f"[SCALPER] Partial close order placed: {order_id}")
+
+                return {
+                    "status": "SUCCESS",
+                    "order_id": order_id,
+                    "filled_qty": quantity,
+                }
+            else:
+                logger.error(f"[SCALPER] Partial close FAILED: {response}")
+                return {"status": "FAILED", "error": str(response)}
+
+        except Exception as e:
+            logger.error(f"[SCALPER] Partial close exception: {e}")
+            return {"status": "FAILED", "error": str(e)}
+
+    def update_stop_loss(self, symbol: str, new_stop: float) -> dict:
+        """
+        Phase 41.2: Modify existing SL order to new price.
+
+        Args:
+            symbol: NSE:SYMBOL-EQ format
+            new_stop: New stop loss price
+
+        Returns:
+            dict with status
+        """
+        logger.info(f"[SCALPER] Updating SL for {symbol} to ₹{new_stop:.2f}")
+
+        try:
+            # Find pending SL order for this symbol
+            orders = self.fyers.orderbook()
+            if "orderBook" not in orders:
+                logger.warning("[SCALPER] No orders found in orderbook")
+                return {"status": "NO_ORDERS"}
+
+            for order in orders["orderBook"]:
+                if order["symbol"] == symbol and order["status"] == 6:  # Pending
+                    tick_size = 0.05  # Default
+                    sl_trigger = self.tick_round(float(new_stop), tick_size)
+                    sl_limit = self.tick_round(sl_trigger * 1.005, tick_size)
+
+                    modify_data = {
+                        "id": order["id"],
+                        "type": 4,  # SL-Limit
+                        "limitPrice": sl_limit,
+                        "stopPrice": sl_trigger,
+                    }
+
+                    resp = self.fyers.modify_order(data=modify_data)
+                    if resp.get("s") == "ok":
+                        logger.info(f"[SCALPER] SL updated to ₹{sl_trigger}")
+                        return {"status": "SUCCESS", "new_stop": sl_trigger}
+                    else:
+                        logger.error(f"[SCALPER] SL modify failed: {resp}")
+                        return {"status": "FAILED", "error": str(resp)}
+
+            logger.warning(f"[SCALPER] No pending SL order found for {symbol}")
+            return {"status": "NOT_FOUND"}
+
+        except Exception as e:
+            logger.error(f"[SCALPER] SL update exception: {e}")
+            return {"status": "FAILED", "error": str(e)}
+
     def close_all_positions(self):
         """
         Closes all open intraday positions.

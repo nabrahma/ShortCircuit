@@ -112,12 +112,21 @@ class FocusEngine:
                     # 1. Execute Logic
                     res = trade_manager.execute_logic(pending['data'])
                     
-                    # 2. Alert User (via Alert callback handling in Main or Bot)
-                    # We can't easily call bot.send_alert here without circular deps or callback passing.
-                    # But trade_manager.execute_logic returns the result dict.
-                    # We should probably pass the result back to main.py? 
-                    # Actually, check_pending_signals is called from main.py.
-                    # We can return a list of executed results!
+                    # Phase 41.2: Start scalper position management if enabled
+                    signal_data = pending['data']
+                    scalper_mgr = signal_data.get('_scalper_manager')
+                    if scalper_mgr and res and res.get('status') == 'EXECUTED':
+                        try:
+                            scalper_mgr.start_position(
+                                symbol=symbol,
+                                entry_price=res.get('ltp', ltp),
+                                quantity=res.get('qty', int(config.CAPITAL / ltp)),
+                                setup_high=signal_data.get('setup_high', ltp * 1.005),
+                                tick_size=signal_data.get('tick_size', 0.05),
+                            )
+                            logger.info(f"[SCALPER] Position manager activated for {symbol}")
+                        except Exception as e:
+                            logger.error(f"[SCALPER] Failed to start position manager: {e}")
                     
                     del self.pending_signals[symbol]
                     return res # Return result to Main for alerting

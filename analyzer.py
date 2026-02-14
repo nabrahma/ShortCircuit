@@ -18,9 +18,12 @@ logger = logging.getLogger(__name__)
 
 SIGNAL_LOG_FILE = "logs/signals.csv"
 
-def log_signal(symbol: str, ltp: float, pattern: str, stop_loss: float, meta: str = ""):
+def log_signal(symbol: str, ltp: float, pattern: str, stop_loss: float,
+               meta: str = "", setup_high: float = 0.0,
+               tick_size: float = 0.05, atr: float = 0.0):
     """
     Persists signal details to a CSV file for EOD analysis.
+    Phase 41.2: Extended with setup_high, tick_size, atr for simulation.
     """
     os.makedirs(os.path.dirname(SIGNAL_LOG_FILE), exist_ok=True)
     file_exists = os.path.exists(SIGNAL_LOG_FILE)
@@ -28,7 +31,8 @@ def log_signal(symbol: str, ltp: float, pattern: str, stop_loss: float, meta: st
     with open(SIGNAL_LOG_FILE, 'a', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
         if not file_exists:
-            writer.writerow(["timestamp", "symbol", "ltp", "pattern", "stop_loss", "meta"])
+            writer.writerow(["timestamp", "symbol", "ltp", "pattern",
+                             "stop_loss", "meta", "setup_high", "tick_size", "atr"])
         
         writer.writerow([
             datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -36,7 +40,10 @@ def log_signal(symbol: str, ltp: float, pattern: str, stop_loss: float, meta: st
             ltp,
             pattern,
             stop_loss,
-            meta
+            meta,
+            setup_high,
+            tick_size,
+            atr
         ])
 
 class FyersAnalyzer:
@@ -548,14 +555,16 @@ class FyersAnalyzer:
         # Calculate Stop Loss (ATR)
         atr = self.gm_analyst.calculate_atr(df)
         buffer = max(atr * 0.5, 0.25)
-        sl_price = df.iloc[-2]['high'] + buffer
+        setup_high = df.iloc[-2]['high']
+        sl_price = setup_high + buffer
 
         # Logging
         logger.info(f"[OK] GOD MODE SIGNAL: {symbol} | {pattern_desc}")
         logger.info(f"   HTF: {htf_msg}")
         
         meta_str = f"Slope:{slope:.1f}, {wall_msg}, ATR:{atr:.2f}, {htf_msg}, {level_msg}"
-        log_signal(symbol, ltp, pattern_desc, sl_price, meta_str)
+        log_signal(symbol, ltp, pattern_desc, sl_price, meta_str,
+                   setup_high=setup_high, tick_size=0.05, atr=atr)
         
         # ===== ML DATA LOGGING =====
         try:
@@ -620,5 +629,8 @@ class FyersAnalyzer:
             'stop_loss': sl_price, 
             'day_high': df['high'].max(),
             'signal_low': df.iloc[-2]['low'], # CRITICAL: Validation Level
+            'setup_high': setup_high,         # Phase 41.2: For scalper SL calc
+            'tick_size': 0.05,                # Phase 41.2: Default NSE tick
+            'atr': atr,                       # Phase 41.2: For legacy simulation
             'meta': meta_str
         }
