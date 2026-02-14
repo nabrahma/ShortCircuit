@@ -47,6 +47,13 @@ def main():
     trade_manager = TradeManager(fyers)
     bot = ShortCircuitBot(trade_manager)
 
+    # Phase 41: Multi-Edge Detector (lazy init)
+    multi_edge = None
+    if config.MULTI_EDGE_ENABLED:
+        from multi_edge_detector import MultiEdgeDetector
+        multi_edge = MultiEdgeDetector(config.ENABLED_DETECTORS)
+        logger.info("[INIT] Multi-Edge Detection System ENABLED")
+
     # 3. Start Telegram Thread
     t_bot = threading.Thread(target=bot.start_polling)
     t_bot.daemon = True
@@ -97,17 +104,40 @@ def main():
                 ltp = cand['ltp']
                 oi = cand.get('oi', 0)
                 
-                # Check Technicals
-                history_df = cand.get('history_df') # Get Cached DF
-                signal = analyzer.check_setup(symbol, ltp, oi, history_df)
+                signal = None
+                history_df = cand.get('history_df')
+
+                if config.MULTI_EDGE_ENABLED and multi_edge is not None:
+                    # --- Phase 41 Path: Multi-Edge Detection ---
+                    edge_candidate = {
+                        'symbol': symbol,
+                        'ltp': ltp,
+                        'history_df': history_df,
+                        'depth': None,      # Fetched inside analyzer if needed
+                        'day_high': cand.get('day_high', 0),
+                        'day_low': cand.get('day_low', 0),
+                        'open': cand.get('open', 0),
+                        'tick_size': cand.get('tick_size', 0.05),
+                        'vwap': 0,          # Calculated by enrichment
+                    }
+                    edge_payload = multi_edge.scan_all_edges(edge_candidate)
+                    if edge_payload:
+                        signal = analyzer.check_setup_with_edges(
+                            symbol, ltp, oi, history_df, edge_payload
+                        )
+                else:
+                    # --- Phase 40 Path: Pattern-only (existing logic) ---
+                    signal = analyzer.check_setup(symbol, ltp, oi, history_df)
                 
                 if signal:
                     # C. Validation Phase (Phase 37)
-                    # Instead of executing immediately, we send to FocusEngine for "Acceptance" check.
                     logger.info(f"[SIGNAL] {symbol} Candidate Found. Sending to Validation Gate.")
                     
                     # 1. Alert User (Pending)
-                    bot.send_validation_alert(signal) 
+                    if signal.get('edges_detected'):
+                        bot.send_multi_edge_alert(signal)
+                    else:
+                        bot.send_validation_alert(signal) 
                     
                     # 2. Add to Gate (Starts Monitor Thread)
                     bot.focus_engine.add_pending_signal(signal)

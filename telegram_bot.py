@@ -301,6 +301,46 @@ class ShortCircuitBot:
         except Exception as e:
             logger.error(f"Validation Alert Error: {e}")
 
+    def send_multi_edge_alert(self, signal):
+        """
+        Phase 41: Rich multi-edge alert showing all detected edges.
+        """
+        symbol = self.escape_md(signal['symbol'])
+        edges = signal.get('edges_detected', [])
+        confidence = signal.get('confidence', 'HIGH')
+        edge_count = signal.get('edge_count', 1)
+        trigger = signal.get('signal_low', 0)
+        sl = signal.get('stop_loss', 0)
+
+        edge_list = "\n".join([f"  ✓ {self.escape_md(e)}" for e in edges])
+
+        msg = (
+            f"🎯 **MULTI\\-EDGE SIGNAL** \\[{confidence}\\]\n\n"
+            f"**Symbol:** `{symbol}`\n"
+            f"**Primary:** {self.escape_md(signal.get('primary_edge', edges[0] if edges else ''))}\n\n"
+            f"**Edges Detected:**\n{edge_list}\n\n"
+            f"**Entry:** Below `{trigger}`\n"
+            f"**Stop Loss:** `{sl}`\n"
+            f"**Confidence:** {confidence} \\({edge_count} edges\\)\n\n"
+            f"⏳ _PENDING VALIDATION_"
+        )
+        try:
+            self.bot.send_message(self.chat_id, msg, parse_mode="MarkdownV2")
+        except Exception:
+            # Fallback to plain Markdown if V2 escaping fails
+            plain = (
+                f"🎯 **MULTI-EDGE SIGNAL** [{confidence}]\n\n"
+                f"Symbol: `{signal['symbol']}`\n"
+                f"Edges: {', '.join(edges)}\n"
+                f"Entry: Below {trigger} | SL: {sl}\n"
+                f"Confidence: {confidence} ({edge_count} edges)\n\n"
+                f"STATUS: PENDING VALIDATION"
+            )
+            try:
+                self.bot.send_message(self.chat_id, plain, parse_mode="Markdown")
+            except Exception as e:
+                logger.error(f"Multi-Edge Alert Error: {e}")
+
     def start_polling(self):
         logger.info("[BOT] Telegram Bot Listening...")
         self.bot.infinity_polling()

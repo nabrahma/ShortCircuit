@@ -144,7 +144,6 @@ class FyersAnalyzer:
         # 6. Momentum Safeguard (Train Filter)
         slope, _ = self.gm_analyst.calculate_vwap_slope(df.iloc[-30:])
         if self._is_momentum_too_strong(df, slope, symbol):
-             if symbol == "NSE:CLSEL-EQ": print("[DEBUG] Blocked by Momentum/Train Filter")
              return None
 
         # 7. Pattern Recognition
@@ -438,6 +437,99 @@ class FyersAnalyzer:
         except:
             pass
         return False, ""
+
+    # ------------------------------------------------------------------
+    # Phase 41: Multi-Edge Analyzer Entry Point
+    # ------------------------------------------------------------------
+    def check_setup_with_edges(
+        self, symbol: str, ltp: float, oi: float,
+        pre_fetched_df, edge_payload: dict
+    ):
+        """
+        Called when MULTI_EDGE_ENABLED is True.
+        Runs Gates 1-7 and 9-12 (skips Gate 8 pattern detection since
+        edges are already identified by MultiEdgeDetector).
+        """
+        # Gate 1-2: Pre-analysis filters (Signal Manager + Market Regime)
+        if not self._check_filters(symbol):
+            return None
+
+        # Gate 3: Data
+        if pre_fetched_df is not None:
+            df = pre_fetched_df.copy()
+        else:
+            df = self.get_history(symbol)
+        if df is None or df.empty:
+            return None
+
+        prev_df = df.iloc[:-1]
+
+        # Gate 4: Context enrichment
+        self._enrich_dataframe(df)
+        day_high = df['high'].max()
+        open_price = df.iloc[0]['open']
+        gain_pct = ((ltp - open_price) / open_price) * 100
+
+        # Gate 5: Hard constraints
+        ok, msg = self.gm_analyst.check_constraints(ltp, day_high, gain_pct, open_price)
+        if not ok:
+            return None
+
+        # Gate 6: Circuit Guard
+        depth_data = None
+        try:
+            full_depth = self.fyers.depth(data={"symbol": symbol, "ohlcv_flag": "1"})
+            if 'd' in full_depth and symbol in full_depth['d']:
+                depth_data = full_depth['d'][symbol]
+        except Exception:
+            pass
+
+        if self._check_circuit_guard(symbol, ltp, depth_data):
+            return None
+
+        # Gate 7: Momentum Safeguard
+        slope, _ = self.gm_analyst.calculate_vwap_slope(df.iloc[-30:])
+        if self._is_momentum_too_strong(df, slope, symbol):
+            return None
+
+        # SKIP Gate 8 — edges already detected by MultiEdgeDetector
+
+        # Gate 9: Breakdown confirmation (edge-specific entry trigger)
+        current_ltp = df.iloc[-1]['close']
+        if current_ltp >= edge_payload['entry_trigger']:
+            return None  # Not yet broken down
+
+        # Gate 10: Pro Confluence (same logic)
+        vwap_sd = self.gm_analyst.calculate_vwap_bands(prev_df)
+        is_extended = vwap_sd > 2.0
+        edge_desc = " + ".join(e['trigger'] for e in edge_payload['edges'])
+
+        valid_signal, pro_conf_msgs = self._check_pro_confluence(
+            symbol, df, prev_df, slope, is_extended, vwap_sd,
+            edge_desc, depth_data, ltp, oi
+        )
+        if pro_conf_msgs:
+            edge_desc += f" + {', '.join(pro_conf_msgs)}"
+
+        if not valid_signal:
+            return None
+
+        # Gate 11-12: HTF + Finalize (adds ML logging, SL, etc.)
+        base_signal = self._finalize_signal(symbol, ltp, df, edge_desc, slope, "")
+        if base_signal is None:
+            return None
+
+        # Merge edge metadata into signal for Telegram + logging
+        base_signal['edges_detected'] = [e['trigger'] for e in edge_payload['edges']]
+        base_signal['confidence'] = edge_payload['confidence']
+        base_signal['edge_count'] = edge_payload['edge_count']
+        base_signal['primary_edge'] = edge_payload['primary_trigger']
+
+        # Override SL if multi-edge recommends a tighter one
+        if edge_payload.get('recommended_sl') and edge_payload['recommended_sl'] < base_signal['stop_loss']:
+            base_signal['stop_loss'] = edge_payload['recommended_sl']
+
+        return base_signal
 
     def _finalize_signal(self, symbol, ltp, df, pattern_desc, slope, wall_msg):
         """Final HTF checks and logging."""

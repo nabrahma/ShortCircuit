@@ -1,7 +1,7 @@
 # ShortCircuit — Complete System Architecture
 
 **Classification**: Internal Technical Document
-**Version**: Phase 40 (Feb 2026)
+**Version**: Phase 41 (Feb 2026)
 **Purpose**: Comprehensive technical reference for the ShortCircuit intraday short-selling bot. Every claim in this document has been verified against the current source code.
 
 ---
@@ -52,7 +52,13 @@ Fifth, a "Good Morning" startup message is sent to Telegram, featuring a randoml
 
 The main loop then begins its 60-second cycle. At the start of each cycle, it checks whether the current time has passed the configured square-off time (default 15:10 IST). If so, it calls `trade_manager.close_all_positions()` which cancels ALL pending orders first, then closes ALL net positions via market orders, sends a "MARKET CLOSED" Telegram notification, and exits the loop. This ensures no positions are ever carried overnight.
 
-For each cycle during market hours, the orchestrator calls `scanner.scan_market()` to get candidates, then iterates through each candidate calling `analyzer.check_setup()`. Critically, the orchestrator never executes a trade directly. When a signal is returned, it sends a Validation Alert to Telegram and passes the signal to the Focus Engine's validation gate via `focus_engine.add_pending_signal()`. Execution is entirely deferred until price confirmation.
+For each cycle during market hours, the orchestrator calls `scanner.scan_market()` to get candidates. What happens next depends on the `MULTI_EDGE_ENABLED` flag in `config.py`.
+
+When the flag is `False` (the Phase 40 default), the system follows the original path: each candidate is passed to `analyzer.check_setup()`, which runs the full 12-gate pipeline including the pattern recognition gate.
+
+When the flag is `True`, the system activates the Phase 41 Multi-Edge path. Each candidate is first packaged into an edge candidate dictionary containing the symbol, LTP, history DataFrame, depth data, day high/low, open price, tick size, and VWAP. This package is passed to `MultiEdgeDetector.scan_all_edges()`, which runs up to 8 parallel edge detectors and returns a confidence-scored edge payload. If no qualifying edges are found, the candidate is skipped immediately. If edges are found, the edge payload is forwarded to `analyzer.check_setup_with_edges()`, which runs Gates 1–7 and 9–12 (skipping Gate 8 since pattern detection is already covered by the multi-edge detector). This dual-path architecture means Phase 40 behavior is perfectly preserved when the flag is off, and flipping the flag is a zero-risk instant rollback.
+
+In both paths, the orchestrator never executes a trade directly. When a signal is returned, it checks whether the signal carries multi-edge metadata (the `edges_detected` key). If so, a rich multi-edge alert is sent via `bot.send_multi_edge_alert()` showing all detected edges and confidence level. Otherwise, the standard validation alert is sent via `bot.send_validation_alert()`. The signal is then passed to the Focus Engine's validation gate via `focus_engine.add_pending_signal()`. Execution is entirely deferred until price confirmation.
 
 Error handling in the main loop is deliberately resilient. A `KeyboardInterrupt` cleanly breaks the loop for manual shutdown. Any other exception is caught, logged, and the system sleeps 10 seconds before retrying. The bot never crashes from a transient API failure or network hiccup.
 
@@ -80,6 +86,8 @@ The scanner returns up to 20 candidates sorted by change percentage in descendin
 
 This is the brain of ShortCircuit. The `FyersAnalyzer` class orchestrates a 12-gate sequential pipeline within its `check_setup()` method. If any gate rejects the candidate, processing terminates immediately — there is no further computation wasted on a disqualified stock.
 
+The analyzer exposes two entry points. The original `check_setup()` runs the complete 12-gate pipeline with its built-in pattern recognition gate. The Phase 41 addition, `check_setup_with_edges()`, accepts a pre-computed edge payload from the Multi-Edge Detector and runs Gates 1–7 and 9–12, skipping Gate 8 entirely since edge detection has already been performed externally. Both methods share the identical gate logic; the only difference is whether pattern detection is internal or delegated. Which entry point is called is determined by the `MULTI_EDGE_ENABLED` flag in the orchestrator.
+
 **Gate 1: Signal Manager Discipline.** The first gate queries the global `SignalManager` singleton, which enforces three rules designed to prevent the most common retail trading mistakes. First, the daily signal cap (maximum 5 signals per day) prevents overtrading — the philosophy being that if you cannot find a quality setup in 5 attempts, the market is not favorable today. Second, the per-symbol cooldown (45 minutes after each signal) prevents revenge trading the same stock after a failed setup. Third, the consecutive loss pause (3 losses in a row triggers a full trading pause for the day) enforces emotional discipline — when you are cold, you stop playing.
 
 **Gate 2: Market Regime Check.** The second gate calls `MarketContext.should_allow_short()`. This fetches Nifty 50 intraday 5-minute candles and calculates the first-hour range (09:15–10:15 IST). It identifies the morning high and morning low, then checks whether the current Nifty price has extended 0.5× the morning range above the morning high. If so, the market is classified as `TREND_UP` and ALL short signals are blocked. The logic is straightforward: when the broad market is trending aggressively upward, individual stock reversals are far less likely to sustain, and shorting against a rising tide is a losing proposition. If Nifty is within the morning range or trending down, shorts are permitted.
@@ -102,7 +110,7 @@ The depth data fetched here is cached and shared with subsequent orderflow analy
 
 **Gate 7: Momentum Safeguard — "The Train Filter".** This gate prevents the most dangerous type of short trade: shorting into accelerating momentum. The system calculates the VWAP slope over the last 30 candles using linear regression. It also computes the Relative Volume (RVOL) as `current_volume / average_volume_of_last_20_candles`. If RVOL exceeds 5.0 and the VWAP slope exceeds 40, the trade is blocked. The metaphor is explicit: "Don't stand in front of a freight train." If volume is surging AND price is accelerating upward, the reversal has not yet begun, and shorting here is statistically suicidal.
 
-**Gate 8: Pattern Recognition.** The `GodModeAnalyst.detect_structure_advanced()` method analyzes the last 3 candles (C1, C2, C3 — where C3 is the current candle) and identifies one of six institutional reversal patterns. Volume confirmation is quantified using Z-scores: `(current_volume - mean_of_last_20) / std_of_last_20`.
+**Gate 8: Pattern Recognition.** In the Phase 40 path (`check_setup()`), the `GodModeAnalyst.detect_structure_advanced()` method analyzes the last 3 candles (C1, C2, C3 — where C3 is the current candle) and identifies one of six institutional reversal patterns. In the Phase 41 path (`check_setup_with_edges()`), this gate is skipped entirely because the Multi-Edge Detector has already identified edges. Volume confirmation is quantified using Z-scores: `(current_volume - mean_of_last_20) / std_of_last_20`.
 
 **BEARISH ENGULFING**: C2 is green (buyers pushed up), C3 is red, C3's body is larger than C2's body, and C3 closes below C2's open. This requires a Z-score above 0, meaning the engulfing candle must have at least average volume. Without this filter, low-volume engulfing patterns in choppy markets generate false signals that incorrectly trigger cooldowns. The psychology: buyers committed on C2, but sellers overwhelmed them on C3 with conviction (evidenced by volume).
 
@@ -118,9 +126,9 @@ The depth data fetched here is cached and shared with subsequent orderflow analy
 
 If none of these patterns match, a **TAPESTALL** check is performed. If the tape reader detects price stalling at highs (standard deviation of recent highs below a threshold) AND price is extended more than 2 standard deviations above VWAP, a drift-based "Tape Stall" signal is generated.
 
-**Gate 9: Breakdown Confirmation.** After pattern detection, one additional filter is applied: the current candle's close must be BELOW the previous candle's low. This ensures the pattern is not just forming but has actually broken down. Many patterns form at highs and then consolidate sideways — the breakdown confirmation eliminates these false starts and ensures the reversal has tangible price evidence.
+**Gate 9: Breakdown Confirmation.** After pattern/edge detection, one additional filter is applied: the current candle's close must be BELOW the entry trigger. In the Phase 40 path, the trigger is the previous candle's low. In the Phase 41 path, the trigger is the lowest `entry_level` across all detected edges (the multi-edge detector sets this per-edge and the confidence scorer selects the minimum). This ensures the pattern is not just forming but has actually broken down.
 
-**Gate 10: Pro Confluence — "Belt and Suspenders".** If a valid pattern is found AND breakdown is confirmed, the system runs a comprehensive battery of secondary confirmation checks. This is what separates ShortCircuit from naive pattern-matching systems. The confluence checks include:
+**Gate 10: Pro Confluence — "Belt and Suspenders".** If a valid pattern/edge is found AND breakdown is confirmed, the system runs a comprehensive battery of secondary confirmation checks. This is what separates ShortCircuit from naive pattern-matching systems. The confluence checks include:
 
 Market Profile Rejection — checking if price is being rejected at the Value Area High (VAH) using a TPO (Time-Price-Opportunity) profile calculated from today's data. DOM Wall Detection — analyzing the Level 2 order book for heavy sell walls (sell/buy ratio exceeding 2.5×). VWAP Slope Analysis — if VWAP slope is below 5 units (flat), it confirms a mean-reversion environment favorable for shorts. RSI Divergence — detecting when price makes higher highs but RSI makes lower highs, a classic bearish divergence. VWAP Extension — quantifying how far price has pushed above VWAP in standard deviation units (above 2.0 SD is "extended"). Fibonacci Rejection — checking if the setup candle's high coincides with a Fibonacci retracement level (0.382, 0.5, or 0.618). Relative Volume — if the setup candle's volume exceeds 2× the 20-candle average, it confirms conviction. Conversely, if RVOL is below 0.5× while price is extended, it signals "Vacuum/Exhaustion" — price moved far on thin volume, which is unsustainable.
 
@@ -135,6 +143,8 @@ The validation rule for confluence is important: if price is NOT extended beyond
 Additionally, the system checks proximity to key multi-timeframe levels: Previous Day High (PDH), Previous Day Low (PDL), Previous Day Close (PDC), Previous Week High (PWH), and Previous Week Low (PWL). Proximity to these levels adds informational confluence in the log output but does not block or allow trades on its own.
 
 **Gate 12: Signal Finalization.** The stop loss is calculated as `setup_candle_high + (ATR × 0.5)`, with a minimum buffer of ₹0.25. The Average True Range (ATR) is calculated over 14 periods, ensuring the stop adapts dynamically to the stock's volatility — a high-volatility stock gets a wider stop, preventing premature stop-outs on normal noise. The signal_low (the low of the setup candle) becomes the Validation Trigger — the price level that must be broken before entry is permitted.
+
+In the Phase 41 path, the finalized signal is further enriched with multi-edge metadata: the list of all detected edges (`edges_detected`), the overall confidence level, the edge count, and the primary trigger name. If the multi-edge detector's recommended SL is tighter than the ATR-based SL, the tighter value is used — this allows edge-specific risk management (e.g., a Trapped Longs detector might place the SL just above the trap candle's high rather than using the broader ATR buffer).
 
 The signal is then logged to `logs/signals.csv` for end-of-day analysis, recorded in the Signal Manager (which triggers the 45-minute cooldown for that symbol), and an ML observation is written capturing 20+ features (candle metrics, VWAP statistics, volume statistics, pattern type, number of confluences, and Nifty trend) for future machine learning model training.
 
@@ -204,11 +214,13 @@ All counters reset automatically when the date changes, ensuring a fresh start e
 
 ### 3.9 The Telegram Interface — `telegram_bot.py`
 
-The Telegram bot serves as the primary human interface for the system. It handles five distinct notification flows:
+The Telegram bot serves as the primary human interface for the system. It handles six distinct notification flows:
 
 **Startup Message:** Sent once at boot with a motivational trading quote and system status confirmation.
 
-**Validation Alert:** Sent when a signal enters the Validation Gate. Includes the symbol, pattern detected, trigger price, and a "PENDING" status indicator. This alerts the operator that the system has found a candidate and is waiting for price confirmation.
+**Validation Alert:** Sent when a Phase 40 pattern-only signal enters the Validation Gate. Includes the symbol, pattern detected, trigger price, and a "PENDING" status indicator. This alerts the operator that the system has found a candidate and is waiting for price confirmation.
+
+**Multi-Edge Alert (Phase 41):** Sent when a multi-edge signal is generated. This richer notification displays all detected edges as a checklist (e.g., `✓ TRAPPED_LONGS`, `✓ ABSORPTION`), the primary trigger name, the overall confidence level, entry and SL prices, and the edge count. The message uses MarkdownV2 formatting with a plain Markdown fallback if escaping fails. The operator immediately sees the confluence reasoning behind each signal.
 
 **Trade Execution Alert:** Sent when a trade is executed (auto) or when operator action is needed (manual). In manual mode, this includes an inline keyboard with a "GO ENTER TRADE" button that triggers execution via a callback handler.
 
@@ -226,11 +238,43 @@ All tunable parameters are centralized in a single configuration module that loa
 
 Capital per trade: ₹1,800. Maximum risk per trade: ₹200. Auto-trade: OFF by default (manual mode). Log file: `logs/bot.log`. Square-off time: 15:10 IST. Fyers credentials and Telegram tokens are loaded from environment variables, never hardcoded.
 
+**Phase 41 Feature Flags.** The configuration module now includes a master switch `MULTI_EDGE_ENABLED` (default `False`), a confidence threshold setting, a `LOG_MULTI_EDGE_DETAILS` flag for verbose edge logging, and an `ENABLED_DETECTORS` dictionary that individually toggles each of the 8 detectors. The Pattern detector (`PATTERN`) defaults to `True` (it is the baseline); all other detectors default to `False` for phased rollout. This architecture allows fine-grained control: the operator can enable Trapped Position detection without enabling Failed Auction detection, for example, and can roll back any individual detector by flipping a single boolean.
+
+---
+
+### 3.11 Multi-Edge Detection System — `multi_edge_detector.py` (Phase 41)
+
+The Multi-Edge Detector is the Phase 41 enhancement module that implements a parallel detection architecture designed to increase signal frequency from 1–2 signals per day to 5–8 per day while maintaining or improving win rate. It runs BEFORE the analyzer and returns a structured edge payload that the analyzer consumes.
+
+**Architecture.** The `MultiEdgeDetector` class accepts the `ENABLED_DETECTORS` dictionary from config and exposes a single public method: `scan_all_edges(candidate)`. This method iterates through all 8 detectors in sequence. Each detector is wrapped in a try-except block — if any detector crashes, the error is logged and the remaining detectors continue. This ensures a bug in one detector never prevents the others from firing. If no edges are found, the method returns `None` and the candidate is skipped entirely.
+
+**Confidence Scoring.** When edges are found, the `_score_and_package()` method assigns an overall confidence level using a hierarchical ruleset. Three or more edges produce `EXTREME` confidence regardless of individual levels. Two edges produce `HIGH` confidence (the confluence bonus). A single edge with `HIGH` or `EXTREME` individual confidence produces `HIGH` overall. A single edge with only `MEDIUM` confidence is rejected entirely — the system requires either high individual conviction or multi-edge confluence to generate a signal. This scoring mechanism is the primary quality gate that prevents the system from drowning in low-quality signals despite having more detectors.
+
+The edge payload includes: the list of edges with their reasoning and metrics, the overall confidence, the edge count, the primary trigger name, a unified entry trigger (the minimum entry level across all edges), and a recommended stop-loss (the maximum of all edge-specific SLs or `day_high × 1.003` as fallback).
+
+**Detector 1: Pattern Engine.** This is a refactored copy of the logic from `GodModeAnalyst.detect_structure_advanced()`. It identifies the same 6 patterns (Bearish Engulfing, Evening Star, Shooting Star, Absorption Doji, Momentum Breakdown, Volume Trap) with identical thresholds and Z-score requirements. By wrapping the existing logic as a detector, the system achieves two things: it maintains 100% backward compatibility with Phase 40 pattern detection, and it allows patterns to contribute to multi-edge confluence scoring alongside the new detectors.
+
+**Detector 2: Trapped Position.** Identifies cases where aggressive buyers entered near the day high and are now underwater. The detector scans the last 5 candles for a "trap candle" — one whose high is within the top 10% of the day range AND whose volume Z-score exceeds 1.5. If a subsequent LTP has broken below the trap candle's low, trapped longs are confirmed. If depth data is available, orderflow confirmation is applied: a bid/ask ratio below 0.7 elevates confidence to `HIGH`, below 0.9 stays at `MEDIUM`. If depth data is unavailable (API failure), the detector still fires at `MEDIUM` confidence using volume alone — a graceful degradation.
+
+**Detector 3: Absorption.** Detects hidden limit sellers absorbing demand at highs. Requires the current candle to be within 0.2% of the day high, with an extremely high volume Z-score (>2.0) but a tiny body (<0.15% of price). An upper wick ratio above 50% combined with Z-score above 3.0 produces `EXTREME` confidence. These signals are rare (1–2 per week) but extremely high-conviction.
+
+**Detector 4: Bad High.** Uses Level 2 depth data to identify distribution zones. Requires the current candle to be at the day high (within 0.1%), a sell-to-buy depth ratio exceeding 2.5×, and a rejection wick exceeding 40% of total range. A ratio above 4.0× produces `EXTREME` confidence. This detector returns `None` if depth data is unavailable — it is entirely depth-dependent.
+
+**Detector 5: Failed Auction.** Applies auction market theory to detect failed breakouts. It defines a "balance area" from 30–60 minutes ago, checks if price broke above the balance high in the last 30 minutes with at least 2 candle closes above it (acceptance), and then verifies that the current LTP has fallen back below the balance high. The key insight: a failed auction after confirmed acceptance is far more significant than a simple breakout failure, because accepted auction participants are now trapped.
+
+**Detector 6: OI Divergence Proxy.** An experimental detector that approximates open interest divergence using volume-momentum analysis (since Fyers equity API lacks real-time OI data). It checks whether the last 5 candles show a volume surge exceeding 3× the baseline with price momentum below 0.5% — high volume without price progress suggests distribution. This detector always returns `MEDIUM` confidence as it is an approximation, not a direct measurement.
+
+**Detector 7: TPO Poor High.** Calculates a lightweight Time-Price-Opportunity profile by counting how many candles touched each of 50 price buckets across the day's range. If the current price level has TPO acceptance below 40% of the average, it is classified as a "poor high" — a thin acceptance zone vulnerable to rejection. Only activates when LTP is within 0.5% of the day high.
+
+**Detector 8: Momentum Exhaustion.** An enhanced version of the existing Gate 7 momentum safeguard, re-framed as a detector. Fires when price extends more than 2.5 standard deviations above VWAP after 7 or more consecutive green candles. If volume is declining (recent < 70% of prior) AND price is near a round number (within 0.5% of psychological levels like ₹100, ₹500, ₹1000), confidence is elevated to `HIGH`.
+
 ---
 
 ## 4. What Makes This System Different
 
 **Twelve Sequential Gates.** Most algorithmic trading systems have 2–3 filters. ShortCircuit has 12 independent rejection points spanning market regime, discipline controls, hard constraints, circuit proximity, momentum analysis, pattern recognition, breakdown confirmation, confluence validation, orderflow analysis, and multi-timeframe confirmation. The probability of a noise signal surviving all 12 gates is vanishingly small.
+
+**Multi-Edge Detection (Phase 41).** Beyond pattern-based candlestick analysis, the system can detect 8 independent institutional edges in parallel: candlestick patterns, trapped position liquidations, hidden absorption by limit sellers, bad highs with sell-wall confirmation, failed auction breakouts, volume-momentum divergence (OI proxy), thin TPO acceptance zones, and momentum exhaustion after extended green runs. A confidence scoring system requires either high individual conviction or multi-edge confluence before a signal proceeds — a single medium-confidence edge is rejected, but two medium edges together produce a high-confidence confluence signal. Each detector is individually feature-flagged for phased rollout and instant rollback.
 
 **Validation Gate.** The system never enters a trade on pattern detection alone. It waits for price to confirm the setup by breaking the signal candle's low. This single innovation eliminates a large fraction of false signals that form patterns but never follow through with actual selling pressure.
 
@@ -242,6 +286,8 @@ Capital per trade: ₹1,800. Maximum risk per trade: ₹200. Auto-trade: OFF by 
 
 **Machine Learning Data Pipeline.** Every signal generates a structured observation logged with 20+ features (candle metrics, VWAP statistics, volume statistics, pattern type, confluence count, market regime) in Parquet format. This creates a growing dataset for supervised learning to continuously refine signal quality over time.
 
+**Zero-Risk Rollback Architecture.** Phase 41 is designed as a purely additive system. The master switch `MULTI_EDGE_ENABLED` defaults to `False`, meaning the system runs identically to Phase 40 out of the box. When enabled, each individual detector can be toggled independently. If any detector misbehaves, it can be disabled without affecting the others. If the entire multi-edge system is unstable, flipping the master switch to `False` instantly reverts to the proven Phase 40 pattern-only logic with zero code changes required.
+
 ---
 
-*Document verified against ShortCircuit source code — Phase 40, February 2026*
+*Document verified against ShortCircuit source code — Phase 41, February 2026*
