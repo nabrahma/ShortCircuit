@@ -256,6 +256,9 @@ class FocusEngine:
                     if broker_pos is None or broker_pos.get('netQty', 0) == 0:
                         logger.info(f"[SAFETY] Position already closed by broker (SL hit?) for {symbol}")
                         self.cleanup_orders(symbol)
+                        # Phase 42.1: Release capital
+                        if self.trade_manager and hasattr(self.trade_manager, 'capital_manager'):
+                            self.trade_manager.capital_manager.release(symbol)
                         self.stop_focus(reason="BROKER_SL_HIT")
                         return
 
@@ -339,12 +342,18 @@ class FocusEngine:
                 if broker_pos is None or broker_pos.get('netQty', 0) == 0:
                     logger.warning(f"[SAFETY] Position already closed by broker SL. Skipping manual exit.")
                     self.cleanup_orders(trade['symbol'])
+                    # Phase 42.1: Release capital
+                    if self.trade_manager and hasattr(self.trade_manager, 'capital_manager'):
+                        self.trade_manager.capital_manager.release(trade['symbol'])
                     self.stop_focus(reason="BROKER_SL_HIT")
                     return
 
                 if broker_pos.get('netQty', 0) > 0:
                     logger.critical(f"🚨 [SAFETY] Position is LONG — WRONG SIDE! Skipping buy exit.")
                     self.cleanup_orders(trade['symbol'])
+                    # Phase 42.1: Release capital
+                    if self.trade_manager and hasattr(self.trade_manager, 'capital_manager'):
+                        self.trade_manager.capital_manager.release(trade['symbol'])
                     self.stop_focus(reason="WRONG_SIDE_DETECTED")
                     return
 
@@ -356,6 +365,9 @@ class FocusEngine:
                 if broker_pos is None or broker_pos.get('netQty', 0) == 0:
                     logger.info("[SAFETY] Position closed by broker between checks. Skip manual exit.")
                     self.cleanup_orders(trade['symbol'])
+                    # Phase 42.1: Release capital
+                    if self.trade_manager and hasattr(self.trade_manager, 'capital_manager'):
+                        self.trade_manager.capital_manager.release(trade['symbol'])
                     self.stop_focus(reason="BROKER_SL_HIT")
                     return
 
@@ -380,6 +392,10 @@ class FocusEngine:
                 
                 # CANCEL PENDING STOP ORDERS
                 self.cleanup_orders(trade['symbol'])
+
+                # Phase 42.1: Release capital after manual SL exit
+                if self.trade_manager and hasattr(self.trade_manager, 'capital_manager'):
+                    self.trade_manager.capital_manager.release(trade['symbol'])
                 
                 # Notify User
                 if self.bot and config.TELEGRAM_CHAT_ID:

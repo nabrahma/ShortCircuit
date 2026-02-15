@@ -150,6 +150,14 @@ def main():
     if orphaned:
         logger.critical(f"[INIT] ⚠️ Found {len(orphaned)} orphaned position(s) — check Telegram alerts")
 
+    # Phase 42.1: If focus engine recovered a position, allocate capital
+    if bot.focus_engine.active_trade:
+        recovered = bot.focus_engine.active_trade
+        recovered_symbol = recovered['symbol']
+        recovered_cost = recovered['entry'] * recovered.get('qty', 1)
+        trade_manager.capital_manager.allocate(recovered_symbol, recovered_cost)
+        logger.info(f"[INIT] Recovery: Capital allocated for {recovered_symbol} (₹{recovered_cost:.2f})")
+
     # 3. Start Telegram Thread
     t_bot = threading.Thread(target=bot.start_polling)
     t_bot.daemon = True

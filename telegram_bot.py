@@ -84,7 +84,26 @@ class ShortCircuitBot:
         @self.bot.message_handler(commands=['status'])
         def status(message):
             mode = "[ON] AUTO-TRADE" if self.trade_manager.auto_trade_enabled else "[OFF] MANUAL-ALERT"
-            self.bot.reply_to(message, f"Status Report:\nMode: {mode}\nScanner: Active")
+            msg = f"Status Report:\nMode: {mode}\nScanner: Active"
+
+            # Phase 42.1: Capital status
+            if hasattr(self.trade_manager, 'capital_manager'):
+                cap = self.trade_manager.capital_manager.get_status()
+                msg += (
+                    f"\n\n💰 Capital:\n"
+                    f"  Base: ₹{cap['base_capital']:.0f}\n"
+                    f"  Leverage: {cap['leverage']}×\n"
+                    f"  Buying Power: ₹{cap['total_buying_power']:.0f}\n"
+                    f"  Available: ₹{cap['available']:.0f}\n"
+                    f"  In Use: ₹{cap['in_use']:.0f}\n"
+                    f"  Active Positions: {cap['positions_count']}"
+                )
+                if cap['positions_count'] > 0:
+                    for sym, cost in cap['positions'].items():
+                        short_name = sym.split(':')[-1].replace('-EQ', '')
+                        msg += f"\n    • {short_name}: ₹{cost:.0f}"
+
+            self.bot.reply_to(message, msg)
 
         @self.bot.message_handler(commands=['auto'])
         def toggle_auto(message):

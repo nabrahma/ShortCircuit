@@ -14,7 +14,8 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 # Trading Config
-CAPITAL = 1800  # INR per trade (Safety buffer for 2k account)
+CAPITAL_PER_TRADE = 1800  # INR per trade (Safety buffer for 2k account)
+CAPITAL = CAPITAL_PER_TRADE  # Backward-compatible alias
 RISK_PER_TRADE = 200 # Max loss in INR (optional logic)
 AUTO_TRADE = False # Default off
 
@@ -114,4 +115,18 @@ POSITION_RECONCILIATION_INTERVAL = 1800  # 30 minutes
 EMERGENCY_ALERT_ENABLED = True
 EMERGENCY_LOG_PATH = 'logs/emergency_alerts.log'
 ORPHANED_POSITION_LOG_PATH = 'logs/orphaned_positions.log'
+
+# ============================================================================
+# CAPITAL MANAGEMENT (Phase 42.1)
+# ============================================================================
+
+# Fixed 5× intraday leverage (NSE standard)
+# ₹1,800 × 5 = ₹9,000 buying power
+# DO NOT CHANGE (user requirement: always use 5× leverage)
+INTRADAY_LEVERAGE = 5.0
+
+# Signal logging
+SIGNAL_LOG_PATH = 'logs/signals.csv'
+LOG_ALL_SIGNALS = True  # Log executed AND skipped signals
+
 

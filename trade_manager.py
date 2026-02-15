@@ -1,6 +1,10 @@
+import os
 import time
 import logging
+from datetime import datetime
+
 import config
+from capital_manager import CapitalManager
 
 logger = logging.getLogger(__name__)
 
@@ -12,6 +16,15 @@ class TradeManager:
 
         # Phase 42: Position Safety — Track active SL orders
         self.active_sl_orders = {}   # {symbol: order_id}
+
+        # Phase 42.1: Capital Management
+        self.capital_manager = CapitalManager(
+            base_capital=getattr(config, 'CAPITAL_PER_TRADE', 1800.0),
+            leverage=getattr(config, 'INTRADAY_LEVERAGE', 5.0)
+        )
+
+        # Reference to Telegram bot (set externally after init)
+        self.bot = None
 
     def set_auto_trade(self, enabled: bool):
         self.auto_trade_enabled = enabled
@@ -67,7 +80,7 @@ class TradeManager:
             True if safe to proceed, False if dangerous
         """
         if not getattr(config, 'ENABLE_POSITION_VERIFICATION', True):
-            return True  # Bypass if explicitly disabled (NOT recommended)
+            return True  # Bypass if explicitly disabled
 
         broker_pos = self._get_broker_position(symbol)
 
@@ -92,7 +105,7 @@ class TradeManager:
                     f"but position is {net_qty} (already flat or LONG)!"
                 )
                 return False
-            return True  # We're short, safe to buy/cover
+            return True
 
         elif intended_action == 'ENTER_LONG':
             if net_qty < 0:
@@ -110,16 +123,84 @@ class TradeManager:
         return False
 
     # ==================================================================
+    # PHASE 42.1: SIGNAL LOGGING
+    # ==================================================================
+
+    def _log_signal_executed(self, signal: dict, qty: int, fill_price: float):
+        """
+        Log executed trade to signals.csv.
+        Includes Phase 42.1 execution_status field.
+        """
+        log_path = getattr(config, 'SIGNAL_LOG_PATH', 'logs/signals.csv')
+        log_entry = (
+            f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')},"
+            f"{signal['symbol']},"
+            f"{fill_price},"
+            f"{qty},"
+            f"{signal.get('stop_loss', 0)},"
+            f"{signal.get('setup_high', 0)},"
+            f"{signal.get('tick_size', 0.05)},"
+            f"{signal.get('atr', 0)},"
+            f"{signal.get('pattern', 'UNKNOWN')},"
+            f"EXECUTED,,"
+            f"{self.capital_manager.available:.2f}"
+        )
+
+        self._append_to_signal_csv(log_path, log_entry)
+        logger.info(f"✅ Signal logged as EXECUTED: {signal['symbol']}")
+
+    def _log_signal_skipped(self, signal: dict, reason: str, qty: int, cost: float):
+        """
+        Log skipped signal to signals.csv for EOD analysis.
+        Ensures ALL signals are logged regardless of execution.
+        """
+        log_path = getattr(config, 'SIGNAL_LOG_PATH', 'logs/signals.csv')
+        log_entry = (
+            f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')},"
+            f"{signal['symbol']},"
+            f"{signal.get('ltp', 0)},"
+            f"{qty},"
+            f"{signal.get('stop_loss', 0)},"
+            f"{signal.get('setup_high', 0)},"
+            f"{signal.get('tick_size', 0.05)},"
+            f"{signal.get('atr', 0)},"
+            f"{signal.get('pattern', 'UNKNOWN')},"
+            f"SKIPPED,{reason},"
+            f"{self.capital_manager.available:.2f}"
+        )
+
+        self._append_to_signal_csv(log_path, log_entry)
+        logger.info(f"⏸️ Signal logged as SKIPPED: {signal['symbol']} ({reason})")
+
+    def _append_to_signal_csv(self, log_path: str, entry: str):
+        """Append a line to signals.csv, creating with header if needed."""
+        header = (
+            "timestamp,symbol,entry_price,quantity,stop_loss,"
+            "setup_high,tick_size,atr,pattern,"
+            "execution_status,blocked_reason,available_capital"
+        )
+
+        try:
+            os.makedirs(os.path.dirname(log_path), exist_ok=True)
+            write_header = not os.path.exists(log_path) or os.path.getsize(log_path) == 0
+            with open(log_path, 'a') as f:
+                if write_header:
+                    f.write(header + '\n')
+                f.write(entry + '\n')
+        except Exception as e:
+            logger.error(f"Failed to write signal log: {e}")
+
+    # ==================================================================
     # CORE TRADE EXECUTION
     # ==================================================================
 
     def execute_logic(self, signal):
         """
         Decides whether to execute instantly or return a manual alert prompt.
+        Phase 42.1: Now includes capital check and signal logging.
         """
         symbol = signal['symbol']
         ltp = signal['ltp']
-        # CRITICAL FIX: Handle missing SL key to prevent loop crash
         sl = signal.get('stop_loss', 0.0)
 
         if sl == 0.0:
@@ -129,31 +210,85 @@ class TradeManager:
                 "msg": f"[FAIL] Malformed Signal: Missing Stop Loss for {symbol}"
             }
 
-        tick_size = signal.get('tick_size', 0.05)  # Get Dynamic Tick
+        tick_size = signal.get('tick_size', 0.05)
 
-        # Calculate Qty
-        qty = int(config.CAPITAL / ltp)
-        if qty < 1:
-            qty = 1
+        # Calculate Qty (uses base capital, not buying power)
+        qty = int(config.CAPITAL_PER_TRADE / ltp)
 
-        logger.info(f"Processing Trade for {symbol}. Qty: {qty}. Tick: {tick_size}")
+        # ── PHASE 42.1: QTY ZERO CHECK ────────────────────────────
+        if qty == 0:
+            logger.warning(f"❌ {symbol}: Quantity = 0 (price too high: ₹{ltp})")
 
+            self._log_signal_skipped(signal, 'QTY_ZERO', qty=0, cost=0)
+
+            # Telegram alert
+            if self.bot and hasattr(self.bot, 'bot'):
+                try:
+                    self.bot.bot.send_message(
+                        self.bot.chat_id,
+                        f"⏸️ SIGNAL SKIPPED\n\n"
+                        f"Symbol: {symbol}\n"
+                        f"Price: ₹{ltp:.2f}\n"
+                        f"Reason: Stock too expensive\n"
+                        f"(Need minimum ₹{ltp:.2f}, have ₹{config.CAPITAL_PER_TRADE:.0f} base capital)"
+                    )
+                except Exception:
+                    pass
+
+            return {'status': 'SKIPPED', 'reason': 'QTY_ZERO'}
+
+        # ── PHASE 42.1: CAPITAL CHECK ─────────────────────────────
+        required_cost = ltp * qty
+        capital_check = self.capital_manager.can_afford(symbol, required_cost)
+
+        if not capital_check['allowed']:
+            logger.warning(f"❌ {symbol}: Capital check failed - {capital_check['reason']}")
+
+            self._log_signal_skipped(signal, capital_check['reason'], qty, required_cost)
+
+            # Telegram alert
+            cap_status = self.capital_manager.get_status()
+            if self.bot and hasattr(self.bot, 'bot'):
+                try:
+                    self.bot.bot.send_message(
+                        self.bot.chat_id,
+                        f"⏸️ SIGNAL BLOCKED\n\n"
+                        f"Symbol: {symbol}\n"
+                        f"Entry: ₹{ltp:.2f}\n"
+                        f"Qty: {qty}\n"
+                        f"Required: ₹{required_cost:.2f}\n\n"
+                        f"❌ Reason: {capital_check['reason']}\n\n"
+                        f"💰 Capital:\n"
+                        f"  Available: ₹{cap_status['available']:.2f}\n"
+                        f"  In Use: ₹{cap_status['in_use']:.2f}\n"
+                        f"  Active Positions: {cap_status['positions_count']}\n\n"
+                        f"Signal logged for EOD analysis."
+                    )
+                except Exception:
+                    pass
+
+            return {
+                'status': 'BLOCKED',
+                'reason': capital_check['reason'],
+                'available': capital_check['available']
+            }
+
+        # ── PHASE 42: POSITION VERIFICATION ───────────────────────
         if self.auto_trade_enabled:
-            # ── PHASE 42: VERIFY BEFORE ENTRY ──────────────────────────
             if not self._verify_position_safe(symbol, 'ENTER_SHORT'):
                 logger.critical(f"[SAFETY] Entry BLOCKED for {symbol} — position verification failed")
+                self._log_signal_skipped(signal, 'POSITION_VERIFICATION_FAILED', qty, required_cost)
                 return {
                     "status": "BLOCKED",
                     "msg": f"[BLOCKED] Position safety check failed for {symbol}"
                 }
 
-            # PLACE ENTRY ORDER
+            # ── PLACE ENTRY ORDER ─────────────────────────────────
             try:
-                # 1. Main Sell Order
                 entry_data = {
                     "symbol": symbol,
                     "qty": qty,
-                    "type": 2,  # Market Order
+                    "type": 2,   # Market Order
                     "side": -1,  # Sell
                     "productType": "INTRADAY",
                     "limitPrice": 0,
@@ -169,7 +304,13 @@ class TradeManager:
                     entry_order_id = resp_entry["id"]
                     logger.info(f"Entry SUCCESS: {resp_entry}")
 
-                    # 2. Place Safety Stop Loss Order (Buy SL-Limit)
+                    # Phase 42.1: Allocate capital AFTER successful entry
+                    self.capital_manager.allocate(symbol, required_cost)
+
+                    # Phase 42.1: Log signal as EXECUTED
+                    self._log_signal_executed(signal, qty, ltp)
+
+                    # Place Safety Stop Loss Order (Buy SL-Limit)
                     sl_trigger = self.tick_round(float(sl), tick_size)
                     sl_limit_price = sl_trigger * 1.005  # 0.5% buffer
                     sl_limit = self.tick_round(sl_limit_price, tick_size)
@@ -177,8 +318,8 @@ class TradeManager:
                     sl_data = {
                         "symbol": symbol,
                         "qty": qty,
-                        "type": 4,  # SL-Limit
-                        "side": 1,  # Buy (Cover)
+                        "type": 4,   # SL-Limit
+                        "side": 1,   # Buy (Cover)
                         "productType": "INTRADAY",
                         "limitPrice": sl_limit,
                         "stopPrice": sl_trigger,
@@ -251,17 +392,19 @@ class TradeManager:
                 "value": int(qty * ltp),
                 "ltp": ltp,
                 "sl": sl,
-                "pattern": signal.get('pattern', 'Unknown')
+                "pattern": signal.get('pattern', 'Unknown'),
+                "_required_cost": required_cost  # Pass cost for manual allocation
             }
 
     # ==================================================================
-    # EXIT METHODS — ALL GUARDED
+    # EXIT METHODS — ALL GUARDED + CAPITAL RELEASE
     # ==================================================================
 
     def emergency_exit(self, symbol, qty):
         """
         Closes a position immediately via Market Order.
-        Phase 42: Now includes circuit breaker — verifies position before exit.
+        Phase 42: Circuit breaker — verifies position before exit.
+        Phase 42.1: Releases capital after exit.
         """
         logger.critical(f"[EMERGENCY] Emergency exit triggered for {symbol}")
 
@@ -272,14 +415,15 @@ class TradeManager:
 
         if broker_pos is None:
             logger.critical(f"[EMERGENCY] Cannot verify {symbol} — placing exit anyway (naked position risk)")
-            # Fall through to exit — better to risk duplicate than leave naked position
         elif broker_pos['net_qty'] == 0:
             logger.info(f"[EMERGENCY] Position already flat for {symbol} — skipping exit")
             self._cleanup_sl_tracking(symbol)
+            self.capital_manager.release(symbol)  # Phase 42.1
             return
         elif broker_pos['net_qty'] > 0:
             logger.critical(f"🚨🚨 [EMERGENCY] {symbol} is LONG {broker_pos['net_qty']} — WRONG SIDE! Manual intervention needed!")
             self._cleanup_sl_tracking(symbol)
+            self.capital_manager.release(symbol)  # Phase 42.1
             return
 
         # Confirmed we're short — safe to exit
@@ -289,8 +433,8 @@ class TradeManager:
             data = {
                 "symbol": symbol,
                 "qty": actual_qty,
-                "type": 2,  # Market
-                "side": 1,  # Buy/Cover
+                "type": 2,   # Market
+                "side": 1,   # Buy/Cover
                 "productType": "INTRADAY",
                 "limitPrice": 0,
                 "stopPrice": 0,
@@ -304,15 +448,17 @@ class TradeManager:
             logger.critical(f"[CRIT] EMERGENCY EXIT FAILED for {symbol}: {e}")
         finally:
             self._cleanup_sl_tracking(symbol)
+            self.capital_manager.release(symbol)  # Phase 42.1
 
     def close_partial_position(self, symbol: str, quantity: int, reason: str) -> dict:
         """
         Phase 41.2: Close partial position for TP scale-out.
-        Phase 42: Now guarded with position verification.
+        Phase 42: Guarded with position verification.
+        Note: Does NOT release capital (position still partially open).
         """
         logger.info(f"[SCALPER] Closing {quantity} shares of {symbol} ({reason})")
 
-        # ── PHASE 42: VERIFY BEFORE EXIT ────────────────────────────
+        # Phase 42: Verify before exit
         if not self._verify_position_safe(symbol, 'EXIT_SHORT'):
             logger.critical(f"[SAFETY] Partial close BLOCKED for {symbol}")
             return {"status": "BLOCKED", "reason": "POSITION_VERIFICATION_FAILED"}
@@ -320,8 +466,8 @@ class TradeManager:
         order_data = {
             "symbol": symbol,
             "qty": quantity,
-            "type": 2,       # Market order
-            "side": 1,       # Buy (cover short)
+            "type": 2,        # Market order
+            "side": 1,        # Buy (cover short)
             "productType": "INTRADAY",
             "limitPrice": 0,
             "stopPrice": 0,
@@ -356,7 +502,6 @@ class TradeManager:
         logger.info(f"[SCALPER] Updating SL for {symbol} to ₹{new_stop:.2f}")
 
         try:
-            # Find pending SL order for this symbol
             orders = self.fyers.orderbook()
             if "orderBook" not in orders:
                 logger.warning("[SCALPER] No orders found in orderbook")
@@ -364,13 +509,13 @@ class TradeManager:
 
             for order in orders["orderBook"]:
                 if order["symbol"] == symbol and order["status"] == 6:  # Pending
-                    tick_size = 0.05  # Default
+                    tick_size = 0.05
                     sl_trigger = self.tick_round(float(new_stop), tick_size)
                     sl_limit = self.tick_round(sl_trigger * 1.005, tick_size)
 
                     modify_data = {
                         "id": order["id"],
-                        "type": 4,  # SL-Limit
+                        "type": 4,
                         "limitPrice": sl_limit,
                         "stopPrice": sl_trigger,
                     }
@@ -394,15 +539,15 @@ class TradeManager:
         """
         Closes all open intraday positions.
         Used for EOD Auto-Square Off.
+        Phase 42.1: Releases capital for each closed position.
         """
         logger.warning("[ALERT] INITIATING AUTO-SQUARE OFF...")
         try:
-            # 1. Fetch Positions
             positions_response = self.fyers.positions()
             if 'netPositions' not in positions_response:
                 logger.info("No positions to close.")
 
-            # 0. CANCEL ALL PENDING ORDERS FIRST
+            # Cancel all pending orders first
             try:
                 orders = self.fyers.orderbook()
                 if 'orderBook' in orders:
@@ -424,14 +569,13 @@ class TradeManager:
                 symbol = pos['symbol']
 
                 if net_qty != 0:
-                    # Determine Exit Side
                     exit_side = -1 if net_qty > 0 else 1
                     exit_qty = abs(net_qty)
 
                     data = {
                         "symbol": symbol,
                         "qty": exit_qty,
-                        "type": 2,  # Market
+                        "type": 2,
                         "side": exit_side,
                         "productType": pos["productType"],
                         "limitPrice": 0,
@@ -449,6 +593,9 @@ class TradeManager:
                     # Phase 42: Clean up SL tracking
                     self._cleanup_sl_tracking(symbol)
 
+                    # Phase 42.1: Release capital
+                    self.capital_manager.release(symbol)
+
             return f"Squaring Off Complete. Closed {closed_count} positions."
 
         except Exception as e:
@@ -456,7 +603,7 @@ class TradeManager:
             return f"Square Off Error: {e}"
 
     # ==================================================================
-    # PHASE 42: SAFETY UTILITIES
+    # SAFETY UTILITIES
     # ==================================================================
 
     def _cleanup_sl_tracking(self, symbol: str):

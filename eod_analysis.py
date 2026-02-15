@@ -41,19 +41,19 @@ class EODAnalyzer:
             logger.info("Running in offline mode — provide price history manually.")
             return None
 
-    def load_todays_signals(self, date_str: str = None) -> list:
+    def load_todays_signals(self, date_str: str = None) -> dict:
         """
-        Load signals from CSV for a specific date.
+        Load ALL signals (executed and skipped) from CSV for a specific date.
 
         Args:
             date_str: Date string 'YYYY-MM-DD'. Defaults to today.
 
         Returns:
-            List of signal dicts
+            dict with 'all', 'executed', 'skipped' lists of signal dicts
         """
         if not os.path.exists(SIGNALS_CSV):
             print(f"No signals file found at {SIGNALS_CSV}")
-            return []
+            return {'all': [], 'executed': [], 'skipped': []}
 
         df = pd.read_csv(SIGNALS_CSV)
         df["timestamp"] = pd.to_datetime(df["timestamp"])
@@ -65,24 +65,37 @@ class EODAnalyzer:
 
         if todays.empty:
             print(f"No signals found for {target_date}")
-            return []
+            return {'all': [], 'executed': [], 'skipped': []}
 
-        signals = []
+        all_signals = []
         for _, row in todays.iterrows():
             sig = {
                 "symbol": row["symbol"],
-                "entry_price": float(row["ltp"]),
-                "setup_high": float(row.get("setup_high", row["ltp"] * 1.005)),
-                "tick_size": float(row.get("tick_size", 0.05)),
-                "atr": float(row.get("atr", row["ltp"] * 0.01)),
-                "quantity": int(config.CAPITAL / float(row["ltp"])),
+                "entry_price": float(row.get("entry_price", row.get("ltp", 0))),
+                "setup_high": float(row.get("setup_high", 0) or 0),
+                "tick_size": float(row.get("tick_size", 0.05) or 0.05),
+                "atr": float(row.get("atr", 0) or 0),
+                "quantity": int(row.get("quantity", 0) or 0),
                 "timestamp": row["timestamp"],
                 "pattern": row.get("pattern", ""),
-                "stop_loss": float(row["stop_loss"]),
+                "stop_loss": float(row.get("stop_loss", 0) or 0),
+                "execution_status": str(row.get("execution_status", "EXECUTED")),
+                "blocked_reason": str(row.get("blocked_reason", "") or ""),
+                "available_capital": float(row.get("available_capital", 0) or 0),
             }
-            signals.append(sig)
+            # Default quantity from config if missing
+            if sig['quantity'] == 0 and sig['entry_price'] > 0:
+                sig['quantity'] = int(getattr(config, 'CAPITAL_PER_TRADE', 1800) / sig['entry_price'])
+            all_signals.append(sig)
 
-        return signals
+        executed = [s for s in all_signals if s['execution_status'] == 'EXECUTED']
+        skipped = [s for s in all_signals if s['execution_status'] == 'SKIPPED']
+
+        logger.info(f"Today's signals: {len(all_signals)} total")
+        logger.info(f"  Executed: {len(executed)}")
+        logger.info(f"  Skipped: {len(skipped)}")
+
+        return {'all': all_signals, 'executed': executed, 'skipped': skipped}
 
     def fetch_price_history(self, symbol: str, from_time, to_time) -> pd.DataFrame:
         """
@@ -134,20 +147,74 @@ class EODAnalyzer:
             return None
 
     def analyze_all_signals(self, date_str: str = None):
-        """Main analysis: Simulate both systems on all signals."""
+        """Main analysis: Simulate both systems on all signals (including skipped)."""
 
-        signals = self.load_todays_signals(date_str)
+        signal_data = self.load_todays_signals(date_str)
         target_date = date_str or datetime.now().strftime("%Y-%m-%d")
 
-        if not signals:
+        if not signal_data['all']:
             return
 
         print(f"\n{'='*80}")
         print(f"EOD ANALYSIS: {target_date}")
         print(f"{'='*80}")
-        print(f"\nTotal signals generated: {len(signals)}\n")
+        print(f"\nTotal signals generated: {len(signal_data['all'])}")
+        print(f"  ✅ Executed: {len(signal_data['executed'])}")
+        print(f"  ⏸️  Skipped: {len(signal_data['skipped'])}\n")
 
+        # ── Phase 42.1: Analyze SKIPPED signals ──────────────────────────
+        if signal_data['skipped']:
+            print(f"{'='*80}")
+            print(f"SKIPPED SIGNALS ANALYSIS (What You Missed)")
+            print(f"{'='*80}\n")
+
+            total_missed_pnl = 0
+
+            for sig in signal_data['skipped']:
+                sym = sig['symbol']
+                print(f"Symbol: {sym}")
+                print(f"  Time: {sig['timestamp']}")
+                print(f"  Entry: ₹{sig['entry_price']:.2f}")
+                print(f"  Reason: {sig['blocked_reason']}")
+                print(f"  Available Capital: ₹{sig['available_capital']:.2f}")
+
+                # Fetch price data and simulate what WOULD have happened
+                signal_time = sig['timestamp']
+                if isinstance(signal_time, str):
+                    signal_time = pd.to_datetime(signal_time)
+
+                eod_time = signal_time.replace(hour=15, minute=30, second=0)
+                price_df = self.fetch_price_history(sym, signal_time, eod_time)
+
+                if price_df is not None and len(price_df) > 5 and sig['stop_loss'] > 0:
+                    try:
+                        comparison = self.simulator.compare_systems(sig, price_df)
+                        scalper = comparison['scalper']
+
+                        missed_pnl = scalper['pnl_cash']
+                        total_missed_pnl += missed_pnl
+
+                        print(f"  📊 MISSED OPPORTUNITY:")
+                        print(f"     P&L: {scalper['pnl_pct']*100:+.2f}% (₹{missed_pnl:+.2f})")
+                        print(f"     Outcome: {scalper['exit_reason']}")
+                    except Exception as e:
+                        print(f"  ❌ Simulation failed: {e}")
+                else:
+                    print(f"  ❌ Insufficient data for simulation")
+
+                print()
+
+            if total_missed_pnl != 0:
+                emoji = "💸" if total_missed_pnl > 0 else "✅"
+                print(f"{emoji} Total missed P&L from skipped signals: ₹{total_missed_pnl:+.2f}\n")
+
+        # ── Analyze EXECUTED signals ──────────────────────────────────────
+        signals = signal_data['executed']
         results = []
+
+        if not signals:
+            print("\nNo executed signals to simulate.")
+            return
 
         for idx, signal in enumerate(signals, 1):
             sym = signal["symbol"]
