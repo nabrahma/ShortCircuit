@@ -1,7 +1,7 @@
 # ShortCircuit — Complete System Architecture
 
 **Classification**: Internal Technical Document
-**Version**: Phase 41.1 (Feb 2026)
+**Version**: Phase 42 (Feb 2026)
 **Purpose**: Comprehensive technical reference for the ShortCircuit intraday short-selling bot. Every claim in this document has been verified against the current source code.
 
 ---
@@ -12,7 +12,7 @@ ShortCircuit is a fully automated, short-only intraday equity trading system eng
 
 The system's philosophical foundation draws from Bob Volman's institutional scalping methodology and orderflow principles. The central thesis is simple: stocks that surge 6–18% intraday on momentum eventually exhaust. When that exhaustion manifests as a specific candlestick pattern with volume confirmation, price extension beyond statistical norms, and multi-timeframe alignment, the probability of a short-term reversal is high. ShortCircuit identifies these precise inflection points and capitalizes on them with disciplined risk management.
 
-The architecture enforces a critical principle: quality over quantity. Every signal must survive a rigorous, multi-gate filtering pipeline before it reaches the operator. The system is designed to reject 95% of potential candidates and only surface the highest-conviction setups. This document explains every gate, every decision, and every nuance of the system in exhaustive detail.
+The architecture enforces a critical principle: quality over quantity. Every signal must survive a rigorous, multi-gate filtering pipeline before it reaches the operator. The system is designed to reject 95% of potential candidates and only surface the highest-conviction setups.
 
 ---
 
@@ -26,11 +26,13 @@ The system operates as a continuous loop running every 60 seconds during market 
 
 **VALIDATE** — Approved signals do not trigger immediate execution. Instead, they enter a "Validation Gate" — a holding queue where the signal must be confirmed by price action. The signal defines a trigger price (the low of the setup candle). Only when live price breaks below this trigger does the system proceed to execution. This mechanism eliminates a large class of false signals that form patterns but never follow through.
 
-**EXECUTE** — Upon validation, the system either places a Market Sell order with an automatic Stop-Loss Buy order (auto mode) or sends a rich Telegram alert with a one-tap entry button (manual mode). Stop-loss placement includes a 3-attempt retry loop, and if all attempts fail, an emergency exit is triggered immediately to prevent naked positions.
+**EXECUTE** — Upon validation, the system verifies broker position state (Phase 42), then either places a Market Sell order with an automatic Stop-Loss Buy order (auto mode) or sends a rich Telegram alert with a one-tap entry button (manual mode). Stop-loss placement includes a 3-attempt retry loop, and if all attempts fail, an emergency exit circuit breaker is triggered. Every order goes through `_verify_position_safe()` to prevent directional flips.
 
-**MANAGE** — Once a trade is live, the Focus Engine activates. It polls the broker every 2 seconds, calculates real-time P&L, monitors orderflow sentiment, and updates a live Telegram dashboard by editing the message in-place. The engine implements a three-phase trailing stop mechanism that progressively tightens risk as the trade moves in favor.
+**MANAGE** — Once a trade is live, the Focus Engine activates. It polls the broker every 2 seconds, verifies position existence on each iteration (Phase 42), calculates real-time P&L, monitors orderflow sentiment, and updates a live Telegram dashboard by editing the message in-place. The engine implements a three-phase trailing stop mechanism (breakeven → trailing → tighten) that progressively locks in profit.
 
-**EXIT** — Positions are closed through one of four mechanisms: stop-loss hit (broker-side or engine-detected), manual close via Telegram button, end-of-day square-off at 15:10 IST, or emergency exit on system failure. After a stop-loss exit, a 10-minute Swing Failure Pattern (SFP) watch activates to detect and alert on potential fakeout re-entry opportunities.
+**EXIT** — Positions are closed through one of five mechanisms: stop-loss hit (broker-side or engine-detected with double-verification), manual close via Telegram button, end-of-day square-off at 15:10 IST, emergency exit on system failure, or scalper TP scale-out (Phase 41.2). After a stop-loss exit, a 10-minute Swing Failure Pattern (SFP) watch activates.
+
+**RECONCILE** — At startup and every 30 minutes, the Position Reconciliation module (Phase 42) compares broker positions against the bot's internal state. Any orphaned positions trigger emergency Telegram alerts.
 
 ---
 
@@ -42,27 +44,44 @@ This is the entry point and the heartbeat of the system. On startup, it performs
 
 First, it configures the Windows console for UTF-8 output using `sys.stdout.reconfigure(encoding='utf-8', errors='replace')` — a critical fix for Windows environments where emoji-heavy log messages would otherwise crash the console. This uses the `errors='replace'` strategy so that any unencodable character is substituted rather than causing a fatal exception.
 
-Second, it initializes authentication through `FyersConnect`, which reads API credentials from environment variables (`FYERS_CLIENT_ID`, `FYERS_SECRET_ID`, `FYERS_REDIRECT_URI`) loaded by `python-dotenv`. The connector checks for a cached access token in `access_token.txt`, validates it by calling the Fyers profile API, and if the token is expired or invalid, initiates a browser-based OAuth2 re-authentication flow. This ensures the bot can cold-start without manual intervention if the token is still valid.
+Second, it initializes authentication through `FyersConnect`, which reads API credentials from environment variables (`FYERS_CLIENT_ID`, `FYERS_SECRET_ID`, `FYERS_REDIRECT_URI`) loaded by `python-dotenv`. The connector checks for a cached access token in `access_token.txt`, validates it by calling the Fyers profile API, and if the token is expired or invalid, initiates a browser-based OAuth2 re-authentication flow.
 
 Third, it creates singleton instances of the four core modules: `FyersScanner` (market scanning), `FyersAnalyzer` (signal analysis), `TradeManager` (order execution), and `ShortCircuitBot` (Telegram interface). The bot instance receives the trade manager as a dependency, enabling it to execute trades from Telegram callbacks.
 
-Fourth, a daemon thread is spawned running `bot.start_polling()` for continuous Telegram command listening. This runs in the background and handles operator commands like `/status` and `/auto on|off` without blocking the main trading loop.
+**Phase 41.1: Multi-Edge Detection System (Conditional).** If `config.MULTI_EDGE_ENABLED` is `True`, the orchestrator initializes the `MultiEdgeDetector` with the 5 active edge detectors. If `config.ENABLE_DETECTOR_TRACKING` is `True`, a `DetectorPerformanceTracker` is also initialized for per-detector analytics logging.
 
-Fifth, a "Good Morning" startup message is sent to Telegram, featuring a randomly selected trading quote from legends like Jesse Livermore, George Soros, and Ed Seykota. This is a deliberate psychological priming mechanism — it puts the operator in a trading mindset before the session begins.
+**Phase 41.2: Scalper Risk Management (Conditional).** If `config.USE_SCALPER_RISK_MANAGEMENT` is `True`, the orchestrator initializes a `ScalperPositionManager` backed by the trade manager. A background daemon thread `scalper_position_monitor()` is started, which polls LTP every 2 seconds and dispatches actions (breakeven moves, trailing stop updates, TP scale-outs) through the scalper manager's `update_position()` method. The thread is controlled by a `threading.Event` (`scalper_stop_event`) that is set during EOD square-off to gracefully shut down the monitor. When the feature flag is `False` (default), the system uses the legacy ATR-based risk management with the three-phase trailing stop in the Focus Engine.
 
-The main loop then begins its 60-second cycle. At the start of each cycle, it checks whether the current time has passed the configured square-off time (default 15:10 IST). If so, it calls `trade_manager.close_all_positions()` which cancels ALL pending orders first, then closes ALL net positions via market orders, sends a "MARKET CLOSED" Telegram notification, and exits the loop. This ensures no positions are ever carried overnight.
+The scalper monitor thread includes a Phase 42 safety guard: before acting on any scalper action, it calls `trade_manager._get_broker_position()` to verify the position still exists and is on the correct side. If the position is flat or long, the scalper closes its internal position tracking and skips the action, preventing stale scalper state from triggering orders on a closed position.
 
-For each cycle during market hours, the orchestrator calls `scanner.scan_market()` to get candidates. What happens next depends on the `MULTI_EDGE_ENABLED` flag in `config.py`.
+**Phase 42: Position Reconciliation at Startup.** After all modules are initialized but before the main loop starts, the orchestrator creates a `PositionReconciliation` instance and runs `reconcile_positions()`. This queries the broker for ALL open positions and compares them against the bot's internal state (Focus Engine's `active_trade`). Any orphaned positions (positions that exist on the broker but are not being managed by the bot) trigger:
+- A `CRITICAL` log message
+- An emergency Telegram alert via `bot.send_emergency_alert()`
+- An entry in `logs/orphaned_positions.log`
+
+This detects positions left over from crashes, duplicate order bugs, or manual trades placed via the Fyers app.
+
+Fourth, a daemon thread is spawned running `bot.start_polling()` for continuous Telegram command listening. Fifth, a "Good Morning" startup message is sent to Telegram with a randomly selected trading quote.
+
+The main loop runs a 60-second cycle. At the start of each cycle:
+
+**Phase 42: Periodic Reconciliation.** The orchestrator tracks `last_reconciliation` as a `datetime` timestamp. If more than `config.POSITION_RECONCILIATION_INTERVAL` seconds (default 1800 = 30 minutes) have elapsed since the last reconciliation, `reconciler.reconcile_positions()` is called again. This catches orphaned positions that arise mid-session from bugs or manual broker activity.
+
+**EOD Square-Off Check.** The current time is compared against `config.SQUARE_OFF_TIME` (default "15:10"). If current time exceeds this threshold, the system:
+1. Sets `scalper_stop_event` to stop the scalper monitor thread
+2. Calls `trade_manager.close_all_positions()` which first cancels ALL pending orders, then closes ALL net positions via market orders
+3. Sends a "MARKET CLOSED" Telegram notification
+4. Breaks the main loop
+
+For each cycle during market hours, the orchestrator calls `scanner.scan_market()` to get candidates. What happens next depends on the `MULTI_EDGE_ENABLED` flag.
 
 When the flag is `False` (the Phase 40 default), the system follows the original path: each candidate is passed to `analyzer.check_setup()`, which runs the full 12-gate pipeline including the pattern recognition gate.
 
-When the flag is `True`, the system activates the Phase 41.1 Multi-Edge path. Each candidate is first packaged into an edge candidate dictionary containing the symbol, LTP, history DataFrame, depth data, day high/low, open price, tick size, and VWAP. This package is passed to `MultiEdgeDetector.scan_all_edges()`, which runs 5 parallel edge detectors (reduced from 8 in Phase 41.1 — OI Divergence Proxy, TPO Poor High, and Momentum Exhaustion were removed for low signal-to-noise ratio, excessive computational cost, and logical redundancy respectively). The detector returns a weighted-confidence-scored edge payload. If no qualifying edges are found, the candidate is skipped immediately. If edges are found, the edge payload is forwarded to `analyzer.check_setup_with_edges()`, which runs Gates 1–7 and 9–12 (skipping Gate 8 since pattern detection is already covered by the multi-edge detector). This dual-path architecture means Phase 40 behavior is perfectly preserved when the flag is off, and flipping the flag is a zero-risk instant rollback.
+When the flag is `True`, the system activates the Phase 41.1 Multi-Edge path. Each candidate is packaged into an edge candidate dictionary and passed to `MultiEdgeDetector.scan_all_edges()`, which runs 5 parallel edge detectors. If edges are found, the edge payload is forwarded to `analyzer.check_setup_with_edges()`, which runs Gates 1–7 and 9–12 (skipping Gate 8 since pattern detection is already covered by the multi-edge detector).
 
-In both paths, the orchestrator never executes a trade directly. When a signal is returned, it checks whether the signal carries multi-edge metadata (the `edges_detected` key). If so, a rich multi-edge alert is sent via `bot.send_multi_edge_alert()` showing all detected edges and confidence level. Otherwise, the standard validation alert is sent via `bot.send_validation_alert()`. The signal is then passed to the Focus Engine's validation gate via `focus_engine.add_pending_signal()`. Execution is entirely deferred until price confirmation.
+In both paths, the orchestrator never executes a trade directly. When a signal is returned, the Telegram alert is sent (multi-edge or standard), and the signal is passed to the Focus Engine's validation gate via `focus_engine.add_pending_signal()`. Execution is entirely deferred until price confirmation.
 
-Additionally, if `ENABLE_DETECTOR_TRACKING` is `True` (Phase 41.1 default), the orchestrator initializes a `DetectorPerformanceTracker` and logs every multi-edge signal generation event with the list of detected edge triggers and a unique signal ID. This feeds the per-detector analytics pipeline for data-driven optimization.
-
-Error handling in the main loop is deliberately resilient. A `KeyboardInterrupt` cleanly breaks the loop for manual shutdown. Any other exception is caught, logged, and the system sleeps 10 seconds before retrying. The bot never crashes from a transient API failure or network hiccup.
+Error handling in the main loop is deliberately resilient. A `KeyboardInterrupt` cleanly breaks the loop. Any other exception is caught, logged, and the system sleeps 10 seconds before retrying.
 
 ---
 
@@ -70,15 +89,15 @@ Error handling in the main loop is deliberately resilient. A `KeyboardInterrupt`
 
 The scanner's mission is to identify stocks that are "in play" — exhibiting the kind of aggressive intraday gains that precede exhaustion and reversal. It operates in three distinct phases.
 
-**Phase A: Symbol Universe Construction.** The scanner downloads the official Fyers NSE symbol master CSV from `https://public.fyers.in/sym_details/NSE_CM.csv`, which contains approximately 2,000 equities. It filters for the `-EQ` series only (excluding derivatives, ETFs, warrants, and other instrument types). For each symbol, it also extracts the tick size from the CSV — the minimum price increment for that stock (e.g., ₹0.05 for most equities). This tick size is later used by the Trade Manager to round stop-loss prices to valid levels. The symbol list is cached after the first fetch to avoid redundant downloads.
+**Phase A: Symbol Universe Construction.** The scanner downloads the official Fyers NSE symbol master CSV from `https://public.fyers.in/sym_details/NSE_CM.csv`, which contains approximately 2,000 equities. It filters for the `-EQ` series only (excluding derivatives, ETFs, warrants, other instrument types). For each symbol, it extracts the tick size from the CSV — the minimum price increment for that stock (e.g., ₹0.05 for most equities). This tick size is later used by the Trade Manager to round stop-loss prices to valid levels. The symbol list is cached after the first fetch.
 
-**Phase B: Batch Quote Scanning.** The universe is split into batches of 50 symbols (Fyers API limit per request). A single `fyers.quotes()` API call is made per batch, returning live quotes for all 50 symbols simultaneously. This is a deliberate optimization — scanning 2,000 symbols requires only 40 API calls instead of 2,000 individual requests. For each stock, the scanner extracts the Last Traded Price (LTP), intraday volume, change percentage from previous close, and open interest. Three hard filters are applied:
+**Phase B: Batch Quote Scanning.** The universe is split into batches of 50 symbols (Fyers API limit per request). For each stock, the scanner extracts the Last Traded Price (LTP), intraday volume, change percentage from previous close, and open interest. Three hard filters are applied:
 
-The **gain filter** requires the stock to be up between 6% and 18% from the previous close. Below 6%, the move is too weak to indicate potential exhaustion. Above 18%, the stock is likely approaching its upper circuit limit (typically 20%), where shorting becomes extremely dangerous because the stock can lock limit-up and the position cannot be exited. The **volume filter** requires intraday volume exceeding 100,000 shares, ensuring sufficient liquidity for entry and exit. The **price filter** requires LTP above ₹5, eliminating penny stocks with unpredictable behavior and wide spreads.
+The **gain filter** requires the stock to be up between 6% and 18% from the previous close. Below 6%, the move is too weak. Above 18%, the stock approaches its upper circuit limit (~20%). The **volume filter** requires intraday volume exceeding 100,000 shares for sufficient liquidity. The **price filter** requires LTP above ₹5, eliminating penny stocks.
 
-**Phase C: Microstructure Quality Check (Parallelized in Phase 41.1).** For each candidate that survives the filters, the scanner checks chart quality by fetching 1-minute candles for the last 30 minutes. In Phase 41.1, this was restructured from serial execution to parallel execution using `ThreadPoolExecutor` with configurable max workers (default 10 via `config.SCANNER_PARALLEL_WORKERS`). Pre-filter candidates are first collected during the serial batch quote scan, then ALL quality checks are dispatched concurrently. Each future has a 5-second timeout and per-candidate error handling — one failed API call does not block the others. This reduces the data fetch phase from ~4 seconds (serial) to ~400ms (parallel), a 10× speedup.
+**Phase C: Microstructure Quality Check (Parallelized in Phase 41.1).** For each surviving candidate, the scanner checks chart quality by fetching 1-minute candles for the last 30 minutes. In Phase 41.1, this was restructured to use `ThreadPoolExecutor` with configurable max workers (default 10 via `config.SCANNER_PARALLEL_WORKERS`). Each future has a 5-second timeout with per-candidate error handling — one failed API call does not block others. This reduces the data fetch phase from ~4 seconds (serial) to ~400ms (parallel), a 10× speedup.
 
-The quality check itself calculates the zero-volume candle ratio — the percentage of candles that have exactly zero volume. If more than 50% of candles have zero volume, the stock is rejected as illiquid. The function also returns the fetched DataFrame alongside the quality verdict, allowing the analyzer to reuse this data without making a duplicate API call. This quality check uses a fail-open policy: if insufficient data is returned, the stock is allowed through.
+The quality check calculates the zero-volume candle ratio. If more than 50% of candles have zero volume, the stock is rejected as illiquid. The function returns the fetched DataFrame alongside the quality verdict, allowing the analyzer to reuse this data without making a duplicate API call.
 
 The scanner returns up to 20 candidates sorted by change percentage in descending order, each packaged with its LTP, change %, volume, open interest, tick size, and the pre-fetched history DataFrame.
 
@@ -86,81 +105,47 @@ The scanner returns up to 20 candidates sorted by change percentage in descendin
 
 ### 3.3 The Signal Engine — `analyzer.py`
 
-This is the brain of ShortCircuit. The `FyersAnalyzer` class orchestrates a 12-gate sequential pipeline within its `check_setup()` method. If any gate rejects the candidate, processing terminates immediately — there is no further computation wasted on a disqualified stock.
+This is the brain of ShortCircuit. The `FyersAnalyzer` class orchestrates a 12-gate sequential pipeline within its `check_setup()` method. If any gate rejects the candidate, processing terminates immediately.
 
-The analyzer exposes two entry points. The original `check_setup()` runs the complete 12-gate pipeline with its built-in pattern recognition gate. The Phase 41 addition, `check_setup_with_edges()`, accepts a pre-computed edge payload from the Multi-Edge Detector and runs Gates 1–7 and 9–12, skipping Gate 8 entirely since edge detection has already been performed externally. Both methods share the identical gate logic; the only difference is whether pattern detection is internal or delegated. Which entry point is called is determined by the `MULTI_EDGE_ENABLED` flag in the orchestrator.
+The analyzer exposes two entry points. The original `check_setup()` runs the complete 12-gate pipeline with its built-in pattern recognition gate. The Phase 41 addition, `check_setup_with_edges()`, accepts a pre-computed edge payload from the Multi-Edge Detector and runs Gates 1–7 and 9–12, skipping Gate 8 entirely.
 
-**Gate 1: Signal Manager Discipline.** The first gate queries the global `SignalManager` singleton, which enforces three rules designed to prevent the most common retail trading mistakes. First, the daily signal cap (maximum 5 signals per day) prevents overtrading — the philosophy being that if you cannot find a quality setup in 5 attempts, the market is not favorable today. Second, the per-symbol cooldown (45 minutes after each signal) prevents revenge trading the same stock after a failed setup. Third, the consecutive loss pause (3 losses in a row triggers a full trading pause for the day) enforces emotional discipline — when you are cold, you stop playing.
+**Gate 1: Signal Manager Discipline.** Queries the global `SignalManager` singleton enforcing three rules: daily signal cap (max 5 signals/day), per-symbol cooldown (45 minutes), and consecutive loss pause (3 losses triggers full-day trading pause).
 
-**Gate 2: Market Regime Check.** The second gate calls `MarketContext.should_allow_short()`. This fetches Nifty 50 intraday 5-minute candles and calculates the first-hour range (09:15–10:15 IST). It identifies the morning high and morning low, then checks whether the current Nifty price has extended 0.5× the morning range above the morning high. If so, the market is classified as `TREND_UP` and ALL short signals are blocked. The logic is straightforward: when the broad market is trending aggressively upward, individual stock reversals are far less likely to sustain, and shorting against a rising tide is a losing proposition. If Nifty is within the morning range or trending down, shorts are permitted.
+**Gate 2: Market Regime Check.** Calls `MarketContext.should_allow_short()`. Fetches Nifty 50 intraday 5-minute candles and calculates the first-hour range (09:15–10:15 IST). If Nifty has extended 0.5× the morning range above the morning high, the market is classified as `TREND_UP` and ALL short signals are blocked. Morning range is cached per day. If Nifty data cannot be fetched, defaults to `RANGE` (fail-open).
 
-The morning range is cached per day to avoid redundant API calls. If the Nifty data cannot be fetched (network failure), the system defaults to `RANGE` (shorts allowed) — a fail-open policy that prioritizes not missing signals over false precision.
+**Gate 3: Data Pipeline.** Accepts a pre-fetched DataFrame from the scanner (avoiding duplicate API calls). If no cached data is provided, fetches fresh 1-minute intraday candles. A defensive `.copy()` prevents side effects. Also defines `prev_df = df.iloc[:-1]` for historical context calculations.
 
-It is worth noting that the system previously included a time-of-day filter based on Volman's session analysis (blocking signals before 10:00 AM and during the lunch hour). This filter has been explicitly removed per operational decision, as analysis showed that stocks may hover for extended periods before executing their reversals, and the time filter was causing the system to miss valid setups that materialized during previously blocked windows.
+**Gate 4: Technical Context Enrichment.** The `_enrich_dataframe()` method calculates VWAP in-place using `cumulative(typical_price × volume) / cumulative(volume)`. Also captures day high, open price, and current gain percentage.
 
-**Gate 3: Data Pipeline.** The analyzer accepts a pre-fetched DataFrame from the scanner (to avoid duplicate API calls). If no cached data is provided, it makes a fresh `fyers.history()` call for 1-minute intraday candles. A defensive `.copy()` is always made to prevent side effects from in-place modifications. The system also defines `prev_df = df.iloc[:-1]` — a slice excluding the current candle — which is used later for historical context calculations like VWAP bands and RSI divergence.
+**Gate 5: Hard Constraints — "The Ethos Check".** `GodModeAnalyst.check_constraints()` enforces: minimum 5% gain (with a "Max Day Gain" exception — stocks that reached 7%+ at any point qualify even if current gain retraced below 5%), maximum 15% gain (circuit risk), and distance-from-high check (LTP within 4% of day high, relaxed to 6% for stocks with max gain ≥ 7% or ≥ 10%).
 
-**Gate 4: Technical Context Enrichment.** The `_enrich_dataframe()` method calculates VWAP (Volume-Weighted Average Price) in-place using the formula: `cumulative(typical_price × volume) / cumulative(volume)`, where `typical_price = (high + low + close) / 3`. The system also captures the day high across all candles, the open price of the first candle, and calculates the current gain percentage as `((LTP - open) / open) × 100`.
+**Gate 6: Circuit Guard.** Fetches Level 2 depth data and extracts upper/lower circuit limits. If LTP is within 1.5% of upper circuit (`upper_circuit × 0.985`), the trade is blocked. Depth data is cached for subsequent orderflow analysis. Fail-open on API failure.
 
-**Gate 5: Hard Constraints — "The Ethos Check".** The `GodModeAnalyst.check_constraints()` method enforces the core trading thesis through a multi-condition check. The gain must be at least 5% for the stock to qualify as having moved enough to create a reversal opportunity. However, the system implements a "Max Day Gain" exception: if the stock reached 7% or higher at ANY point during the day (calculated from `(day_high - open) / open`), it qualifies even if the current gain has retraced below 5%. This handles the "Trend Day Retracement" scenario — a stock that surged to +8% and pulled back to +4% is still showing exhaustion characteristics.
+**Gate 7: Momentum Safeguard — "The Train Filter".** Calculates VWAP slope over last 30 candles using linear regression and Relative Volume (RVOL). If RVOL > 5.0 AND VWAP slope > 40, the trade is blocked — "Don't stand in front of a freight train."
 
-The maximum gain is capped at 15%. Above this level, the stock is approaching its circuit limit and shorting carries catastrophic risk. The distance-from-high check ensures the stock has not already pulled back too far — the LTP must be within 4% of the day high (base case). If the stock's maximum intraday gain exceeded 10%, or if it was verified as a strong trend day (max gain ≥ 7%), the allowed distance is relaxed to 6%, permitting deeper pullback entries on high-conviction trend day candidates.
+**Gate 8: Pattern Recognition.** In the Phase 40 path, `GodModeAnalyst.detect_structure_advanced()` analyzes the last 3 candles and identifies one of six institutional reversal patterns: Bearish Engulfing (Z > 0), Evening Star (C2 body < 30% of range), Shooting Star (upper wick > 2× body, Z > 1.5), Absorption Doji (Z > 2.0, body < 0.05% of price, in Sniper Zone), Momentum Breakdown (body > 1.2× avg range, closes at lows, tiered volume), Volume Trap (C2 green Z > 1.5, C3 red below C2 low). If none match, a Tape Stall fallback check is performed. In the Phase 41 path, this gate is skipped.
 
-**Gate 6: Circuit Guard.** The system fetches Level 2 depth data from Fyers and extracts the upper and lower circuit limits. If the LTP is within 1.5% of the upper circuit (calculated as `upper_circuit × 0.985`), the trade is blocked. Shorting near a circuit is extremely dangerous because the stock can lock at the limit, making it impossible to exit the position. The system also checks for lower circuit proximity — if the stock is already near the lower circuit, it has already moved too far down for a meaningful short entry.
+**Gate 9: Breakdown Confirmation.** The current candle's close must be BELOW the entry trigger (Phase 40: previous candle's low; Phase 41: lowest `entry_level` across detected edges).
 
-The depth data fetched here is cached and shared with subsequent orderflow analysis (Tape Reader) and the Pro Confluence checks, avoiding redundant API calls. If the depth API fails, the circuit guard passes (fail-open) — the rationale being that circuit proximity is detectable from other signals, and blocking every trade on an API hiccup is worse than the rare case of missing a circuit approaching stock.
+**Gate 10: Pro Confluence — "Belt and Suspenders".** Comprehensive secondary confirmations: Market Profile Rejection (VAH), DOM Wall Detection (sell/buy > 2.5×), VWAP Slope Analysis, RSI Divergence, VWAP Extension (> 2.0 SD), Fibonacci Rejection, Relative Volume (> 2× avg), OI Divergence, dPOC Divergence, Round Number Proximity. Plus five institutional orderflow principles: Large Wick Detection, Bad High Detection, Bad Low Guard (BLOCKS trade), Trapped Position Detection, Aggression Without Progress. Validation rule: if price is NOT extended beyond 2 SD above VWAP, at least one confluence factor must be present.
 
-**Gate 7: Momentum Safeguard — "The Train Filter".** This gate prevents the most dangerous type of short trade: shorting into accelerating momentum. The system calculates the VWAP slope over the last 30 candles using linear regression. It also computes the Relative Volume (RVOL) as `current_volume / average_volume_of_last_20_candles`. If RVOL exceeds 5.0 and the VWAP slope exceeds 40, the trade is blocked. The metaphor is explicit: "Don't stand in front of a freight train." If volume is surging AND price is accelerating upward, the reversal has not yet begun, and shorting here is statistically suicidal.
+**Gate 11: HTF Confluence — Multi-Timeframe Confirmation.** 15-minute Lower High pattern check and 5-minute consecutive bullish candle count (≥ 5 required). Either condition qualifies. Also checks proximity to PDH, PDL, PDC, PWH, PWL.
 
-**Gate 8: Pattern Recognition.** In the Phase 40 path (`check_setup()`), the `GodModeAnalyst.detect_structure_advanced()` method analyzes the last 3 candles (C1, C2, C3 — where C3 is the current candle) and identifies one of six institutional reversal patterns. In the Phase 41 path (`check_setup_with_edges()`), this gate is skipped entirely because the Multi-Edge Detector has already identified edges. Volume confirmation is quantified using Z-scores: `(current_volume - mean_of_last_20) / std_of_last_20`.
-
-**BEARISH ENGULFING**: C2 is green (buyers pushed up), C3 is red, C3's body is larger than C2's body, and C3 closes below C2's open. This requires a Z-score above 0, meaning the engulfing candle must have at least average volume. Without this filter, low-volume engulfing patterns in choppy markets generate false signals that incorrectly trigger cooldowns. The psychology: buyers committed on C2, but sellers overwhelmed them on C3 with conviction (evidenced by volume).
-
-**EVENING STAR**: C2 is a small-body candle (body less than 30% of its total range — a Doji or Spinning Top), and C3 is red and closes below the midpoint of C1. This three-candle pattern represents indecision (C2) after a rally (C1), followed by decisive selling (C3). It is one of the most reliable reversal patterns in technical analysis.
-
-**SHOOTING STAR**: The upper wick of C3 is more than 2× its body, with a Z-score above 1.5. The long upper wick means price spiked upward but was violently rejected, and the high volume confirms institutional participation in the rejection. This is often described as "the hand of the institutional seller."
-
-**ABSORPTION DOJI**: Z-score above 2.0 (extremely high volume) but body less than 0.05% of price (essentially zero price movement). This pattern reveals a hidden limit seller absorbing all buying demand. The market throws everything at a price level, and it doesn't move — someone very large is selling into every bid. This pattern requires the stock to be in the "Sniper Zone" (top 30% of the last 5 candles' micro-range) to filter out mid-range noise.
-
-**MOMENTUM BREAKDOWN — "The Flush"**: A big red candle where the body exceeds 1.2× the average range of the last 20 candles, closes at its lows (lower wick less than 35% of total range), and has volume confirmation. The volume conditions are tiered: Z-score above 2.0 qualifies automatically. If the body is 1.5× average, Z-score only needs to exceed 1.2. And if the body is 3× or more the average ("Vacuum Flush"), ANY volume level qualifies — the sheer size of the candle proves panic selling without needing volume confirmation. This pattern represents an institutional capitulation event.
-
-**VOLUME TRAP — "Failed Breakout"**: C2 was green with high volume (Z-score above 1.5 — an attempted breakout), but C3 is red and closes below C2's low. Buyers committed capital on C2, expecting continuation. C3 trapped them, and their stop-losses now become fuel for the downward move. This is a classic institutional setup where smart money sells into retail breakout enthusiasm.
-
-If none of these patterns match, a **TAPESTALL** check is performed. If the tape reader detects price stalling at highs (standard deviation of recent highs below a threshold) AND price is extended more than 2 standard deviations above VWAP, a drift-based "Tape Stall" signal is generated.
-
-**Gate 9: Breakdown Confirmation.** After pattern/edge detection, one additional filter is applied: the current candle's close must be BELOW the entry trigger. In the Phase 40 path, the trigger is the previous candle's low. In the Phase 41 path, the trigger is the lowest `entry_level` across all detected edges (the multi-edge detector sets this per-edge and the confidence scorer selects the minimum). This ensures the pattern is not just forming but has actually broken down.
-
-**Gate 10: Pro Confluence — "Belt and Suspenders".** If a valid pattern/edge is found AND breakdown is confirmed, the system runs a comprehensive battery of secondary confirmation checks. This is what separates ShortCircuit from naive pattern-matching systems. The confluence checks include:
-
-Market Profile Rejection — checking if price is being rejected at the Value Area High (VAH) using a TPO (Time-Price-Opportunity) profile calculated from today's data. DOM Wall Detection — analyzing the Level 2 order book for heavy sell walls (sell/buy ratio exceeding 2.5×). VWAP Slope Analysis — if VWAP slope is below 5 units (flat), it confirms a mean-reversion environment favorable for shorts. RSI Divergence — detecting when price makes higher highs but RSI makes lower highs, a classic bearish divergence. VWAP Extension — quantifying how far price has pushed above VWAP in standard deviation units (above 2.0 SD is "extended"). Fibonacci Rejection — checking if the setup candle's high coincides with a Fibonacci retracement level (0.382, 0.5, or 0.618). Relative Volume — if the setup candle's volume exceeds 2× the 20-candle average, it confirms conviction. Conversely, if RVOL is below 0.5× while price is extended, it signals "Vacuum/Exhaustion" — price moved far on thin volume, which is unsustainable.
-
-The system also checks three institutional-grade metrics. OI Divergence detects when open interest is dropping while price is rising — a signal that the rally is driven by short covering (artificial demand) rather than genuine buying. dPOC Divergence checks if the Developing Point of Control (where most volume is concentrated today) is stuck well below the current price, indicating that "value" has not migrated upward and the rally is built on thin air. And Round Number Proximity checks if price is within 0.5% of a psychological level (₹100, ₹500, ₹1000), which naturally attracts liquidity for reversals.
-
-Five orderflow principles from institutional trading are also applied: Large Wick Detection (upper wick exceeding 60% of total range, indicating strong rejection), Bad High Detection (price at day high with both rejection AND heavy sell-side depth — a perfect short zone), Bad Low Guard (if price is at day LOW with heavy buy-side depth, the trade is BLOCKED entirely — we do not short into institutional support), Trapped Position Detection (high volume committed at the top, followed by a sharp drop, meaning longs are trapped), and Aggression Without Progress (high volume but minimal price movement, indicating hidden institutional absorption).
-
-The validation rule for confluence is important: if price is NOT extended beyond 2 standard deviations above VWAP (i.e., it is still relatively close to value), then at least one Pro Confluence factor must be present to proceed. Extended patterns are allowed to stand alone because the statistical edge of extreme extension is sufficient on its own.
-
-**Gate 11: HTF Confluence — Multi-Timeframe Confirmation.** Before a signal is emitted, the `HTFConfluence` module performs two final macro-level checks. First, it fetches 15-minute candles and checks for a "Lower High" pattern — the most recent completed 15-minute high must be lower than the previous one, indicating that the higher timeframe is showing structural weakness. Second, it counts consecutive bullish candles on the 5-minute chart. A minimum of 5 consecutive green candles is required, based on Volman's principle that a reversal after 3 candles is just continuation, but after 5 or more candles, it represents genuine exhaustion. The system is lenient here — either the 15-minute weakness OR the exhaustion run qualifies.
-
-Additionally, the system checks proximity to key multi-timeframe levels: Previous Day High (PDH), Previous Day Low (PDL), Previous Day Close (PDC), Previous Week High (PWH), and Previous Week Low (PWL). Proximity to these levels adds informational confluence in the log output but does not block or allow trades on its own.
-
-**Gate 12: Signal Finalization.** The stop loss is calculated as `setup_candle_high + (ATR × 0.5)`, with a minimum buffer of ₹0.25. The Average True Range (ATR) is calculated over 14 periods, ensuring the stop adapts dynamically to the stock's volatility — a high-volatility stock gets a wider stop, preventing premature stop-outs on normal noise. The signal_low (the low of the setup candle) becomes the Validation Trigger — the price level that must be broken before entry is permitted.
-
-In the Phase 41 path, the finalized signal is further enriched with multi-edge metadata: the list of all detected edges (`edges_detected`), the overall confidence level, the edge count, and the primary trigger name. If the multi-edge detector's recommended SL is tighter than the ATR-based SL, the tighter value is used — this allows edge-specific risk management (e.g., a Trapped Longs detector might place the SL just above the trap candle's high rather than using the broader ATR buffer).
-
-The signal is then logged to `logs/signals.csv` for end-of-day analysis, recorded in the Signal Manager (which triggers the 45-minute cooldown for that symbol), and an ML observation is written capturing 20+ features (candle metrics, VWAP statistics, volume statistics, pattern type, number of confluences, and Nifty trend) for future machine learning model training.
+**Gate 12: Signal Finalization.** Stop loss = `setup_candle_high + (ATR × 0.5)`, minimum buffer ₹0.25. Signal logged to `logs/signals.csv` with extended fields (setup_high, tick_size, atr, entry_price) for EOD simulation. Signal recorded in Signal Manager (triggers 45-minute cooldown). ML observation written with 20+ features.
 
 ---
 
-### 3.4 The Validation Gate — `focus_engine.py`
+### 3.4 The Validation Gate — `focus_engine.py` (Entry Only)
 
-This is perhaps the single most important innovation in the system's architecture. The signal is NOT executed upon detection. Instead, it enters a structured holding queue with three possible outcomes.
+This is perhaps the single most important innovation in the system's architecture. The signal is NOT executed upon detection. Instead, it enters a structured holding queue managed by `check_pending_signals()`.
 
-When a signal enters the gate, three parameters are defined. The entry trigger is set to the signal_low — the low of the setup candle. The invalidation trigger is set to the stop_loss price — the high of the setup candle plus the ATR buffer. The timeout is configurable via `config.VALIDATION_TIMEOUT_MINUTES` (default 15 minutes in Phase 41.1, reduced from 45).
+When a signal enters the gate, three parameters are defined: the entry trigger (signal_low — the low of the setup candle), the invalidation trigger (stop_loss price — setup candle high plus ATR buffer), and the timeout (configurable via `config.VALIDATION_TIMEOUT_MINUTES`, default 15 minutes).
 
-A background monitor thread polls every 2 seconds using `fyers.quotes()`. If the LTP drops below the trigger price, the signal is VALIDATED and immediately forwarded to the Trade Manager for execution. If the LTP rises above the invalidation price before triggering, the signal is INVALIDATED and removed — price has climbed too high, invalidating the entire setup. If the configured timeout passes without either condition being met, the signal times out and is removed — the setup has gone stale. The 15-minute default is based on the principle that exhaustion plays are immediate (2–10 minute horizon) and that signals triggering after 15 minutes have likely seen their price structure change.
+The `check_pending_signals()` method polls every 2 seconds using `fyers.quotes()`. If the LTP drops below the trigger price, the signal is VALIDATED and immediately forwarded to `trade_manager.execute_logic()` for execution.
 
-The strategic reasoning behind this gate is profound. Many candlestick patterns form at pivot points but fail to follow through. A shooting star may form, but price consolidates sideways rather than dropping. Without the validation gate, the system would enter a trade on the pattern alone and wait for a breakdown that never comes. By requiring price to break the setup candle's low, the system confirms that selling pressure is genuine and follow-through is occurring. Analysis shows this mechanism eliminates roughly 40% of would-be losing trades.
+**Phase 41.2 Integration.** When `config.USE_SCALPER_RISK_MANAGEMENT` is `True` and a signal carries a `_scalper_manager` reference, the validation gate calls `scalper_manager.start_position()` after successful trade execution. This hands off position management from the Focus Engine's legacy trailing stop to the Scalper Position Manager's multi-phase TP system.
+
+If the LTP rises above the invalidation price before triggering, the signal is INVALIDATED and removed. If the timeout passes without either condition, the signal times out and is removed. The strategic reasoning: many candlestick patterns form but fail to follow through. By requiring price to break the setup candle's low, the system confirms genuine selling pressure. Analysis shows this eliminates roughly 40% of would-be losing trades.
 
 ---
 
@@ -168,144 +153,311 @@ The strategic reasoning behind this gate is profound. Many candlestick patterns 
 
 When validation triggers, execution depends on the `AUTO_TRADE` flag (configurable via Telegram `/auto on|off`).
 
-In auto mode, the system places a Market Sell order (short entry) through the Fyers API. If the entry succeeds, it immediately places a Stop-Loss Limit Buy order (cover). The SL trigger price is rounded to the stock's tick size using `tick_round()`, and the limit price is set 0.5% above the trigger to ensure fill even in fast markets. The SL placement uses a 3-attempt retry loop — each attempt independently calls `fyers.place_order()` and checks for success. If all 3 attempts fail, the system enters emergency mode: it immediately places a Market Buy order to close the short position (preventing a naked position), logs a `CRITICAL` error, and returns an error status to the calling code. This fail-safe ensures that under no circumstances does the system leave an unprotected short position in the market.
+#### Phase 42: Position Safety Architecture
 
-In manual mode, the system returns a structured dictionary with status `MANUAL_WAIT` containing the symbol, calculated quantity, trade value, LTP, stop loss, and pattern description. The Telegram bot receives this and renders a rich alert message with an inline keyboard containing a "GO" button. When the operator taps the button, a callback triggers the actual trade execution using the current LTP (which may have moved since the signal), logs the entry via the Journal Manager, and starts the Focus Engine.
+Every order placement method is guarded by the position safety system. This is the core fix for the critical directional flip bug (where duplicate buy orders could flip a short position into an unintended long).
 
-The quantity calculation is straightforward: `int(CAPITAL / LTP)`, where CAPITAL defaults to ₹1,800. If this results in less than 1 share, it is forced to 1. The small capital size is deliberate — this is designed for intraday scalping with focused position sizing rather than large capital deployment.
+**`_get_broker_position(symbol)`** — Queries the Fyers positions API for the ACTUAL current position. Returns a dict with `net_qty`, `symbol`, and `raw` position data. If the symbol is not found in the positions list, returns `{'net_qty': 0}` (position is flat). If the API call fails entirely, returns `None` (unknown state).
+
+**`_verify_position_safe(symbol, intended_action)`** — The critical guard called before EVERY order. Accepts one of four intended actions:
+- `ENTER_SHORT`: Blocks if position is already LONG (would cause a directional conflict). Warns if already SHORT (adding to position). Allows if flat.
+- `EXIT_SHORT`: Blocks if position is flat or LONG (would create accidental long). Allows only if position is SHORT.
+- `ENTER_LONG`: Blocks if position is SHORT.
+- `EXIT_LONG`: Blocks if position is flat or SHORT.
+
+If `config.ENABLE_POSITION_VERIFICATION` is `False`, the check is bypassed (NOT recommended for production — this exists only for testing). If the broker position cannot be determined (API failure), the check defaults to **BLOCKED** (fail-safe: better to miss a trade than place a dangerous order).
+
+#### Trade Entry — `execute_logic()`
+
+In auto mode, the method first calls `_verify_position_safe(symbol, 'ENTER_SHORT')`. If verification passes:
+
+1. **Market Sell order** placed via `fyers.place_order()` with `type=2` (Market), `side=-1` (Sell).
+2. If entry succeeds, a **SL-Limit Buy order** is placed. The SL trigger price is rounded to the stock's tick size using `tick_round()`. The limit price is set 0.5% above the trigger to ensure fill in fast markets.
+3. SL placement uses a **3-attempt retry loop**. Each attempt independently calls the API. On success, the SL order ID is tracked in `self.active_sl_orders[symbol]` (Phase 42 SL tracking).
+4. If all 3 SL attempts fail, `emergency_exit()` is called.
+
+The quantity calculation: `int(CAPITAL / LTP)`, where CAPITAL defaults to ₹1,800. Minimum 1 share.
+
+In manual mode, returns a `MANUAL_WAIT` status dict. The Telegram bot renders this as a one-tap "GO" button.
+
+#### Emergency Exit — `emergency_exit()` (Phase 42 Circuit Breaker)
+
+The emergency exit now implements a circuit breaker pattern. When triggered (typically after 3 failed SL placement attempts):
+
+1. **Wait 1 second** for broker state to settle (the entry order may have already been canceled or the position may have been closed by another mechanism).
+2. **Query broker position** via `_get_broker_position()`.
+3. **Decision matrix:**
+   - If position is **flat** (`net_qty == 0`): Log "position already flat", clean up SL tracking, **skip** the exit order. This is the critical fix — the broker's SL may have filled during the retry attempts.
+   - If position is **long** (`net_qty > 0`): Log a `CRITICAL` alert — the position has flipped to the wrong side. This requires **manual intervention**. The bot does NOT attempt to fix this automatically.
+   - If position is **short** (`net_qty < 0`): Confirmed short, safe to exit. Uses `abs(broker_pos['net_qty'])` as the actual quantity (not the original signal qty, which may differ if partial fills occurred).
+   - If position is **unknown** (API failure): Falls through to place the exit anyway — better to risk a duplicate than leave a naked short.
+4. Places a Market Buy order to cover the short.
+5. Cleans up SL tracking via `_cleanup_sl_tracking()`.
+
+#### Partial Position Close — `close_partial_position()` (Phase 41.2)
+
+Used by the Scalper Position Manager for TP scale-outs. Guarded by `_verify_position_safe(symbol, 'EXIT_SHORT')`. Places a Market Buy for the specified quantity. Returns `BLOCKED` if position verification fails.
+
+#### Stop Loss Update — `update_stop_loss()` (Phase 41.2)
+
+Used by the Scalper Position Manager to dynamically modify existing SL orders. Scans the Fyers orderbook for pending orders (status 6) matching the symbol, then calls `fyers.modify_order()` with the new trigger and limit prices. The limit price is always set 0.5% above the trigger for fill protection.
+
+#### EOD Square-Off — `close_all_positions()`
+
+Executes the end-of-day closing sequence:
+1. **Cancel all pending orders** first — scans the orderbook for status 6 (Pending) and cancels each. This prevents SL orders from triggering after the position is closed.
+2. **Close all net positions** — for each position with `netQty != 0`, determines exit side (`-1` for longs, `1` for shorts) and places a Market order.
+3. Cleans up SL tracking for each closed symbol.
+
+#### SL Order Tracking — `active_sl_orders`
+
+A dictionary mapping `{symbol: order_id}` that tracks active SL orders. Updated when:
+- A new SL is placed (after successful `fyers.place_order()` in the retry loop)
+- Cleaned up via `_cleanup_sl_tracking(symbol)` when a position is closed (emergency exit, EOD square-off, or manual close)
+
+This tracking enables the system to know which SL orders are "owned" by the bot and prevents duplicate SL placements.
 
 ---
 
-### 3.6 Active Trade Management — Focus Mode
+### 3.6 Active Trade Management — Focus Mode (`focus_engine.py`)
 
-Once a trade is entered, the Focus Engine activates a real-time monitoring loop running on a daemon thread with 2-second intervals. This loop performs five critical functions simultaneously.
+Once a trade is entered, the Focus Engine activates a real-time monitoring loop running on a daemon thread with 2-second intervals. This loop performs six critical functions simultaneously.
 
-**Live Dashboard Updates.** Every 2 seconds, the engine fetches the latest quote (LTP, volume, VWAP, bid quantities, ask quantities, day high). It calculates live P&L in three formats: points (entry minus LTP for shorts), cash (points × quantity), and ROI percentage (assuming 5× intraday leverage, per Indian exchange margin rules). It derives orderflow sentiment from the bid/ask ratio: below 0.8 is "Bearish" (more selling pressure), above 1.2 is "Bullish" (more buying pressure), and in between is "Neutral". It computes VWAP distance percentage and checks if the SFP watch is active. All of this is rendered into a formatted Telegram message that is EDITED in-place (using `edit_message_text`) rather than sending new messages, creating a live-updating dashboard experience. Interactive buttons are attached: a Refresh button (for manual dashboard refresh) and a Close Position button (for one-tap exit).
+#### Phase 42: Broker Position Check (Loop Top)
 
-**Three-Phase Trailing Stop.** The trailing mechanism uses the initial risk (distance between entry and stop) as its unit of measurement. In the initial phase, the stop remains at the original level (setup candle high plus ATR buffer). When profit reaches 1× risk (TP1), the stop is moved to entry price — the trade becomes risk-free. When profit reaches 2× risk (TP2), trailing mode activates. In trailing mode, the stop follows price downward at `LTP + (risk × 0.5)`, but only tightens (never loosens). This means the stop gets progressively closer to the current price as the trade moves further in favor, locking in increasingly larger portions of the profit.
+At the **top of every focus loop iteration**, before any price processing occurs, the engine checks whether the position still exists on the broker:
 
-**Dynamic Constraints.** The engine continuously recalculates two dynamic levels. The dynamic SL is set at `day_high × 1.001` (0.1% above day high), but if the LTP has dropped below VWAP, it tightens to `VWAP × 1.002` — a much closer stop that protects profits when the trade is running well. The dynamic target is set at 2% below the current price as a visual guide for the dashboard.
+```
+broker_pos = self._check_broker_position(symbol)
+if broker_pos is None or broker_pos.get('netQty', 0) == 0:
+    → "Position already closed by broker (SL hit?)"
+    → cleanup_orders(symbol)
+    → stop_focus(reason="BROKER_SL_HIT")
+```
 
-**Stop-Loss Hit Detection.** When the LTP rises above the current stop level, the engine first checks whether the position is already flat by querying the Fyers positions API. The broker's hard SL order may have already filled, in which case placing another buy order would create an unwanted long position. If the position is still open, the engine places a Market Buy to cover, cancels all pending orders for the symbol (by scanning the orderbook for status 6 — "Pending"), sends a stop-loss notification via Telegram, and shuts down focus mode.
+This is controlled by `config.ENABLE_BROKER_POSITION_POLLING` (default `True`). The `_check_broker_position(symbol)` helper queries `fyers.positions()` and returns the matching position dict, or `None` if the position is not found (meaning it was closed). This check runs every 2 seconds and catches the scenario where the broker's hard SL order filled between polling intervals — the engine detects the flat position and exits gracefully without placing any duplicate orders.
 
-**SFP Watch — Post-Exit Fakeout Detection.** After a stop-loss exit, the engine starts a 10-minute background monitoring thread. If, within those 10 minutes, the price crosses back BELOW the original entry price, it means the stop-loss was a fakeout — price was swept above the entry to trigger stops, then reversed back down. This is a Swing Failure Pattern, one of the highest-conviction re-entry signals in institutional trading. The system sends an urgent alert through Telegram with the entry level, current price, and a clear "RE-ENTER SHORT NOW" call to action. The psychology is that when stops are hunted and price reverses, the trapped breakout longs become fuel for an accelerated downward move.
+#### Live Dashboard Updates
+
+Every 2 seconds, the engine fetches the latest quote (LTP, volume, VWAP, bid quantities, ask quantities, day high). It calculates live P&L in points, cash, and ROI percentage (assuming 5× intraday leverage). It derives orderflow sentiment from the bid/ask ratio. All of this is rendered into a formatted Telegram message that is EDITED in-place (using `edit_message_text`). Interactive buttons: Refresh and Close Position.
+
+#### Stop-Loss Hit Detection — `process_tick()` (Phase 42: Double-Verify)
+
+When the LTP rises above the current stop level, the engine now performs a **4-step safety sequence** before placing any exit order:
+
+**Step 1: Immediate broker check.** Query `_check_broker_position()`. If position is flat (`netQty == 0`), the broker's hard SL already filled — skip the manual exit, clean up orders, and stop focus with reason `BROKER_SL_HIT`. If position is LONG (`netQty > 0`), log a `CRITICAL` alert for wrong-side detection and stop focus with reason `WRONG_SIDE_DETECTED`.
+
+**Step 2: Wait 500ms.** This delay allows the broker's SL order (which may have been triggered at the exact same price level) time to process and settle. Without this delay, the bot's manual exit and the broker's SL could race, causing both to fill.
+
+**Step 3: Re-verify broker position.** Query the broker AGAIN after the 500ms delay. If the position is now flat, the broker's SL filled during the delay — skip the manual exit.
+
+**Step 4: Manual exit (only if still short).** If the position is confirmed still short after both checks, use the ACTUAL broker quantity (`abs(broker_pos['netQty'])`) — not the original signal quantity — to place the Market Buy cover order. This handles partial fills correctly.
+
+After exit: cancel all pending orders for the symbol, send stop-loss notification via Telegram, and stop focus mode.
+
+#### Three-Phase Trailing Stop
+
+The trailing mechanism uses the initial risk (distance between entry and initial stop) as its unit of measurement:
+
+1. **Initial Phase**: Stop remains at the original level (setup candle high plus ATR buffer).
+2. **TP1 — Breakeven** (profit ≥ 1× risk): Stop moved to entry price — the trade becomes risk-free.
+3. **TP2 — Trailing Activation** (profit ≥ 2× risk): Trailing mode activates. Stop follows price at `LTP + (risk × 0.5)`, only tightening (never loosening).
+
+This logic was previously a dead code bug (positioned after a `return` statement in `process_tick()` and structurally orphaned after the `cleanup_orders()` method definition). Phase 42 corrected this by moving the TP/trailing logic back inside `process_tick()` after the SL return block, ensuring breakeven and trailing stops actually execute.
+
+#### Dynamic Constraints
+
+The engine continuously recalculates two dynamic levels: dynamic SL at `day_high × 1.001` (tightens to `VWAP × 1.002` when LTP drops below VWAP), and dynamic target at 2% below current price.
+
+#### SFP Watch — Post-Exit Fakeout Detection
+
+After a stop-loss exit, a 10-minute background thread monitors price. If price crosses back BELOW the original entry, it's a Swing Failure Pattern — stops were hunted, price reversed. An urgent Telegram alert is sent with "RE-ENTER SHORT NOW".
+
+#### Order Cleanup — `cleanup_orders(symbol)`
+
+Scans the Fyers orderbook for all pending orders (status 6) matching the symbol and cancels each. Used after SL exits to remove orphaned SL orders, and during EOD square-off.
 
 ---
 
-### 3.7 Recovery and Fault Tolerance
+### 3.7 Position Reconciliation — `position_reconciliation.py` (Phase 42)
+
+A safety module that detects orphaned positions — positions that exist on the broker but are not being tracked by the bot. This catches scenarios like:
+- Bot crashed after placing an order but before starting position tracking
+- Duplicate order bug created an extra position
+- Manual trade placed via the Fyers app
+
+**How it works:**
+
+1. Calls `fyers.positions()` to get ALL open positions from the broker.
+2. Filters for positions with `netQty != 0`.
+3. For each open position, checks if the Focus Engine's `active_trade` is managing that symbol.
+4. If a position is NOT managed by the bot, it's classified as **orphaned**.
+
+**What it does when an orphan is found:**
+
+- Logs a `CRITICAL` message with the symbol, quantity, side (LONG/SHORT), and the fact that the bot is not managing it.
+- Calls `bot.send_emergency_alert()` with a detailed message listing possible causes (crash, duplicate order bug, manual trade) and recommended action (close manually or restart bot).
+- Writes an entry to `logs/orphaned_positions.log` with timestamp.
+
+**When it runs:**
+
+- **At startup** (before the main trading loop starts): Catches positions left over from previous crashes.
+- **Every 30 minutes** during the trading session: Controlled by `config.POSITION_RECONCILIATION_INTERVAL` (default 1800 seconds). The orchestrator tracks `last_reconciliation` timestamp and triggers reconciliation when the interval elapses.
+
+---
+
+### 3.8 Scalper Risk Management — `scalper_risk_calculator.py` + `scalper_position_manager.py` (Phase 41.2)
+
+A feature-flagged alternative risk management system designed for scalping-style position management with multi-target exits and structure-based stops. Controlled by `config.USE_SCALPER_RISK_MANAGEMENT` (default `False`).
+
+#### Risk Calculator — `scalper_risk_calculator.py`
+
+Pure calculation module with no side effects. Provides three categories of calculations:
+
+**Stop Loss Calculation:**
+- Base stop: `setup_candle_high + (tick_size × SCALPER_STOP_TICK_BUFFER)` where `SCALPER_STOP_TICK_BUFFER` defaults to 12 ticks.
+- Buffered stop: If `SCALPER_STOP_HUNT_BUFFER_ENABLED` is `True`, adds an additional `SCALPER_STOP_HUNT_BUFFER_PCT` (0.3%) buffer above the base stop to account for stop-hunting wicks.
+
+**Profit Target Calculation:**
+- TP1: `entry_price × (1 - SCALPER_TP1_PCT)` — default 1.5% below entry. Close 50% of position.
+- TP2: `entry_price × (1 - SCALPER_TP2_PCT)` — default 2.5% below entry. Close 25% (75% total closed).
+- TP3: `entry_price × (1 - SCALPER_TP3_PCT)` — default 3.5% below entry. Close remaining 25%.
+
+**Breakeven Threshold:**
+- Points required for breakeven: `entry_price × SCALPER_BREAKEVEN_TRIGGER_PCT` (default 0.3% of entry price, approximately 1.5 points on a ₹500 stock).
+
+#### Position Manager — `scalper_position_manager.py`
+
+Manages the lifecycle of an open scalper position through 6 phases:
+
+1. **ENTRY**: Position just opened. No action, monitoring only.
+2. **TP1**: Price reached TP1 level. Close 50% via `trade_manager.close_partial_position()`. Move SL to breakeven.
+3. **BREAKEVEN**: SL has been moved to entry price. Trade is now risk-free. Wait for further price movement.
+4. **TRAILING**: Price has moved past breakeven threshold. SL trails price using distance tiers configured in config:
+   - Initial: `SCALPER_TRAILING_DISTANCE_INITIAL` (0.2% behind price)
+   - After TP1: `SCALPER_TRAILING_DISTANCE_AFTER_TP1` (0.15%)
+   - After TP2: `SCALPER_TRAILING_DISTANCE_AFTER_TP2` (0.1%)
+5. **TP2**: Price reached TP2 level. Close 25% (75% total). Tighten trailing distance.
+6. **TP3**: Price reached TP3 level. Close remaining 25%. Position fully closed.
+
+The `update_position(current_ltp)` method is called every 2 seconds by the scalper monitor thread in `main.py`. It returns an action string (`'HOLD'`, `'TP1'`, `'TP2'`, `'TP3'`, `'TRAILING'`, `'STOPPED'`) that the monitor thread dispatches to the trade manager.
+
+---
+
+### 3.9 Trade Simulation — `trade_simulator.py` + `eod_analysis.py` (Phase 41.2)
+
+**Trade Simulator:** Simulates both the legacy ATR-based system and the new scalper system on historical price data. Processes candle-by-candle, tracking entry, SL hits, TP scale-outs, trailing stops, and breakeven moves. Used for comparing the two risk management approaches.
+
+**EOD Analysis:** Command-line script that loads signals from `logs/signals.csv`, fetches historical intraday candle data for each signal's symbol, runs the trade simulator with both systems, and outputs a performance comparison. Reports metrics like win rate, average R-multiple, and total P&L for each system. This is intended to run daily for 10 days before enabling the scalper system live.
+
+---
+
+### 3.10 Recovery and Fault Tolerance
 
 The system is designed to survive crashes, network outages, and API failures without leaving orphaned positions.
 
-**Auto-Recovery on Startup.** The `FocusEngine.attempt_recovery()` method runs at boot. It calls `fyers.positions()` to check for any open positions. If an open short position is found, it extracts the entry price, quantity, and symbol. It then scans the orderbook for any pending SL orders associated with that position, extracts the SL price, and "adopts" the trade by calling `start_focus()` with the recovered parameters. A "RECOVERY MODE" notification is sent via Telegram. This means the operator can restart the bot mid-trade without losing position tracking or trailing stop management.
+**Auto-Recovery on Startup.** `FocusEngine.attempt_recovery()` runs at boot. It checks for open positions, extracts the entry price, quantity, symbol, and any pending SL orders, then "adopts" the trade by calling `start_focus()` with the recovered parameters. A "RECOVERY MODE" Telegram notification is sent.
 
-**Network Resilience.** All Telegram API calls are wrapped in exception handlers. If Telegram is unreachable, the engine logs the error and continues trading — the Telegram UI is informational, not functional. Position safety is maintained by the broker-side SL order, which exists independently of the bot process. If `fyers.quotes()` fails during the focus loop, the engine sleeps 5 seconds and retries on the next cycle rather than crashing.
+**Position Reconciliation (Phase 42).** As described in Section 3.7, the reconciler detects orphaned positions at startup and every 30 minutes, sending emergency alerts for any unmanaged positions.
 
-**Emergency Exit Protocol.** If the SL-Limit order fails to place after 3 attempts (API error, rate limit, insufficient margin), the system immediately places a Market Buy to close the short position, logs a `CRITICAL` level error, and returns an error status. This prevents the catastrophic scenario of a naked short position with no stop-loss protection.
+**Network Resilience.** All Telegram API calls are wrapped in exception handlers. If Telegram is unreachable, trading continues — position safety is maintained by the broker-side SL order. If `fyers.quotes()` fails, the engine sleeps 5 seconds and retries.
 
----
+**Emergency Exit Protocol (Phase 42).** As described in Section 3.5, the circuit breaker pattern verifies position state before the emergency exit, preventing duplicate orders.
 
-### 3.8 Signal Manager — Discipline Engine — `signal_manager.py`
-
-The Signal Manager is a singleton that enforces the system's psychological discipline rules. It maintains three state variables: a counter of signals emitted today, a dictionary of per-symbol timestamps for cooldown tracking, and a counter of consecutive losses.
-
-The daily signal cap (default: 5) prevents overtrading. Each call to `can_signal()` checks whether the day's quota has been exhausted. The per-symbol cooldown (45 minutes) is checked by comparing the current time against the last signal timestamp for that symbol. The consecutive loss tracker monitors the outcome of recent trades, and if 3 consecutive losses are detected, the system pauses all further trading for the remainder of the day.
-
-All counters reset automatically when the date changes, ensuring a fresh start each trading day. The Signal Manager's `record_signal()` method is called by the analyzer when a signal is finalized, which triggers the cooldown timer for that symbol and decrements the daily quota.
+**Broker Position Verification (Phase 42).** The `_verify_position_safe()` guard on every order method ensures no order can cause a directional flip. The focus loop's top-of-iteration broker check ensures no orders are placed on already-closed positions.
 
 ---
 
-### 3.9 The Telegram Interface — `telegram_bot.py`
+### 3.11 Signal Manager — Discipline Engine — `signal_manager.py`
 
-The Telegram bot serves as the primary human interface for the system. It handles six distinct notification flows:
-
-**Startup Message:** Sent once at boot with a motivational trading quote and system status confirmation.
-
-**Validation Alert:** Sent when a Phase 40 pattern-only signal enters the Validation Gate. Includes the symbol, pattern detected, trigger price, and a "PENDING" status indicator. This alerts the operator that the system has found a candidate and is waiting for price confirmation.
-
-**Multi-Edge Alert (Phase 41):** Sent when a multi-edge signal is generated. This richer notification displays all detected edges as a checklist (e.g., `✓ TRAPPED_LONGS`, `✓ ABSORPTION`), the primary trigger name, the overall confidence level, entry and SL prices, and the edge count. The message uses MarkdownV2 formatting with a plain Markdown fallback if escaping fails. The operator immediately sees the confluence reasoning behind each signal.
-
-**Trade Execution Alert:** Sent when a trade is executed (auto) or when operator action is needed (manual). In manual mode, this includes an inline keyboard with a "GO ENTER TRADE" button that triggers execution via a callback handler.
-
-**Focus Mode Dashboard:** A continuously-updated message showing real-time P&L, entry price, SL level, target level, orderflow sentiment, and action buttons. This message is edited in-place every 2 seconds, creating a live-updating terminal-style dashboard within Telegram.
-
-**SFP Alert:** An urgent notification sent after a stop-loss exit if price reverses back below the entry level within 10 minutes, indicating a fakeout re-entry opportunity.
-
-The bot also handles operator commands: `/status` returns the current system state (active trades, pending signals, daily stats), and `/auto on|off` toggles between automatic and manual trade execution modes at runtime.
+The Signal Manager is a singleton enforcing three rules: daily signal cap (default 5), per-symbol cooldown (45 minutes), and consecutive loss pause (3 losses triggers full-day trading pause). All counters reset when the date changes.
 
 ---
 
-### 3.10 Configuration — `config.py`
+### 3.12 The Telegram Interface — `telegram_bot.py`
 
-All tunable parameters are centralized in a single configuration module that loads environment variables via `python-dotenv`:
+The Telegram bot serves as the primary human interface. It handles seven distinct notification flows:
 
-Capital per trade: ₹1,800. Maximum risk per trade: ₹200. Auto-trade: OFF by default (manual mode). Log file: `logs/bot.log`. Square-off time: 15:10 IST. Validation timeout: 15 minutes (Phase 41.1, reduced from 45). Fyers credentials and Telegram tokens are loaded from environment variables, never hardcoded.
+**Startup Message:** Motivational trading quote and system status confirmation.
 
-**Phase 41.1 Feature Flags.** The configuration module includes a master switch `MULTI_EDGE_ENABLED` (default `False`), a confidence threshold setting, a `LOG_MULTI_EDGE_DETAILS` flag for verbose edge logging, and an `ENABLED_DETECTORS` dictionary with 5 active detectors (Pattern, Trapped Position, Absorption, Bad High, Failed Auction). Three detectors were removed in Phase 41.1 (OI Divergence Proxy, TPO Poor High, Momentum Exhaustion) and their config entries commented out. All 5 remaining detectors default to `True` for immediate deployment when the master switch is enabled.
+**Validation Alert:** Sent when a Phase 40 pattern-only signal enters the Validation Gate. Includes symbol, pattern detected, trigger price, and "PENDING" status.
 
-**Weighted Confluence Scoring.** Phase 41.1 introduces `EDGE_WEIGHTS` — a dictionary assigning quality weights to each edge trigger. Rare, high-conviction edges (Absorption: 3.0, Bad High: 2.0, Trapped Longs: 2.0) receive higher weights than common setups (Failed Auction: 1.0, standard patterns: 1.0). Three configurable thresholds (`CONFIDENCE_THRESHOLD_EXTREME = 5.0`, `CONFIDENCE_THRESHOLD_HIGH = 3.0`, `CONFIDENCE_THRESHOLD_MEDIUM = 2.0`) control the confidence classification.
+**Multi-Edge Alert (Phase 41):** Rich notification displaying all detected edges as a checklist, primary trigger name, confidence level, entry and SL prices, and edge count. Uses MarkdownV2 with plain fallback.
 
-**Performance Tracking.** `ENABLE_DETECTOR_TRACKING` (default `True`) activates per-detector performance logging to `logs/detector_performance.csv`. Scanner parallelization is configured via `SCANNER_PARALLEL_WORKERS` (default 10).
+**Trade Execution Alert:** Sent when a trade is executed (auto) or when operator action is needed (manual mode with "GO" button).
 
----
+**Focus Mode Dashboard:** Continuously-updated message showing real-time P&L, entry, SL, target, orderflow sentiment, and action buttons. Edited in-place every 2 seconds.
 
-### 3.11 Multi-Edge Detection System — `multi_edge_detector.py` (Phase 41.1)
+**SFP Alert:** Urgent notification after stop-loss exit if price reverses back below entry within 10 minutes.
 
-The Multi-Edge Detector is the Phase 41 enhancement module, optimized in Phase 41.1 to reduce detector count from 8 to 5 while increasing signal quality through weighted confluence scoring. It runs BEFORE the analyzer and returns a structured edge payload that the analyzer consumes.
+**Emergency Alert (Phase 42):** `send_emergency_alert(message)` — High-priority alert with forced notification (`disable_notification=False`). Used for critical position errors (duplicate orders, orphaned positions, directional flip detection). Each alert is also logged to `logs/emergency_alerts.log` with timestamp. This method is called by the Position Reconciliation module, the emergency exit circuit breaker, and the position verification system.
 
-**Architecture.** The `MultiEdgeDetector` class accepts the `ENABLED_DETECTORS` dictionary from config and exposes a single public method: `scan_all_edges(candidate)`. This method iterates through 5 active detectors in sequence (Pattern, Trapped Position, Absorption, Bad High, Failed Auction). Three detectors were commented out in Phase 41.1: OI Divergence Proxy (noise without real OI data), TPO Poor High (50-100ms computational overhead, 95% information loss), and Momentum Exhaustion (logically redundant with Gate 7). Each detector is wrapped in a try-except block — if any detector crashes, the error is logged and the remaining detectors continue.
-
-**Weighted Confidence Scoring (Phase 41.1).** When edges are found, the `_score_and_package()` method computes a weighted score using `config.EDGE_WEIGHTS`. Each edge trigger has an assigned quality weight: rare institutional signals (Absorption: 3.0) carry triple the weight of common setups (Failed Auction: 1.0). The total weighted score is compared against configurable thresholds. A score ≥ 5.0 produces `EXTREME` confidence. A score ≥ 3.0 produces `HIGH`. A score ≥ 2.0 with 2+ edges produces `HIGH` (confluence bonus). If the score is ≥ 1.5 and any individual edge has HIGH/EXTREME confidence, the overall is `HIGH`. Otherwise the signal is rejected. This means a single Absorption detection (weight 3.0) alone qualifies as HIGH, while a single Failed Auction (weight 1.0) with only MEDIUM confidence is rejected — correctly reflecting their relative institutional conviction.
-
-The edge payload includes: the list of edges with their reasoning and metrics, the overall confidence, the edge count, the weighted score (for logging/analysis), the primary trigger name, a unified entry trigger, and a recommended stop-loss.
-
-**Detector 1: Pattern Engine.** Refactored copy of `GodModeAnalyst.detect_structure_advanced()`. Identifies 6 patterns (Bearish Engulfing, Evening Star, Shooting Star, Absorption Doji, Momentum Breakdown, Volume Trap) with identical thresholds and Z-score requirements.
-
-**Detector 2: Trapped Position.** Scans last 5 candles for trap candles near day high with volume Z-score > 1.5, currently broken below. Orderflow confirmation via bid/ask ratio elevates from MEDIUM to HIGH.
-
-**Detector 3: Absorption.** Detects hidden limit sellers at highs — extreme volume (Z > 2.0) with tiny body (< 0.15% of price) near day high. Z > 3.0 with 50%+ wick ratio produces EXTREME confidence. Rare but very high-conviction.
-
-**Detector 4: Bad High.** Uses Level 2 depth data for distribution zone detection. Requires sell/buy ratio > 2.5× and rejection wick > 40%. Ratio > 4.0× produces EXTREME confidence. Depth-dependent.
-
-**Detector 5: Failed Auction (Simplified in Phase 41.1).** Detects failed breakouts above recent range. In Phase 41.1, simplified from 60-candle to 30-candle minimum (works from 9:45 AM instead of 10:15 AM). Uses a 20-candle range definition and 10-candle breakout lookback, reducing code by ~35% while preserving functional equivalence.
-
-**Commented-out Detectors (Phase 41.1).** Three detectors remain in the codebase as comments for potential future re-enablement: OI Divergence Proxy (always MEDIUM confidence without real OI data), TPO Poor High (O(n×50) computational overhead, redundant with Bad High), and Momentum Exhaustion (conceptual overlap with Gate 7 train filter).
+The bot also handles operator commands: `/status` returns current system state, `/auto on|off` toggles execution mode at runtime.
 
 ---
 
-### 3.12 Detector Performance Tracker — `detector_performance_tracker.py` (Phase 41.1)
+### 3.13 Multi-Edge Detection System — `multi_edge_detector.py` (Phase 41.1)
 
-A CSV-based analytics module that tracks per-detector performance metrics for data-driven optimization. It maintains three lifecycle hooks:
+The Multi-Edge Detector runs BEFORE the analyzer and returns a structured edge payload. 5 active detectors with weighted confidence scoring.
 
-**Signal Generation:** When a multi-edge signal enters the validation gate, the tracker logs each contributing detector with a unique signal ID, symbol, and timestamp.
+**Architecture.** `MultiEdgeDetector.scan_all_edges(candidate)` iterates through 5 detectors. Each is wrapped in try-except — one crash doesn't block others.
 
-**Validation Outcome:** When a signal validates (price breaks trigger) or times out, the tracker updates the corresponding rows with the outcome.
+**Weighted Confidence Scoring.** Uses `config.EDGE_WEIGHTS`: Absorption (3.0), Bad High (2.0), Trapped Longs (2.0), Failed Auction (1.0), standard patterns (1.0). Score ≥ 5.0 = `EXTREME`, ≥ 3.0 = `HIGH`, ≥ 2.0 with 2+ edges = `HIGH` (confluence bonus), ≥ 1.5 with any HIGH/EXTREME edge = `HIGH`, otherwise rejected.
 
-**Trade Outcome:** When a trade closes (WIN/LOSS/STOPPED), the tracker records the R-multiple and hold time for each contributing detector.
+**Detectors:** Pattern Engine (6 patterns), Trapped Position (5-candle scan, Z > 1.5), Absorption (Z > 2.0, tiny body, near high), Bad High (L2 depth, sell/buy > 2.5×), Failed Auction (30-candle range breakout failure).
 
-The `get_detector_stats()` method computes per-detector analytics over a configurable time window: signals generated, validation rate, trades completed, win rate, average R-multiple, and false positive rate. This enables data-driven decisions — if a detector's win rate drops below 50% over 20+ trades, the operator has quantitative evidence to disable it.
+Three detectors commented out: OI Divergence Proxy, TPO Poor High, Momentum Exhaustion.
+
+---
+
+### 3.14 Detector Performance Tracker — `detector_performance_tracker.py` (Phase 41.1)
+
+CSV-based analytics tracking per-detector: signal generation, validation outcome, and trade outcome. `get_detector_stats()` computes win rate, average R-multiple, and false positive rate per detector over configurable time windows.
+
+---
+
+### 3.15 Configuration — `config.py`
+
+All tunable parameters centralized. Environment variables loaded via `python-dotenv`.
+
+**Core Settings:** Capital per trade: ₹1,800. Max risk: ₹200. Auto-trade: OFF. Log file: `logs/bot.log`. Square-off: 15:10 IST. Validation timeout: 15 minutes.
+
+**Phase 41.1 — Multi-Edge:** `MULTI_EDGE_ENABLED` (default `False`), `ENABLED_DETECTORS` (5 active), `EDGE_WEIGHTS` (Absorption: 3.0, Bad High: 2.0, etc.), confidence thresholds (EXTREME: 5.0, HIGH: 3.0, MEDIUM: 2.0), `ENABLE_DETECTOR_TRACKING` (default `True`), `SCANNER_PARALLEL_WORKERS` (10).
+
+**Phase 41.2 — Scalper Risk Management:** `USE_SCALPER_RISK_MANAGEMENT` (default `False`), `SCALPER_STOP_TICK_BUFFER` (12), `SCALPER_STOP_HUNT_BUFFER_PCT` (0.3%), `SCALPER_BREAKEVEN_TRIGGER_PCT` (0.3%), trailing distances (initial: 0.2%, after TP1: 0.15%, after TP2: 0.1%), TP targets (TP1: 1.5%, TP2: 2.5%, TP3: 3.5%), `ENABLE_EOD_SIMULATION` (True), `SIMULATION_LOG_PATH`.
+
+**Phase 42 — Position Safety (CRITICAL):**
+- `ENABLE_POSITION_VERIFICATION` — `True`. Controls whether `_verify_position_safe()` is active. **NEVER set to `False` in production.**
+- `ENABLE_BROKER_POSITION_POLLING` — `True`. Controls whether the focus loop checks broker position at the top of each iteration.
+- `POSITION_RECONCILIATION_INTERVAL` — `1800` (30 minutes). How often the reconciler runs during the trading session.
+- `EMERGENCY_ALERT_ENABLED` — `True`. Controls emergency Telegram alerts.
+- `EMERGENCY_LOG_PATH` — `logs/emergency_alerts.log`. File path for emergency alert logging.
+- `ORPHANED_POSITION_LOG_PATH` — `logs/orphaned_positions.log`. File path for orphaned position logging.
 
 ---
 
 ## 4. What Makes This System Different
 
-**Twelve Sequential Gates.** Most algorithmic trading systems have 2–3 filters. ShortCircuit has 12 independent rejection points spanning market regime, discipline controls, hard constraints, circuit proximity, momentum analysis, pattern recognition, breakdown confirmation, confluence validation, orderflow analysis, and multi-timeframe confirmation. The probability of a noise signal surviving all 12 gates is vanishingly small.
+**Twelve Sequential Gates.** Most algorithmic trading systems have 2–3 filters. ShortCircuit has 12 independent rejection points spanning market regime, discipline, constraints, circuits, momentum, pattern recognition, breakdown confirmation, confluence, orderflow, and multi-timeframe analysis.
 
-**Multi-Edge Detection (Phase 41.1).** Beyond pattern-based candlestick analysis, the system detects 5 institutional edges in parallel: candlestick patterns, trapped position liquidations, hidden absorption by limit sellers, bad highs with sell-wall confirmation, and failed auction breakouts. A weighted confidence scoring system assigns quality weights to each edge (Absorption: 3.0, Bad High: 2.0, standard patterns: 1.0) and requires either high weighted score or multi-edge confluence before a signal proceeds. Each detector is individually feature-flagged for instant rollback. Three additional detectors (OI Proxy, TPO, Momentum Exhaustion) are preserved as comments for potential re-enablement.
+**Multi-Edge Detection (Phase 41.1).** 5 institutional edge detectors with weighted confidence scoring. Each detector is individually feature-flagged.
 
-**Per-Detector Analytics (Phase 41.1).** A performance tracking system logs every signal generation, validation outcome, and trade outcome per detector to CSV. Weekly analysis reveals each detector's signal count, validation rate, win rate, and average R-multiple — enabling data-driven decisions to disable underperformers or tune weights.
+**Validation Gate.** Requires price to confirm the setup by breaking the signal candle's low, with a 15-minute timeout. Eliminates ~40% of false signals.
 
-**Validation Gate.** The system never enters a trade on pattern detection alone. It waits for price to confirm the setup by breaking the signal candle's low, with a configurable timeout (default 15 minutes in Phase 41.1). This single innovation eliminates a large fraction of false signals that form patterns but never follow through with actual selling pressure.
+**Position Safety Architecture (Phase 42).** Every order is guarded by `_verify_position_safe()`. The focus loop checks broker position every 2 seconds. Stop-loss exits use a 4-step double-verification protocol (check → wait 500ms → re-check → exit). Emergency exits have a circuit breaker pattern. Position reconciliation runs at startup and every 30 minutes.
 
-**Institutional Orderflow Analysis.** Round number analysis, trapped position detection, absorption analysis, DOM wall detection, OI divergence, and dPOC divergence are concepts extracted from institutional trading desk methodology. These checks are absent from virtually all retail trading systems.
+**Scalper Risk Management (Phase 41.2).** Feature-flagged multi-target exit system with structure-based stops, 3 TP levels with partial position closes, trailing stops with distance tiers, and a background monitor thread.
 
-**Self-Healing Architecture.** Auto-recovery on restart, emergency exit on SL failure, position synchronization on refresh, SFP watch after stop-outs, and broker-side SL orders as a safety net. The system is designed to survive any single point of failure — process crash, network outage, or API failure — without leaving the operator exposed to unmanaged risk.
+**Institutional Orderflow Analysis.** Round number analysis, trapped position detection, absorption analysis, DOM wall detection, OI divergence, dPOC divergence.
 
-**Psychological Discipline Engine.** The Signal Manager enforces rules that human traders consistently fail to follow: daily limits, cooldowns, and consecutive loss pauses. It removes the emotional component that is responsible for the majority of retail trading losses.
+**Self-Healing Architecture.** Auto-recovery on restart, emergency exit circuit breaker, position reconciliation, SFP watch after stop-outs, and broker-side SL orders as safety nets.
 
-**Machine Learning Data Pipeline.** Every signal generates a structured observation logged with 20+ features (candle metrics, VWAP statistics, volume statistics, pattern type, confluence count, market regime) in Parquet format. This creates a growing dataset for supervised learning to continuously refine signal quality over time.
+**Psychological Discipline Engine.** Daily limits, cooldowns, consecutive loss pauses.
 
-**Zero-Risk Rollback Architecture.** Phase 41.1 is designed as a purely additive system. The master switch `MULTI_EDGE_ENABLED` defaults to `False`, meaning the system runs identically to Phase 40 out of the box. When enabled, each individual detector can be toggled independently. The validation timeout, edge weights, and all confidence thresholds are configurable via `config.py` with instant rollback capability.
+**Machine Learning Data Pipeline.** Every signal generates 20+ features in Parquet format for supervised learning.
+
+**Zero-Risk Rollback Architecture.** Feature flags for Multi-Edge (`MULTI_EDGE_ENABLED`), Scalper RM (`USE_SCALPER_RISK_MANAGEMENT`), Position Safety (`ENABLE_POSITION_VERIFICATION`, `ENABLE_BROKER_POSITION_POLLING`). Each system can be toggled independently.
 
 ---
 
-*Document verified against ShortCircuit source code — Phase 41.1, February 2026*
+*Document verified against ShortCircuit source code — Phase 42, February 2026*
