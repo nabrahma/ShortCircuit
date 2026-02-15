@@ -17,6 +17,7 @@ from scanner import FyersScanner
 from analyzer import FyersAnalyzer
 from trade_manager import TradeManager
 from telegram_bot import ShortCircuitBot
+from position_reconciliation import PositionReconciliation
 
 # Logging Setup
 logging.basicConfig(
@@ -46,6 +47,14 @@ def scalper_position_monitor(scalper_manager, trade_manager, fyers, bot, stop_ev
             # Fetch LTP
             resp = fyers.quotes(data={"symbols": pos.symbol})
             if 'd' not in resp or not resp['d']:
+                time.sleep(2)
+                continue
+
+            # Phase 42: Broker position check before acting
+            broker_pos = trade_manager._get_broker_position(pos.symbol)
+            if broker_pos and broker_pos['net_qty'] >= 0:
+                logger.warning(f"[SCALPER] Position flat/long for {pos.symbol} — skip exit")
+                scalper_manager.close_position()
                 time.sleep(2)
                 continue
 
@@ -135,6 +144,12 @@ def main():
     else:
         logger.info("[INIT] Legacy Risk Management (Phase 41.1)")
 
+    # Phase 42: Position Reconciliation at startup
+    reconciler = PositionReconciliation(fyers, trade_manager, bot)
+    orphaned = reconciler.reconcile_positions()
+    if orphaned:
+        logger.critical(f"[INIT] ⚠️ Found {len(orphaned)} orphaned position(s) — check Telegram alerts")
+
     # 3. Start Telegram Thread
     t_bot = threading.Thread(target=bot.start_polling)
     t_bot.daemon = True
@@ -149,16 +164,22 @@ def main():
         pass
 
     # 4. Main Loop
-    SCAN_INTERVAL = 60 # seconds
-    
+    SCAN_INTERVAL = 60  # seconds
+    import datetime
+    last_reconciliation = datetime.datetime.now()
     while True:
         try:
             logger.info("[SCAN] Scanning Market...")
             start_time = time.time()
+
+            # Phase 42: Periodic position reconciliation (every 30 min)
+            recon_interval = getattr(config, 'POSITION_RECONCILIATION_INTERVAL', 1800)
+            if (datetime.datetime.now() - last_reconciliation).total_seconds() > recon_interval:
+                reconciler.reconcile_positions()
+                last_reconciliation = datetime.datetime.now()
             
             # CHECK TIME FOR AUTO-EXIT
             # config.SQUARE_OFF_TIME format "HH:MM" e.g. "15:10"
-            import datetime
             now = datetime.datetime.now()
             current_time = now.strftime("%H:%M")
             if current_time >= config.SQUARE_OFF_TIME:

@@ -341,6 +341,40 @@ class ShortCircuitBot:
             except Exception as e:
                 logger.error(f"Multi-Edge Alert Error: {e}")
 
+    def send_emergency_alert(self, message: str):
+        """
+        Phase 42: Send high-priority alert with forced notification.
+        Used for critical position errors (duplicate orders, orphaned positions).
+        """
+        import os
+        from datetime import datetime
+
+        emergency_log = getattr(config, 'EMERGENCY_LOG_PATH', 'logs/emergency_alerts.log')
+
+        alert_message = (
+            f"⚠️⚠️⚠️ EMERGENCY ALERT ⚠️⚠️⚠️\n\n"
+            f"{message}\n\n"
+            f"Time: {datetime.now().strftime('%H:%M:%S')}\n"
+            f"Action: Check bot immediately"
+        )
+
+        try:
+            self.bot.send_message(
+                chat_id=self.chat_id,
+                text=alert_message,
+                disable_notification=False  # Force notification
+            )
+        except Exception as e:
+            logger.critical(f"Could not send emergency alert via Telegram: {e}")
+
+        # Log to emergency log file
+        try:
+            os.makedirs(os.path.dirname(emergency_log), exist_ok=True)
+            with open(emergency_log, 'a') as f:
+                f.write(f"{datetime.now()} | {message}\n")
+        except Exception as e:
+            logger.error(f"Failed to write emergency log: {e}")
+
     def start_polling(self):
         logger.info("[BOT] Telegram Bot Listening...")
         self.bot.infinity_polling()

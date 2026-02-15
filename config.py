@@ -96,3 +96,22 @@ SCALPER_TP3_PCT = 0.035  # 3.5% — Close all remaining
 # Simulation & Analysis
 ENABLE_EOD_SIMULATION = True
 SIMULATION_LOG_PATH = "logs/eod_simulation.csv"
+
+# ============================================================================
+# POSITION SAFETY (Phase 42 — CRITICAL)
+# ============================================================================
+
+# Enable position verification before every order
+ENABLE_POSITION_VERIFICATION = True    # NEVER set to False in production
+
+# Enable broker position checks in focus loop
+ENABLE_BROKER_POSITION_POLLING = True
+
+# Position reconciliation frequency (seconds)
+POSITION_RECONCILIATION_INTERVAL = 1800  # 30 minutes
+
+# Emergency alerts
+EMERGENCY_ALERT_ENABLED = True
+EMERGENCY_LOG_PATH = 'logs/emergency_alerts.log'
+ORPHANED_POSITION_LOG_PATH = 'logs/orphaned_positions.log'
+

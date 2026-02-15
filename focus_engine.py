@@ -227,11 +227,38 @@ class FocusEngine:
         self.thread = threading.Thread(target=self.focus_loop, daemon=True)
         self.thread.start()
 
+    def _check_broker_position(self, symbol: str) -> dict:
+        """Phase 42: Query broker for current position."""
+        try:
+            positions = self.fyers.positions()
+            if positions.get('s') != 'ok' and 'netPositions' not in positions:
+                logger.error("[SAFETY] Could not fetch positions")
+                return None
+
+            for pos in positions.get('netPositions', []):
+                if pos['symbol'] == symbol:
+                    return pos
+
+            return None  # Position not found = closed
+
+        except Exception as e:
+            logger.error(f"[SAFETY] Broker position check failed: {e}")
+            return None
+
     def focus_loop(self):
         while self.is_running and self.active_trade:
             try:
                 symbol = self.active_trade['symbol']
-                
+
+                # ── PHASE 42: CHECK IF POSITION STILL EXISTS ───────────
+                if getattr(config, 'ENABLE_BROKER_POSITION_POLLING', True):
+                    broker_pos = self._check_broker_position(symbol)
+                    if broker_pos is None or broker_pos.get('netQty', 0) == 0:
+                        logger.info(f"[SAFETY] Position already closed by broker (SL hit?) for {symbol}")
+                        self.cleanup_orders(symbol)
+                        self.stop_focus(reason="BROKER_SL_HIT")
+                        return
+
                 # 1. Fetch Quote (Fast)
                 data = {"symbols": symbol}
                 response = self.fyers.quotes(data=data)
@@ -306,22 +333,40 @@ class FocusEngine:
             
             # EXECUTE EXIT
             try:
-                # CRITICAL FIX: Check if we are already flat (Hard SL filled?)
-                # If Net Qty is 0, DO NOT BUY AGAIN.
-                pos = self.fyers.positions()
-                if 'netPositions' in pos:
-                    for p in pos['netPositions']:
-                         if p['symbol'] == trade['symbol']:
-                             if p['netQty'] == 0:
-                                 logger.warning(f"[SKIP] Position already closed (Hard SL?). Skipping redundant exit.")
-                                 self.stop_focus(reason="SL_HIT")
-                                 return
-                             break
-                
+                # ── PHASE 42: DOUBLE-CHECK BROKER POSITION ────────────
+                # Step 1: Check if position still exists
+                broker_pos = self._check_broker_position(trade['symbol'])
+                if broker_pos is None or broker_pos.get('netQty', 0) == 0:
+                    logger.warning(f"[SAFETY] Position already closed by broker SL. Skipping manual exit.")
+                    self.cleanup_orders(trade['symbol'])
+                    self.stop_focus(reason="BROKER_SL_HIT")
+                    return
+
+                if broker_pos.get('netQty', 0) > 0:
+                    logger.critical(f"🚨 [SAFETY] Position is LONG — WRONG SIDE! Skipping buy exit.")
+                    self.cleanup_orders(trade['symbol'])
+                    self.stop_focus(reason="WRONG_SIDE_DETECTED")
+                    return
+
+                # Step 2: Wait 500ms for broker to process SL order
+                time.sleep(0.5)
+
+                # Step 3: Re-verify — broker SL may have filled during wait
+                broker_pos = self._check_broker_position(trade['symbol'])
+                if broker_pos is None or broker_pos.get('netQty', 0) == 0:
+                    logger.info("[SAFETY] Position closed by broker between checks. Skip manual exit.")
+                    self.cleanup_orders(trade['symbol'])
+                    self.stop_focus(reason="BROKER_SL_HIT")
+                    return
+
+                # Step 4: Confirmed still short — safe to exit manually
+                actual_qty = abs(broker_pos['netQty'])
+                logger.info(f"[SAFETY] Broker SL did NOT trigger. Exiting manually (qty: {actual_qty}).")
+
                 # Close Position (Buy Market)
                 data = {
                     "symbol": trade['symbol'],
-                    "qty": trade.get('qty', 1),
+                    "qty": actual_qty,
                     "type": 2, # Market
                     "side": 1, # Buy
                     "productType": "INTRADAY",
@@ -333,7 +378,7 @@ class FocusEngine:
                 }
                 self.fyers.place_order(data=data)
                 
-                # 2. CANCEL PENDING STOP ORDERS
+                # CANCEL PENDING STOP ORDERS
                 self.cleanup_orders(trade['symbol'])
                 
                 # Notify User
@@ -345,25 +390,6 @@ class FocusEngine:
 
             self.stop_focus(reason="SL_HIT")
             return
-
-    def cleanup_orders(self, symbol):
-        """
-        Cancels all pending orders for the symbol.
-        Used to remove Stop Loss orders after exit.
-        """
-        try:
-            orderbook = self.fyers.orderbook()
-            if 'orderBook' in orderbook:
-                count = 0
-                for order in orderbook['orderBook']:
-                    if order['symbol'] == symbol and order['status'] in [6]: # 6 = Pending
-                        logger.info(f"Cancelling pending Order {order['id']}")
-                        self.fyers.cancel_order(data={"id": order['id']})
-                        count += 1
-                if count > 0:
-                    logger.info(f"Cleaned up {count} pending orders for {symbol}")
-        except Exception as e:
-            logger.error(f"Cleanup Orders Error: {e}")
 
         # 2. TP1 (BreakEven) Logic
         risk = abs(entry - trade['initial_sl'])
@@ -383,6 +409,25 @@ class FocusEngine:
             if potential_sl < current_sl:
                 trade['sl'] = potential_sl
                 logger.info(f"[TRAIL] Trail Tightened to {potential_sl}")
+
+    def cleanup_orders(self, symbol):
+        """
+        Cancels all pending orders for the symbol.
+        Used to remove Stop Loss orders after exit.
+        """
+        try:
+            orderbook = self.fyers.orderbook()
+            if 'orderBook' in orderbook:
+                count = 0
+                for order in orderbook['orderBook']:
+                    if order['symbol'] == symbol and order['status'] in [6]: # 6 = Pending
+                        logger.info(f"Cancelling pending Order {order['id']}")
+                        self.fyers.cancel_order(data={"id": order['id']})
+                        count += 1
+                if count > 0:
+                    logger.info(f"Cleaned up {count} pending orders for {symbol}")
+        except Exception as e:
+            logger.error(f"Cleanup Orders Error: {e}")
 
 
     def update_dynamic_constraints(self, ltp, day_high, vwap):
