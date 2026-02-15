@@ -121,6 +121,75 @@ class ShortCircuitBot:
             else:
                 self.bot.reply_to(message, "Usage: /auto on OR /auto off")
 
+        # ── PHASE 42.2: /WHY COMMAND ──────────────────────────────────
+        @self.bot.message_handler(commands=['why'])
+        def handle_why(message):
+            """Analyze why the bot missed a signal: /why RELIANCE 14:25"""
+            args = message.text.split()
+            if len(args) < 3:
+                self.bot.reply_to(message, "Usage: /why SYMBOL TIME\nExample: /why RELIANCE 14:25")
+                return
+
+            symbol = args[1]
+            time_str = args[2]
+
+            self.bot.reply_to(message, f"🔍 Running diagnostic for {symbol} @ {time_str}...")
+
+            try:
+                from diagnostic_analyzer import DiagnosticAnalyzer
+                diag = DiagnosticAnalyzer(self.fyers)
+                result = diag.analyze_missed_opportunity(symbol, time_str)
+
+                if 'error' in result:
+                    self.bot.send_message(self.chat_id, f"❌ {result['error']}")
+                    return
+
+                # Format compact report
+                lines = [
+                    f"🔍 *Diagnostic: {symbol}*",
+                    f"Time: {time_str} | LTP: ₹{result['ltp_at_analysis']:.2f}",
+                    f"Day gain: +{result['day_gain']:.1f}% | High: ₹{result['day_high']:.2f}",
+                    ""
+                ]
+
+                for gate in result['gates']:
+                    s = gate['status']
+                    icon = '✅' if s == 'PASSED' else ('❌' if s == 'FAILED' else '⚠️')
+                    line = f"{icon} G{gate['gate_num']}: {gate['name']}"
+                    if s == 'FAILED':
+                        line += f"\n    ↳ {gate.get('reason', '')}"
+                        if gate.get('suggestion'):
+                            line += f"\n    💡 {gate['suggestion'][:100]}"
+                    lines.append(line)
+
+                # Verdict
+                lines.append("")
+                if result['passed_all_gates']:
+                    lines.append("✅ PASSED ALL GATES — Signal should have fired!")
+                else:
+                    fg = result['gates'][result['first_failure_gate'] - 1]
+                    lines.append(f"❌ Blocked at Gate {result['first_failure_gate']}: {fg['name']}")
+
+                # Profitability
+                prof = result.get('profitability', {})
+                if prof.get('available'):
+                    lines.append("")
+                    if prof['would_be_profitable']:
+                        lines.append(f"🎯 Would have profited: +{prof['exit_profit_pct']:.2f}%")
+                    else:
+                        lines.append(f"💀 Would have lost: {prof['exit_profit_pct']:+.2f}%")
+
+                msg_text = "\n".join(lines)
+                # Telegram has 4096 char limit
+                if len(msg_text) > 4000:
+                    msg_text = msg_text[:4000] + "\n..."
+
+                self.bot.send_message(self.chat_id, msg_text)
+
+            except Exception as e:
+                logger.error(f"/why error: {e}")
+                self.bot.send_message(self.chat_id, f"❌ Diagnostic error: {str(e)[:200]}")
+
         # Callback for Inline Buttons
         @self.bot.callback_query_handler(func=lambda call: True)
         def callback_handler(call):

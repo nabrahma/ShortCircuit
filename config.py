@@ -129,4 +129,12 @@ INTRADAY_LEVERAGE = 5.0
 SIGNAL_LOG_PATH = 'logs/signals.csv'
 LOG_ALL_SIGNALS = True  # Log executed AND skipped signals
 
+# ============================================================================
+# DIAGNOSTIC ANALYZER (Phase 42.2)
+# ============================================================================
 
+# Enable/disable the /why command and diagnostic analysis
+ENABLE_DIAGNOSTIC_ANALYZER = True
+
+# CSV log of all diagnostic runs (tracks which gates fail most often)
+DIAGNOSTIC_LOG_PATH = 'logs/diagnostic_analysis.csv'
