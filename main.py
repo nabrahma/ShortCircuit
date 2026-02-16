@@ -106,10 +106,45 @@ def main():
         return
 
     # 2. Module Initialization
-    scanner = FyersScanner(fyers)
-    analyzer = FyersAnalyzer(fyers)
+    # Reordered for Phase 41.3.1 Dependency Injection
     trade_manager = TradeManager(fyers)
     bot = ShortCircuitBot(trade_manager)
+    
+    # ── PHASE 41.3.1: MARKET SESSION AWARENESS ──
+    from market_session import MarketSession
+    market_session = MarketSession(fyers, bot)
+    
+    logger.info("🕐 Analyzing market session state...")
+    # This may sleep if Pre-Market or Early Market
+    morning_context = market_session.initialize_session()
+    
+    mh = morning_context['high'] if morning_context else None
+    ml = morning_context['low'] if morning_context else None
+    
+    # Init components that depend on context
+    scanner = FyersScanner(fyers)
+    analyzer = FyersAnalyzer(fyers, morning_high=mh, morning_low=ml)
+
+    # ── PHASE 41.3: INTELLIGENT EXITS (OrderManager & DiscretionaryEngine) ──
+    if getattr(config, 'ENABLE_DISCRETIONARY_EXITS', True):
+        from order_manager import OrderManager
+        from discretionary_engine import DiscretionaryEngine
+        
+        # 1. Init OrderManager (needs fyers and bot wrapper)
+        order_manager = OrderManager(fyers, bot)
+        
+        # 2. CRITICAL: Run Startup Reconciliation (Safety Check)
+        order_manager.startup_reconciliation()
+        
+        # 3. Init DiscretionaryEngine
+        discretionary_engine = DiscretionaryEngine(fyers, order_manager)
+        
+        # 4. Inject into FocusEngine
+        # (FocusEngine was created inside bot.__init__)
+        bot.focus_engine.order_manager = order_manager
+        bot.focus_engine.discretionary_engine = discretionary_engine
+        
+        logger.info("[INIT] ✓ OrderManager & DiscretionaryEngine ENABLED (Phase 41.3)")
 
     # Phase 41.1: Multi-Edge Detector + Performance Tracker (lazy init)
     multi_edge = None
@@ -167,7 +202,8 @@ def main():
     
     # 3.1 Send Motivation
     try:
-        bot.send_startup_message()
+        if market_session.get_current_state() in ['EARLY_MARKET', 'MID_MARKET']:
+            bot.send_startup_message()
     except:
         pass
 
@@ -177,6 +213,21 @@ def main():
     last_reconciliation = datetime.datetime.now()
     while True:
         try:
+            # ── PHASE 41.3.1: LOOP GATEKEEPER ──
+            if not market_session.should_trade_now():
+                # Loop until session opens or exits
+                if market_session.get_current_state() == 'POST_MARKET':
+                    logger.info("🌙 Market Closed (Post-Market). Stopping Loop.")
+                    break
+                time.sleep(60)
+                continue
+
+            if not config.TRADING_ENABLED:
+                logger.info("⏸️ Trading Temporarily Disabled (Warmup/EOD). Monitoring...")
+                time.sleep(30)
+                continue
+            # ───────────────────────────────────
+
             logger.info("[SCAN] Scanning Market...")
             start_time = time.time()
 
@@ -282,6 +333,23 @@ def main():
         except Exception as e:
             logger.error(f"Loop Error: {e}")
             time.sleep(10)
+
+    # ── PHASE 41.3.2: EOD ANALYSIS ──────────────────────────────
+    logger.info("🏁 Session Ended. Initiating EOD Analysis...")
+    try:
+        from eod_analyzer import EODAnalyzer
+        # Ensure 'bot' exists and has 'journal'
+        if 'bot' in locals() and hasattr(bot, 'journal') and hasattr(bot.journal, 'db'):
+             analyzer = EODAnalyzer(fyers, bot.journal.db)
+             report = analyzer.run_daily_analysis()
+             if report and getattr(config, 'EOD_CONFIG', {}).get('auto_send_telegram', True):
+                 # Use bot.bot directly as ShortCircuitBot wraps it
+                 bot.bot.send_message(bot.chat_id, report, parse_mode="Markdown")
+        else:
+             logger.warning("⚠️ Skipping EOD Analysis: DB/Bot not initialized.")
+    except Exception as e:
+        logger.error(f"❌ EOD Analysis Failed: {e}")
+    # ────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     main()

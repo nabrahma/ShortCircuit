@@ -13,16 +13,24 @@ class MarketContext:
     Analyzes broader market to determine if it's safe to take reversal trades.
     """
     
-    def __init__(self, fyers):
+    def __init__(self, fyers, morning_high=None, morning_low=None):
         self.fyers = fyers
-        self.nifty_symbol = "NSE:NIFTY50-INDEX"
-        self.banknifty_symbol = "NSE:NIFTYBANK-INDEX"
+        self.regime = "UNKNOWN"
+        self.msg = "Initializing..."
         
         # Cache for today's morning range
-        self._morning_high = None
-        self._morning_low = None
-        self._morning_range = None
+        self._morning_high = morning_high
+        self._morning_low = morning_low
+        self._morning_range = (morning_high - morning_low) if (morning_high and morning_low) else None
         self._cache_date = None
+        
+        # Phase 41.3: Dynamic Regime State
+        self.last_regime = 'UNKNOWN'
+        self.regime_change_time = None
+        self.trend_duration_minutes = 0
+        
+        if self._morning_high:
+            logger.info(f"✅ Market Context Initialized with Morning Range: {self._morning_low} - {self._morning_high}")
     
     def _get_index_data(self, symbol="NSE:NIFTY50-INDEX"):
         """Fetch intraday data for the index."""
@@ -98,34 +106,73 @@ class MarketContext:
         # Get current price
         current_close = candles[-1][4]  # c[4] = close
         
-        # Trend detection thresholds
-        # If price is 0.5x range ABOVE morning high -> Trend Up
-        # If price is 0.5x range BELOW morning low -> Trend Down
-        extension_threshold = 0.5 * self._morning_range
+        # ── PHASE 41.3: DYNAMIC THRESHOLDS ────────────────────
+        conf = config.MARKET_REGIME_CONFIG
         
-        if current_close > self._morning_high + extension_threshold:
-            regime = "TREND_UP"
-            msg = f"NIFTY trending UP (Current: {current_close:.0f}, Morning High: {self._morning_high:.0f})"
-        elif current_close < self._morning_low - extension_threshold:
-            regime = "TREND_DOWN"
-            msg = f"NIFTY trending DOWN (Current: {current_close:.0f}, Morning Low: {self._morning_low:.0f})"
-        else:
-            regime = "RANGE"
-            msg = f"NIFTY in RANGE ({self._morning_low:.0f} - {self._morning_high:.0f})"
+        # Calculate deviation from morning range
+        # Only focusing on TREND UP for blocking shorts
+        move_pct = (current_close - self._morning_high) / self._morning_high
         
-        logger.info(f"Market Regime: {regime} | {msg}")
-        return regime, msg
+        new_regime = "RANGE"
+        msg = f"NIFTY in RANGE ({self._morning_low:.0f} - {self._morning_high:.0f})"
+        
+        # 1. STRONG TREND (>1.0%) -> Immediate Block
+        if move_pct > conf['strong_trend_threshold']:
+            new_regime = "TREND_UP"
+            msg = f"STRONG TREND UP (+{move_pct:.2%}) > 1.0%"
+            
+        # 2. MODERATE TREND (>0.5%) -> Check Duration
+        elif move_pct > conf['moderate_trend_threshold']:
+            if self.last_regime == "TREND_UP":
+                # Check momentum decay
+                duration = (datetime.now() - self.regime_change_time).seconds / 60 if self.regime_change_time else 0
+                if duration > conf['momentum_decay_minutes'] and move_pct < 0.008:
+                     new_regime = "RANGE"
+                     msg = "TREND UP -> RANGE (Decaying Momentum)"
+                else:
+                    new_regime = "TREND_UP"
+                    msg = f"SUSTAINED TREND UP (+{move_pct:.2%}) > 0.5%"
+            else:
+                # Waiting for confirmation
+                new_regime = "RANGE"
+                msg = f"POTENTIAL TREND (+{move_pct:.2%}) - Waiting confirmation"
+        
+        # 3. DOWN TREND
+        elif current_close < self._morning_low * 0.995: # Simple 0.5% below low
+            new_regime = "TREND_DOWN"
+            msg = "TREND DOWN"
+
+        # Update State
+        if new_regime != self.last_regime:
+            self.last_regime = new_regime
+            self.regime_change_time = datetime.now()
+            logger.info(f"📊 REGIME CHANGE: {new_regime} | {msg}")
+            
+        return new_regime, msg
     
-    def should_allow_short(self):
+    def should_allow_short(self, symbol=None, pattern=None, stock_ltp=None):
         """
-        Simple check: Should we allow SHORT signals right now?
-        
-        Returns:
-            tuple: (allowed, reason)
+        Phase 41.3: Intelligent Regime Filter with Overrides.
         """
         regime, msg = self.get_market_regime()
         
         if regime == "TREND_UP":
+            # CHECK OVERRIDES
+            if symbol and pattern and stock_ltp:
+                conf = config.MARKET_REGIME_CONFIG
+                if pattern in conf['override_patterns']:
+                    # Check Divergence: Stock is weak while Market is strong
+                    # Mocking open price since we assume stock_ltp is current
+                    # Ideally we need stock's open/close for % change. 
+                    # Assuming caller might verify divergence?
+                    # For now, just logging the attempt.
+                    return False, f"BLOCKED: {msg} (Override logic requires stock % change data)"
+                    
+                    # NOTE: To implement divergence check properly, we need stock's change %.
+                    # But `should_allow_short` signature in analyzer limits us. 
+                    # Analyzer should handle the divergence check if pattern matches.
+                    # For now, we STRICTLY follow the regime unless caller handles it.
+            
             return False, f"BLOCKED: {msg} - No shorts on trend-up days"
         
         return True, f"OK: {msg}"

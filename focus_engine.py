@@ -5,16 +5,23 @@ from fyers_connect import FyersConnect
 import config
 import telebot
 import datetime
+from order_manager import OrderManager
+from discretionary_engine import DiscretionaryEngine
 
 # Setup Logger
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("FocusEngine")
 
 class FocusEngine:
-    def __init__(self, trade_manager=None):
+    def __init__(self, trade_manager=None, order_manager=None, discretionary_engine=None):
         self.fyers = FyersConnect().authenticate()
-        self.trade_manager = trade_manager # For executing validated trades
-        self.active_trade = None # {symbol, entry, sl, tp1, tp2, quantity, start_time, message_id}
+        self.trade_manager = trade_manager 
+        
+        # Phase 41.3: New Core Engines
+        self.order_manager = order_manager
+        self.discretionary_engine = discretionary_engine
+        
+        self.active_trade = None # Reference to OrderManager position
         self.is_running = False
         self.bot = telebot.TeleBot(config.TELEGRAM_BOT_TOKEN) if config.TELEGRAM_BOT_TOKEN else None
         
@@ -109,27 +116,18 @@ class FocusEngine:
                 if ltp < trigger_price:
                     logger.info(f"✅ [VALIDATED] {symbol} broke {trigger_price} @ {ltp}. EXECUTING!")
                     
-                    # 1. Execute Logic
-                    res = trade_manager.execute_logic(pending['data'])
-                    
-                    # Phase 41.2: Start scalper position management if enabled
-                    signal_data = pending['data']
-                    scalper_mgr = signal_data.get('_scalper_manager')
-                    if scalper_mgr and res and res.get('status') == 'EXECUTED':
-                        try:
-                            scalper_mgr.start_position(
-                                symbol=symbol,
-                                entry_price=res.get('ltp', ltp),
-                                quantity=res.get('qty', int(config.CAPITAL / ltp)),
-                                setup_high=signal_data.get('setup_high', ltp * 1.005),
-                                tick_size=signal_data.get('tick_size', 0.05),
-                            )
-                            logger.info(f"[SCALPER] Position manager activated for {symbol}")
-                        except Exception as e:
-                            logger.error(f"[SCALPER] Failed to start position manager: {e}")
+                    # 1. Execute via OrderManager (Phase 41.3)
+                    if self.order_manager:
+                        pos = self.order_manager.enter_position(pending['data'])
+                        if pos:
+                            self.start_focus(symbol, pos)
+                    else:
+                        # Fallback (Legacy)
+                        logger.warning("Using Legacy TradeManager (OrderManager not initialized)")
+                        self.trade_manager.execute_logic(pending['data'])
                     
                     del self.pending_signals[symbol]
-                    return res # Return result to Main for alerting
+                    return {'status': 'EXECUTED'} # Return result to Main
                     
                 # B. CHECK INVALIDATION (STOP HIT BEFORE ENTRY)
                 elif ltp > inval_price:
@@ -192,33 +190,33 @@ class FocusEngine:
         except Exception as e:
             logger.error(f"[RECOVERY] Failed: {e}")
 
-    def start_focus(self, symbol, entry_price, sl_price, message_id=None, trade_id=None, qty=1):
+    def start_focus(self, symbol, position_data, message_id=None, trade_id=None, qty=1):
         """
         Latch onto a trade.
         """
-        risk = abs(entry_price - sl_price)
-        tp1 = entry_price - risk if entry_price < sl_price else entry_price + risk # 1:1
-        tp2 = entry_price - (2 * risk) if entry_price < sl_price else entry_price + (2 * risk) # 1:2
-        
+        # Adapt to OrderManager state or Legacy
+        entry_price = position_data.get('entry_price', position_data.get('entry', 0))
+        sl_price = position_data.get('hard_stop_price', position_data.get('sl', 0))
+        soft_sl = entry_price * (1 + config.DISCRETIONARY_CONFIG['soft_stop_pct']) if 'entry_price' in position_data else sl_price
+
         self.active_trade = {
             'symbol': symbol,
             'entry': entry_price,
-            'sl': sl_price,
-            'initial_sl': sl_price,
-            'tp1': tp1,
-            'tp2': tp2,
-            'qty': qty, # Store corrected Qty
+            'sl': sl_price,       # Hard Stop
+            'soft_sl': soft_sl,   # Soft Stop
+            'qty': position_data.get('qty', qty),
             'status': 'OPEN',
-            'sl_at_be': False,
-            'trailing_active': False,
             'highest_profit': -999,
             'message_id': message_id,
-            'trade_id': trade_id,
-            'last_price': entry_price
+            'trade_id': position_data.get('trade_id_str') if isinstance(position_data, dict) and position_data.get('trade_id_str') else (trade_id or f"Trd_{int(time.time())}"),
+            'last_price': entry_price,
+            # Phase 41.3 State
+            'target_extended': False,
+            'current_target': entry_price * (1 - config.DISCRETIONARY_CONFIG['initial_target_pct'])
         }
         
         self.is_running = True
-        logger.info(f"[FOCUS] FOCUS MODE ACTIVATED: {symbol} | Entry: {entry_price} | ID: {trade_id}")
+        logger.info(f"[FOCUS] FOCUS MODE ACTIVATED: {symbol} | Entry: {entry_price}")
         
         # Send Initial Dashboard
         self.update_dashboard(initial=True)
@@ -250,181 +248,83 @@ class FocusEngine:
             try:
                 symbol = self.active_trade['symbol']
 
-                # ── PHASE 42: CHECK IF POSITION STILL EXISTS ───────────
-                if getattr(config, 'ENABLE_BROKER_POSITION_POLLING', True):
-                    broker_pos = self._check_broker_position(symbol)
-                    if broker_pos is None or broker_pos.get('netQty', 0) == 0:
-                        logger.info(f"[SAFETY] Position already closed by broker (SL hit?) for {symbol}")
-                        self.cleanup_orders(symbol)
-                        # Phase 42.1: Release capital
-                        if self.trade_manager and hasattr(self.trade_manager, 'capital_manager'):
-                            self.trade_manager.capital_manager.release(symbol)
-                        self.stop_focus(reason="BROKER_SL_HIT")
-                        return
+                # ── SAFETY: CHECK IF POSITION CLOSED EXTERNALLY ──────
+                if self.order_manager:
+                    # Sync with OrderManager state
+                    om_pos = self.order_manager.active_positions.get(symbol)
+                    if not om_pos or om_pos['status'] != 'OPEN':
+                         logger.info(f"[FOCUS] Position closed in OrderManager. Stopping Focus.")
+                         self.stop_focus("CLOSED_EXTERNALLY")
+                         return
+                    
+                    # Check Broker Hard Stop Status
+                    self.order_manager.monitor_hard_stop_status(symbol)
 
-                # 1. Fetch Quote (Fast)
+                # ── CRITICAL: EOD SQUARE-OFF (15:10) ────────────────
+                now = datetime.datetime.now()
+                if now.hour == 15 and now.minute >= 10:
+                    logger.warning(f"⏰ [EOD] Force Closing {symbol} at 15:10")
+                    if self.order_manager:
+                        self.order_manager.safe_exit(symbol, "EOD_SQUARE_OFF")
+                    self.stop_focus("EOD")
+                    return
+
+                # 1. Fetch Quote & Process
                 data = {"symbols": symbol}
                 response = self.fyers.quotes(data=data)
                 
                 if 'd' in response and len(response['d']) > 0:
                     quote = response['d'][0]
-                    # V3 Structure
-                    qt = quote.get('v', quote) # Handle nested or flat structure
+                    qt = quote.get('v', quote)
                     ltp = qt.get('lp')
                     volume = qt.get('volume')
-                    avg_price = qt.get('avg_price', ltp) # VWAP
-                    total_buy = qt.get('total_buy_qty', 0)
-                    total_sell = qt.get('total_sell_qty', 0)
-                    day_high = qt.get('high_price', ltp)
+                    avg_price = qt.get('avg_price', ltp)
                     
                     self.active_trade['last_price'] = ltp
-                    self.active_trade['vwap'] = avg_price
                     self.active_trade['volume'] = volume
                     
-                    # Orderflow Stats
-                    self.active_trade['bid_ask_ratio'] = round(total_buy / total_sell, 2) if total_sell > 0 else 1.0
-                    self.active_trade['vwap_dist'] = round(((ltp - avg_price) / avg_price) * 100, 2)
+                    # Update PnL logic
+                    entry = self.active_trade['entry']
+                    pnl_points = entry - ltp # Short PnL
                     
-                    # Dynamic Logic
-                    self.update_dynamic_constraints(ltp, day_high, avg_price)
+                    # ── INTELLIGENT EXIT LOGIC (Phase 41.3) ──────────
+                    if self.discretionary_engine and self.order_manager:
+                        
+                        # A. Soft Stop Check
+                        soft_sl = self.active_trade['soft_sl']
+                        # Short Logic: Price > Soft SL
+                        if ltp >= soft_sl: 
+                            decision = self.discretionary_engine.evaluate_soft_stop(symbol, self.active_trade)
+                            if decision == 'EXIT':
+                                self.order_manager.safe_exit(symbol, "SOFT_STOP")
+                                return
+
+                        # B. Target Extension Logic
+                        target = self.active_trade['current_target']
+                        # Short: Price <= Target
+                        if ltp <= target:
+                            decision = self.discretionary_engine.evaluate_profit_extension(symbol, self.active_trade)
+                            if decision == 'TAKE_PROFIT':
+                                self.order_manager.safe_exit(symbol, "TARGET_HIT")
+                                return
+                            elif decision == 'EXTEND':
+                                new_target = entry * (1 - config.DISCRETIONARY_CONFIG['extended_target_pct'])
+                                self.active_trade['current_target'] = new_target
+                                self.active_trade['target_extended'] = True
+                                logger.info(f"🚀 [FOCUS] Target Extended to {new_target}")
+
+                    # ── FALLBACK / LEGACY LOGIC ──────────────────────
+                    # Keep simplistic trailing if Discretionary Engine not active?
+                    # Or just rely on Hard SL (monitored by order_manager)
                     
-                    self.process_tick(ltp, volume, total_buy, total_sell)
+                    # Hard Stop is handled by `monitor_hard_stop_status` above.
                     
-                time.sleep(2) # 2s Interval for 'pulsing' feel
+                time.sleep(2)
                 self.update_dashboard()
                 
             except Exception as e:
                 logger.error(f"Focus Loop Error: {e}")
                 time.sleep(5)
-
-    def analyze_tape(self, tick_data):
-        """
-        Quant Tape Reading placeholder.
-        Disabled for now as orderflow_engine is not yet implemented.
-        """
-        # if not hasattr(self, 'footprint_calc'):
-        #     from orderflow_engine import FootprintCalculator
-        #     self.footprint_calc = FootprintCalculator()
-            
-        # Placeholder Logic
-        tape_msg = "Neutral (No Engine)"
-        t = self.active_trade
-        t['tape_alert'] = tape_msg
-        return tape_msg
-
-    def process_tick(self, ltp, volume, total_buy, total_sell):
-        trade = self.active_trade
-        
-        # Prepare Data for Tape
-        tick_data = {'ltp': ltp, 'volume': volume}
-        self.analyze_tape(tick_data)
-        
-        entry = trade['entry']
-        current_sl = trade['sl']
-        
-        # Calculate PnL (Short)
-        pnl_points = entry - ltp
-        
-        # Track Highest Profit
-        if pnl_points > trade['highest_profit']:
-            trade['highest_profit'] = pnl_points
-            
-        # 1. Check SL HIT (Hard or Trailing)
-        if ltp >= current_sl:
-            logger.warning(f"[STOP] SL HIT: {ltp} (Stop: {current_sl})")
-            trade['status'] = 'SL HIT'
-            
-            # EXECUTE EXIT
-            try:
-                # ── PHASE 42: DOUBLE-CHECK BROKER POSITION ────────────
-                # Step 1: Check if position still exists
-                broker_pos = self._check_broker_position(trade['symbol'])
-                if broker_pos is None or broker_pos.get('netQty', 0) == 0:
-                    logger.warning(f"[SAFETY] Position already closed by broker SL. Skipping manual exit.")
-                    self.cleanup_orders(trade['symbol'])
-                    # Phase 42.1: Release capital
-                    if self.trade_manager and hasattr(self.trade_manager, 'capital_manager'):
-                        self.trade_manager.capital_manager.release(trade['symbol'])
-                    self.stop_focus(reason="BROKER_SL_HIT")
-                    return
-
-                if broker_pos.get('netQty', 0) > 0:
-                    logger.critical(f"🚨 [SAFETY] Position is LONG — WRONG SIDE! Skipping buy exit.")
-                    self.cleanup_orders(trade['symbol'])
-                    # Phase 42.1: Release capital
-                    if self.trade_manager and hasattr(self.trade_manager, 'capital_manager'):
-                        self.trade_manager.capital_manager.release(trade['symbol'])
-                    self.stop_focus(reason="WRONG_SIDE_DETECTED")
-                    return
-
-                # Step 2: Wait 500ms for broker to process SL order
-                time.sleep(0.5)
-
-                # Step 3: Re-verify — broker SL may have filled during wait
-                broker_pos = self._check_broker_position(trade['symbol'])
-                if broker_pos is None or broker_pos.get('netQty', 0) == 0:
-                    logger.info("[SAFETY] Position closed by broker between checks. Skip manual exit.")
-                    self.cleanup_orders(trade['symbol'])
-                    # Phase 42.1: Release capital
-                    if self.trade_manager and hasattr(self.trade_manager, 'capital_manager'):
-                        self.trade_manager.capital_manager.release(trade['symbol'])
-                    self.stop_focus(reason="BROKER_SL_HIT")
-                    return
-
-                # Step 4: Confirmed still short — safe to exit manually
-                actual_qty = abs(broker_pos['netQty'])
-                logger.info(f"[SAFETY] Broker SL did NOT trigger. Exiting manually (qty: {actual_qty}).")
-
-                # Close Position (Buy Market)
-                data = {
-                    "symbol": trade['symbol'],
-                    "qty": actual_qty,
-                    "type": 2, # Market
-                    "side": 1, # Buy
-                    "productType": "INTRADAY",
-                    "limitPrice": 0,
-                    "stopPrice": 0,
-                    "validity": "DAY",
-                    "disclosedQty": 0,
-                    "offlineOrder": False
-                }
-                self.fyers.place_order(data=data)
-                
-                # CANCEL PENDING STOP ORDERS
-                self.cleanup_orders(trade['symbol'])
-
-                # Phase 42.1: Release capital after manual SL exit
-                if self.trade_manager and hasattr(self.trade_manager, 'capital_manager'):
-                    self.trade_manager.capital_manager.release(trade['symbol'])
-                
-                # Notify User
-                if self.bot and config.TELEGRAM_CHAT_ID:
-                    self.bot.send_message(config.TELEGRAM_CHAT_ID, f"[STOP] **STOP LOSS TRIGGERED**\n\n{trade['symbol']} hit stop at {ltp}.\nPosition Closed.")
-                    
-            except Exception as e:
-                logger.error(f"Failed to Auto-Exit on SL: {e}")
-
-            self.stop_focus(reason="SL_HIT")
-            return
-
-        # 2. TP1 (BreakEven) Logic
-        risk = abs(entry - trade['initial_sl'])
-        if not trade['sl_at_be'] and pnl_points >= risk:
-            trade['sl'] = entry
-            trade['sl_at_be'] = True
-            logger.info("[OK] Moves to BreakEven")
-
-        # 3. TP2 (Trailing) Logic
-        if not trade['trailing_active'] and pnl_points >= (2 * risk):
-            trade['trailing_active'] = True
-            logger.info("[EXEC] Trailing Activated")
-            
-        # 4. Dynamic Trailing
-        if trade['trailing_active']:
-            potential_sl = ltp + (risk * 0.5) 
-            if potential_sl < current_sl:
-                trade['sl'] = potential_sl
-                logger.info(f"[TRAIL] Trail Tightened to {potential_sl}")
 
     def cleanup_orders(self, symbol):
         """

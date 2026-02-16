@@ -138,3 +138,68 @@ ENABLE_DIAGNOSTIC_ANALYZER = True
 
 # CSV log of all diagnostic runs (tracks which gates fail most often)
 DIAGNOSTIC_LOG_PATH = 'logs/diagnostic_analysis.csv'
+
+# ── PHASE 41.3: INTELLIGENT EXITS ──────────────────────────
+ENABLE_DISCRETIONARY_EXITS = True
+ENABLE_HARD_STOPS = True
+ENABLE_MARKET_REGIME_OPTIMIZATION = True
+
+# Market Regime Configuration
+MARKET_REGIME_CONFIG = {
+    'strong_trend_threshold': 0.01,  # 1.0%
+    'moderate_trend_threshold': 0.005,  # 0.5%
+    'momentum_decay_minutes': 10,
+    'override_patterns': ['EVENING_STAR', 'BEARISH_ENGULFING', 'SHOOTING_STAR'],
+    'divergence_threshold': -2.0,  # Stock down 2%
+}
+
+# Discretionary Exit Configuration
+DISCRETIONARY_CONFIG = {
+    'soft_stop_pct': 0.005,  # 0.5%
+    'hard_stop_pct': 0.02,  # 2.0%
+    'initial_target_pct': 0.025,  # 2.5%
+    'extended_target_pct': 0.04,  # 4.0%
+    'bearish_exit_threshold': 2,    # >= 2 more Bearish signals -> Force Exit
+    'momentum_extend_threshold': 2  # Score >= 2 -> Extend Target
+}
+
+# ── PHASE 41.3.1: MARKET SESSION CONFIG ──────────────────────
+MARKET_SESSION_CONFIG = {
+    # Time thresholds (IST)
+    'market_open': '09:15',
+    'safe_trade_start': '09:45',
+    'eod_cutoff': '15:10',
+    'market_close': '15:30',
+    
+    # Startup behavior
+    'allow_postmarket_sleep': True,   # Sleep overnight vs exit
+    'enable_warmup_scanning': True,   # Scan during 9:15-9:45
+    'require_morning_data': True,     # Fetch historical data
+    
+    # Fallback
+    'morning_range_fallback_pct': 0.5,# ±0.5% if API fails
+    
+    # Notifications
+    'telegram_startup_alert': True,
+    'telegram_state_transitions': True,
+}
+
+# Trading enable/disable flag (dynamically updated by MarketSession)
+TRADING_ENABLED = False  # Default to False
+
+def set_trading_enabled(value):
+    """Update trading enabled flag"""
+    global TRADING_ENABLED
+    TRADING_ENABLED = value
+    # Using print as logger might not be configured in config context, 
+    # but main.py will configure it.
+    # We can't import logger here to avoid circular deps if logger uses config.
+    pass
+
+# Phase 41.3.2: EOD Analysis
+EOD_CONFIG = {
+    'audit_slippage_threshold': 0.005, # >0.5% slippage is anomalous
+    'report_format': 'Markdown',
+    'save_reports_locally': True,
+    'auto_send_telegram': True
+}

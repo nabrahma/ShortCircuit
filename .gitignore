@@ -32,6 +32,7 @@ data/*
 *.csv
 *.parquet
 *.txt
+terminal_log.md
 !requirements.txt
 !LICENSE
 

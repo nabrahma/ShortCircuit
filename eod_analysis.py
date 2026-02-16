@@ -313,9 +313,51 @@ class EODAnalyzer:
             "net_improvement": round(net, 2),
         }])
 
+
         summary.to_csv(EOD_SUMMARY_CSV, mode="a", header=not file_exists, index=False)
         print(f"\n✓ Results saved to {EOD_SUMMARY_CSV}")
+
+        # Phase 42.3: Generate Terminal Log for the analyzed day
+        self._generate_session_log(date)
+        print(f"✓ Session log saved to terminal_log.md")
         print(f"\n{'='*80}\n")
+
+    def _generate_session_log(self, date):
+        """
+        Extracts log entries for the specific date and writes them to terminal_log.md.
+        This allows the user to inspect the full session log for the analyzed day.
+        """
+        log_path = 'logs/bot.log'
+        output_path = 'terminal_log.md'
+        date_str = str(date)
+
+        if not os.path.exists(log_path):
+            print(f"⚠️ Log file not found at {log_path}")
+            return
+
+        try:
+            matching_lines = []
+            with open(log_path, 'r', encoding='utf-8', errors='replace') as f:
+                for line in f:
+                    if line.startswith(date_str):
+                        matching_lines.append(line.rstrip())
+
+            with open(output_path, 'w', encoding='utf-8') as f:
+                f.write(f"# ShortCircuit Session Log\n")
+                f.write(f"> **Date:** {date_str}\n\n")
+                
+                if matching_lines:
+                    f.write(f"Total log entries: {len(matching_lines)}\n\n")
+                    f.write("```log\n")
+                    for line in matching_lines:
+                        f.write(line + "\n")
+                    f.write("```\n")
+                else:
+                    f.write(f"No log entries found for {date_str}.\n")
+                    f.write("Check if bot was running or if logs rotated.\n")
+
+        except Exception as e:
+            print(f"⚠️ Failed to generate session log: {e}")
 
 
 if __name__ == "__main__":

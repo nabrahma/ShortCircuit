@@ -39,6 +39,17 @@ class ShortCircuitBot:
             "\"There is no holy grail in trading, only risk management.\""
         ]
 
+    def send_alert(self, message):
+        """
+        Sends a high-priority alert to the user.
+        Used by OrderManager and other critical modules.
+        """
+        try:
+            if self.chat_id:
+                self.bot.send_message(self.chat_id, message, parse_mode="Markdown")
+        except Exception as e:
+            logger.error(f"Failed to send alert: {e}")
+
     def send_startup_message(self):
         """
         Sends a Good Morning message with a random trading quote.

@@ -52,9 +52,9 @@ class FyersAnalyzer:
     Orchestrates technical analysis, pattern recognition, and risk checks.
     """
     
-    def __init__(self, fyers):
+    def __init__(self, fyers, morning_high=None, morning_low=None):
         self.fyers = fyers
-        self.market_context = MarketContext(fyers)
+        self.market_context = MarketContext(fyers, morning_high, morning_low)
         self.signal_manager = get_signal_manager()
         self.htf_confluence = HTFConfluence(fyers)
         self.gm_analyst = GodModeAnalyst()
