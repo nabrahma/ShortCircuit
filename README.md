@@ -611,20 +611,30 @@ python --version
 
 ### Quick Start
 
-```bash
+### 1. Clone
 git clone https://github.com/nabrahma/ShortCircuit.git
 cd ShortCircuit
+
+### 2. Install Dependencies
 pip install -r requirements.txt
 
-# Configure .env file
+### 3. Configure
 cp .env.example .env
-nano .env
+# Edit .env with your Fyers API keys, DB credentials, Telegram token
 
-# Authenticate & run
+### 4. Setup Database
+# Start PostgreSQL, then:
+psql -U postgres -c "CREATE DATABASE shortcircuit_trading;"
+python apply_migration.py
+
+### 5. Run
 python main.py
-```
 
-**From clone to first signal in under 10 minutes.**
+## Commands
+/auto on   — Enable auto trading
+/auto off  — Alert-only mode (default)
+/status    — Bot health + P&L
+/why SBIN  — Explain why a signal was/wasn't taken
 
 ***
 

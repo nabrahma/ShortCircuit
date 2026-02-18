@@ -1,6 +1,47 @@
-fyers-apiv3
-pandas
-numpy
-python-dotenv
-pyTelegramBotAPI
-pyarrow
+# ============================================================
+# ShortCircuit Trading Bot — Dependency Manifest
+# Phase 42.2.4
+# ============================================================
+#
+# CRITICAL PIN — DO NOT CHANGE:
+# setuptools must stay at 79.0.1
+# fyers_apiv3 FyersWebsocket uses pkg_resources internally.
+# setuptools >= 80.x removes pkg_resources shim.
+# Python 3.12 removed pkg_resources from stdlib.
+# Result: any version above 79.0.1 breaks WebSocket import.
+# Confirmed fix: https://fyers.in/community (pkg_resources thread)
+#
+setuptools==79.0.1
+
+# ── Fyers API ──────────────────────────────────────────────
+fyers-apiv3>=3.1.0
+
+# ── Database ───────────────────────────────────────────────
+asyncpg>=0.29.0
+
+# ── Environment ────────────────────────────────────────────
+python-dotenv>=1.0.0
+
+# ── Async / Networking ─────────────────────────────────────
+aiohttp>=3.9.0
+websockets>=12.0
+requests>=2.31.0
+
+# ── Data Processing ────────────────────────────────────────
+pandas>=2.0.0
+numpy>=1.26.0
+pyarrow>=14.0.0
+
+# ── Telegram Alerts ────────────────────────────────────────
+python-telegram-bot>=21.0.0
+
+# ── Serialization ──────────────────────────────────────────
+protobuf>=4.25.0
+
+# ── Build Tools ────────────────────────────────────────────
+wheel>=0.43.0
+
+# ── Testing ────────────────────────────────────────────────
+pytest>=8.0.0
+pytest-asyncio>=0.23.0
+pytest-cov>=4.1.0

@@ -124,8 +124,12 @@ class EODAnalyzer:
                 issues.append(f"⚠️ DATA: {t['symbol']} has invalid Entry Price: {t['entry_price']}")
                 
             # Check 3: Abnormal PnL (Data Glitch?)
-            if abs(t['pnl_pct']) > 50: # >50% gain/loss in intraday is suspicious
-                issues.append(f"⚠️ ANOMALY: {t['symbol']} PnL is {t['pnl_pct']}% (Check Data)")
+            pnl_pct = t.get('pnl_pct')
+            if pnl_pct is None:
+                if t.get('status') == 'CLOSED':
+                     issues.append(f"⚠️ DATA: {t.get('symbol')} CLOSED but missing PnL %")
+            elif abs(pnl_pct) > 50: # >50% gain/loss in intraday is suspicious
+                issues.append(f"⚠️ ANOMALY: {t.get('symbol')} PnL is {pnl_pct}% (Check Data)")
 
         audit = {
             'status': 'PASSED' if not issues else 'WARNING',

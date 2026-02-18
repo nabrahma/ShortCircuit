@@ -26,15 +26,16 @@ EOD_SUMMARY_CSV = "logs/eod_summary.csv"
 class EODAnalyzer:
     """Compare legacy vs scalper risk systems on today's signals."""
 
-    def __init__(self):
+    def __init__(self, fyers_client=None):
         self.simulator = TradeSimulator()
-        self.fyers = self._init_fyers()
+        self.fyers = fyers_client if fyers_client else self._init_fyers()
 
     def _init_fyers(self):
-        """Init Fyers connection (reuses existing auth)."""
+        """Init Fyers connection (reuses existing auth) if not provided."""
         try:
             from fyers_connect import FyersConnect
-            conn = FyersConnect()
+            # Singleton will reuse existing token/session if available
+            conn = FyersConnect() 
             return conn.authenticate()
         except Exception as e:
             logger.error(f"Fyers auth failed: {e}")

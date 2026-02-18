@@ -17,7 +17,17 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 CAPITAL_PER_TRADE = 1800  # INR per trade (Safety buffer for 2k account)
 CAPITAL = CAPITAL_PER_TRADE  # Backward-compatible alias
 RISK_PER_TRADE = 200 # Max loss in INR (optional logic)
-AUTO_TRADE = False # Default off
+# ============================================================
+# AUTO TRADE GATE
+# CRITICAL: Must ALWAYS be False on startup.
+# Only Telegram /auto on command can enable live trading.
+# ============================================================
+AUTO_MODE = False          # NEVER change this to True
+AUTO_MODE_DEFAULT = False  # Backup safety — used as fallback
+
+# Read from env but OVERRIDE to False if somehow set True in .env
+_env_auto = os.getenv('AUTO_MODE', 'false').lower()
+AUTO_MODE = False  # Ignore env — always False on boot
 
 # System Config
 LOG_FILE = "logs/bot.log"

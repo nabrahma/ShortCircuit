@@ -1,50 +1,56 @@
-# === Python ===
+# ============================================================
+# ShortCircuit .gitignore
+# RULE: If it contains credentials or is machine-specific → ignore
+# ============================================================
+
+# ── Credentials & Tokens (NEVER commit) ──────────────────────
+.env
+access_token.txt
+data/access_token.txt
+data/*.txt
+*.token
+*.key
+
+# ── Python Cache ──────────────────────────────────────────────
 __pycache__/
+*.py[cod]
+*$py.class
 *.pyc
-*.pyo
-*.egg-info/
+.pytest_cache/
+
+# ── Logs (machine-specific, not code) ─────────────────────────
+logs/
+*.log
+*.log.*
+
+# ── Database Files (local only) ───────────────────────────────
+*.db
+*.sqlite
+*.sqlite3
+
+# ── IDE & OS Noise ────────────────────────────────────────────
+.vscode/settings.json
+.idea/
+*.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Debug/Verify Scripts (not production code) ────────────────
+find_ws.py
+find_ws_deep.py
+verify_auto_gate.py
+verify_imports.py
+verify_missing_methods.py
+verify_startup.py
+verify_ws_fix.py
+verify_ws_fix_v2.py
+# Also ignore the generated report if generic
+terminal_log.md
+
+# ── Data Directory (runtime data, not code) ───────────────────
+data/
+
+# ── Build Artifacts ───────────────────────────────────────────
 dist/
 build/
-
-# === Environment ===
-.env
-venv/
-env/
-.venv/
-
-# === IDE ===
-.vscode/
-.idea/
-*.swp
-*.swo
-
-# === Credentials & Tokens ===
-access_token.txt
-
-# === Runtime Data ===
-logs/*
-!logs/.gitkeep
-data/*
-!data/.gitkeep
-
-# === Generated Files ===
-*.log
-*.csv
-*.parquet
-*.txt
-terminal_log.md
-!requirements.txt
-!LICENSE
-
-# === OS ===
-.DS_Store
-Thumbs.db
-
-# === Legacy / Archive ===
-_ARCHIVE/
-scripts/
-tests/
-fyers_mcp_server/
-
-# === AI / Agent ===
-.gemini/
+*.egg-info/

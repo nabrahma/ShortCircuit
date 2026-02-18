@@ -10,18 +10,16 @@ logger = logging.getLogger(__name__)
 
 
 class TradeManager:
-    def __init__(self, fyers):
+    def __init__(self, fyers, capital_manager):
         self.fyers = fyers
-        self.auto_trade_enabled = config.AUTO_TRADE
+        # Legacy Auto-Trade State (Now managed by TelegramBot)
+        self.auto_trade_enabled = False  # Default to False always
 
         # Phase 42: Position Safety — Track active SL orders
         self.active_sl_orders = {}   # {symbol: order_id}
 
-        # Phase 42.1: Capital Management
-        self.capital_manager = CapitalManager(
-            base_capital=getattr(config, 'CAPITAL_PER_TRADE', 1800.0),
-            leverage=getattr(config, 'INTRADAY_LEVERAGE', 5.0)
-        )
+        # Phase 42.1: Capital Management (Injected)
+        self.capital_manager = capital_manager
 
         # Reference to Telegram bot (set externally after init)
         self.bot = None

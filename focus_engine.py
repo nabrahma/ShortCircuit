@@ -114,6 +114,32 @@ class FocusEngine:
                 # A. CHECK TRIGGER (VALIDATION CONFIRMED)
                 # For Short: LTP < Trigger (Signal Low)
                 if ltp < trigger_price:
+                    # =========================================================
+                    # AUTO MODE GATE (Phase 42.2.6)
+                    # =========================================================
+                    auto_enabled = False
+                    if hasattr(self, 'telegram_bot') and self.telegram_bot:
+                        auto_enabled = self.telegram_bot.is_auto_mode()
+                    
+                    if not auto_enabled:
+                         # Alert-only mode: send signal to Telegram, don't trade
+                         logger.info(f"📊 SIGNAL (ALERT ONLY): {symbol} BROKE TRIGGER @ {ltp} | Auto mode OFF")
+                         
+                         if self.telegram_bot:
+                             msg = (
+                                 f"📊 **SIGNAL TRIGGERED (MANUAL)**\n\n"
+                                 f"Symbol: `{symbol}`\n"
+                                 f"Trigger: {trigger_price}\n"
+                                 f"LTP: {ltp}\n"
+                                 f"**Action: Auto-Trade OFF 🛑**\n\n"
+                                 f"Enable with `/auto on` for NEXT signal."
+                             )
+                             self.telegram_bot.send_alert(msg)
+                             
+                         # Remove from pending (consumed)
+                         del self.pending_signals[symbol]
+                         return None
+
                     logger.info(f"✅ [VALIDATED] {symbol} broke {trigger_price} @ {ltp}. EXECUTING!")
                     
                     # 1. Execute via OrderManager (Phase 41.3)

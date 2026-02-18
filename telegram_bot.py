@@ -4,7 +4,6 @@ import config
 import logging
 import threading
 from journal_manager import JournalManager
-from fyers_connect import FyersConnect
 from focus_engine import FocusEngine
 
 logger = logging.getLogger(__name__)
@@ -15,14 +14,24 @@ class ShortCircuitBot:
         self.chat_id = config.TELEGRAM_CHAT_ID
         self.trade_manager = trade_manager
         self.journal = JournalManager()
-        # Direct Fyers for LTP checks if trade_manager doesn't expose it easily
-        self.fyers = FyersConnect().authenticate()
+        # Direct Fyers for LTP checks - use existing instance from TradeManager
+        self.fyers = trade_manager.fyers
         
         # Focus Engine for Live Dashboard
         self.focus_engine = FocusEngine(trade_manager)
         
+        # =====================================================
+        # AUTO MODE STATE (Phase 42.2.6)
+        # CRITICAL: Always False on init — no exceptions.
+        # Only /auto on command can set this to True.
+        # =====================================================
+        self._auto_mode: bool = False
+        
         # Register Handlers
         self.register_handlers()
+        
+        # Inject self into FocusEngine so it can check auto_mode
+        self.focus_engine.telegram_bot = self
         
         self.quotes = [
             "\"The thoughtful trader does not trade every day.\" - Jesse Livermore",
@@ -38,6 +47,20 @@ class ShortCircuitBot:
             "\"Plan the trade, trade the plan.\"",
             "\"There is no holy grail in trading, only risk management.\""
         ]
+        logger.info("🤖 Telegram Bot initialized | Auto Mode: OFF")
+
+    # ─── Public API ───────────────────────────────────────────
+
+    @property
+    def auto_mode(self) -> bool:
+        """
+        Read-only property for auto mode state.
+        """
+        return self._auto_mode
+
+    def is_auto_mode(self) -> bool:
+        """Alias for auto_mode property (for explicit readability)."""
+        return self._auto_mode
 
     def send_alert(self, message):
         """
@@ -90,43 +113,88 @@ class ShortCircuitBot:
     def register_handlers(self):
         @self.bot.message_handler(commands=['start', 'help'])
         def send_welcome(message):
-            self.bot.reply_to(message, "[BOT] ShortCircuit (Fyers Edition) Ready.\nCommands:\n/status - Check Bot State\n/auto on - Enable Auto Trading\n/auto off - Disable Auto Trading")
+            self.bot.reply_to(
+                message, 
+                "[BOT] ShortCircuit (Fyers Edition) Ready.\n\n"
+                "Commands:\n"
+                "/auto on    — Enable automatic trading\n"
+                "/auto off   — Disable auto trading\n"
+                "/status     — Show current mode & capital\n"
+                "/positions  — List open positions\n"
+                "/exit all   — Emergency close all\n"
+                "/pnl        — Today's P&L\n"
+                "/help       — This message"
+            )
 
         @self.bot.message_handler(commands=['status'])
         def status(message):
-            mode = "[ON] AUTO-TRADE" if self.trade_manager.auto_trade_enabled else "[OFF] MANUAL-ALERT"
-            msg = f"Status Report:\nMode: {mode}\nScanner: Active"
+            if str(message.chat.id) != str(self.chat_id): return
+
+            mode_str = "🟢 AUTO (trading)" if self._auto_mode else "🔴 ALERT ONLY"
+            
+            msg = f"*ShortCircuit Status*\n\nMode: {mode_str}\n"
 
             # Phase 42.1: Capital status
+            # Use trade_manager.capital_manager for now, or check if we can access it directly
             if hasattr(self.trade_manager, 'capital_manager'):
                 cap = self.trade_manager.capital_manager.get_status()
                 msg += (
-                    f"\n\n💰 Capital:\n"
-                    f"  Base: ₹{cap['base_capital']:.0f}\n"
-                    f"  Leverage: {cap['leverage']}×\n"
-                    f"  Buying Power: ₹{cap['total_buying_power']:.0f}\n"
-                    f"  Available: ₹{cap['available']:.0f}\n"
-                    f"  In Use: ₹{cap['in_use']:.0f}\n"
-                    f"  Active Positions: {cap['positions_count']}"
+                    f"Capital: ₹{cap['base_capital']:.0f}\n"
+                    f"Buying Power: ₹{cap['total_buying_power']:.0f}\n"
+                    f"Open Positions: {cap['positions_count']}\n"
                 )
                 if cap['positions_count'] > 0:
                     for sym, cost in cap['positions'].items():
                         short_name = sym.split(':')[-1].replace('-EQ', '')
                         msg += f"\n    • {short_name}: ₹{cost:.0f}"
-
-            self.bot.reply_to(message, msg)
+            
+            self.bot.reply_to(message, msg, parse_mode="Markdown")
 
         @self.bot.message_handler(commands=['auto'])
         def toggle_auto(message):
+            if str(message.chat.id) != str(self.chat_id): return
+            
             args = message.text.split()
             if len(args) > 1:
                 cmd = args[1].lower()
                 if cmd == 'on':
-                    self.trade_manager.set_auto_trade(True)
-                    self.bot.reply_to(message, "[EXEC] Auto-Trading ENABLED. Be careful.")
+                    if self._auto_mode:
+                        self.bot.reply_to(message, "ℹ️ Auto mode is already ON.")
+                        return
+                    
+                    self._auto_mode = True
+                    logger.warning("🟢 AUTO MODE ENABLED by Telegram command")
+                    
+                    # Try to get buying power for display
+                    bp = 0
+                    if hasattr(self.trade_manager, 'capital_manager'):
+                       bp = self.trade_manager.capital_manager.buying_power
+                    
+                    self.bot.reply_to(
+                        message,
+                        f"✅ *AUTO TRADE: ON*\n\n"
+                        f"💰 Buying Power: ₹{bp:.0f}\n\n"
+                        "Bot will now place orders automatically.\n"
+                        "Send /auto off to stop.",
+                        parse_mode='Markdown'
+                    )
+                    
                 elif cmd == 'off':
-                    self.trade_manager.set_auto_trade(False)
-                    self.bot.reply_to(message, "[SAFE] Auto-Trading DISABLED. Switch to Manual Alerts.")
+                    if not self._auto_mode:
+                        self.bot.reply_to(message, "ℹ️ Auto mode is already OFF.")
+                        return
+
+                    self._auto_mode = False
+                    logger.warning("🔴 AUTO MODE DISABLED by Telegram command")
+
+                    self.bot.reply_to(
+                        message,
+                        "🔴 *AUTO TRADE: OFF*\n\n"
+                        "Bot is now in alert-only mode.\n"
+                        "Signals will be sent but no orders placed.\n"
+                        "Send /auto on to re-enable.",
+                        parse_mode='Markdown'
+                    )
                 else:
                     self.bot.reply_to(message, "Usage: /auto on OR /auto off")
             else:

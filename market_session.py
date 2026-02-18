@@ -9,12 +9,16 @@ IST = timezone(timedelta(hours=5, minutes=30))
 logger = logging.getLogger(__name__)
 
 from config import MARKET_SESSION_CONFIG, set_trading_enabled
+from symbols import NIFTY_50
 
 class MarketSession:
     """
     Phase 41.3.1: Intelligent Market Session Awareness.
     Handles startup at ANY time of day.
     """
+    
+    # Phase 41.3.3: Centralized Symbol
+    NIFTY_SYMBOL = NIFTY_50
     
     # NSE Market Hours (IST)
     MARKET_OPEN = dtime(9, 15)
@@ -220,7 +224,7 @@ class MarketSession:
         try:
             today_str = datetime.now(IST).strftime('%Y-%m-%d')
             data = {
-                "symbol": "NSE:NIFTY50-INDEX",
+                "symbol": self.NIFTY_SYMBOL,
                 "resolution": "5",
                 "date_format": "1",
                 "range_from": f"{today_str}", # Fyers usually takes epoch or YYYY-MM-DD

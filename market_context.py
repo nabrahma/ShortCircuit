@@ -5,6 +5,8 @@ Based on Murphy's principle: "Trade with the trend, not against it."
 """
 import logging
 from datetime import datetime, time
+from symbols import NIFTY_50, validate_symbol
+import config
 
 logger = logging.getLogger(__name__)
 
@@ -13,11 +15,22 @@ class MarketContext:
     Analyzes broader market to determine if it's safe to take reversal trades.
     """
     
+    # Phase 41.3.3: Centralized Symbol Handling
+    NIFTY_SYMBOL = NIFTY_50
+    
     def __init__(self, fyers, morning_high=None, morning_low=None):
         self.fyers = fyers
         self.regime = "UNKNOWN"
         self.msg = "Initializing..."
         
+        # Phase 41.3.3: Explicit Symbol Initialization
+        self.nifty_symbol = self.NIFTY_SYMBOL
+        
+        # Validate symbol
+        if not validate_symbol(self.nifty_symbol):
+             logger.error(f"Invalid NIFTY Symbol: {self.nifty_symbol}")
+             raise ValueError(f"Invalid NIFTY Symbol: {self.nifty_symbol}")
+
         # Cache for today's morning range
         self._morning_high = morning_high
         self._morning_low = morning_low
@@ -31,9 +44,14 @@ class MarketContext:
         
         if self._morning_high:
             logger.info(f"✅ Market Context Initialized with Morning Range: {self._morning_low} - {self._morning_high}")
+            logger.info(f"   Index: {self.nifty_symbol}")
+
     
-    def _get_index_data(self, symbol="NSE:NIFTY50-INDEX"):
+    def _get_index_data(self, symbol=None):
         """Fetch intraday data for the index."""
+        if symbol is None:
+            symbol = self.nifty_symbol
+            
         today = datetime.now().strftime("%Y-%m-%d")
         
         data = {
