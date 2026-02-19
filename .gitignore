@@ -36,14 +36,7 @@ Thumbs.db
 desktop.ini
 
 # ── Debug/Verify Scripts (not production code) ────────────────
-find_ws.py
-find_ws_deep.py
-verify_auto_gate.py
-verify_imports.py
-verify_missing_methods.py
-verify_startup.py
-verify_ws_fix.py
-verify_ws_fix_v2.py
+verification/
 # Also ignore the generated report if generic
 terminal_log.md
 

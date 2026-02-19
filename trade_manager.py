@@ -23,6 +23,9 @@ class TradeManager:
 
         # Reference to Telegram bot (set externally after init)
         self.bot = None
+        
+        # Phase 42.3.4: Reconciliation Engine (Injected)
+        self.reconciliation_engine = None
 
     def set_auto_trade(self, enabled: bool):
         self.auto_trade_enabled = enabled
@@ -220,16 +223,16 @@ class TradeManager:
             self._log_signal_skipped(signal, 'QTY_ZERO', qty=0, cost=0)
 
             # Telegram alert
-            if self.bot and hasattr(self.bot, 'bot'):
+            if self.bot:
                 try:
-                    self.bot.bot.send_message(
-                        self.bot.chat_id,
+                    msg = (
                         f"⏸️ SIGNAL SKIPPED\n\n"
                         f"Symbol: {symbol}\n"
                         f"Price: ₹{ltp:.2f}\n"
                         f"Reason: Stock too expensive\n"
                         f"(Need minimum ₹{ltp:.2f}, have ₹{config.CAPITAL_PER_TRADE:.0f} base capital)"
                     )
+                    self.bot.send_alert(msg)
                 except Exception:
                     pass
 
@@ -246,10 +249,11 @@ class TradeManager:
 
             # Telegram alert
             cap_status = self.capital_manager.get_status()
-            if self.bot and hasattr(self.bot, 'bot'):
+            # Telegram alert
+            cap_status = self.capital_manager.get_status()
+            if self.bot:
                 try:
-                    self.bot.bot.send_message(
-                        self.bot.chat_id,
+                    msg = (
                         f"⏸️ SIGNAL BLOCKED\n\n"
                         f"Symbol: {symbol}\n"
                         f"Entry: ₹{ltp:.2f}\n"
@@ -262,6 +266,7 @@ class TradeManager:
                         f"  Active Positions: {cap_status['positions_count']}\n\n"
                         f"Signal logged for EOD analysis."
                     )
+                    self.bot.send_alert(msg)
                 except Exception:
                     pass
 
@@ -307,6 +312,9 @@ class TradeManager:
 
                     # Phase 42.1: Log signal as EXECUTED
                     self._log_signal_executed(signal, qty, ltp)
+
+                    # Phase 42.3.4: Mark Reconciliation Dirty
+                    if self.reconciliation_engine: self.reconciliation_engine.mark_dirty()
 
                     # Place Safety Stop Loss Order (Buy SL-Limit)
                     sl_trigger = self.tick_round(float(sl), tick_size)
@@ -447,6 +455,8 @@ class TradeManager:
         finally:
             self._cleanup_sl_tracking(symbol)
             self.capital_manager.release(symbol)  # Phase 42.1
+            # Phase 42.3.4: Mark Dirty
+            if self.reconciliation_engine: self.reconciliation_engine.mark_dirty()
 
     def close_partial_position(self, symbol: str, quantity: int, reason: str) -> dict:
         """
@@ -485,6 +495,8 @@ class TradeManager:
                     "order_id": order_id,
                     "filled_qty": quantity,
                 }
+                # Phase 42.3.4: Mark Dirty
+                if self.reconciliation_engine: self.reconciliation_engine.mark_dirty()
             else:
                 logger.error(f"[SCALPER] Partial close FAILED: {response}")
                 return {"status": "FAILED", "error": str(response)}
@@ -593,6 +605,9 @@ class TradeManager:
 
                     # Phase 42.1: Release capital
                     self.capital_manager.release(symbol)
+                    
+                    # Phase 42.3.4: Mark Dirty
+                    if self.reconciliation_engine: self.reconciliation_engine.mark_dirty()
 
             return f"Squaring Off Complete. Closed {closed_count} positions."
 

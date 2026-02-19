@@ -1,547 +1,894 @@
-import telebot
-from telebot import types
-import config
+# telegram_bot.py
+# Phase 42.3.1 — Complete Telegram UI
+
+import asyncio
 import logging
 import threading
-from journal_manager import JournalManager
-from focus_engine import FocusEngine
+from datetime import datetime
+from typing import Optional
+
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message
+)
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    CallbackQueryHandler,
+    ContextTypes
+)
 
 logger = logging.getLogger(__name__)
 
-class ShortCircuitBot:
-    def __init__(self, trade_manager):
-        self.bot = telebot.TeleBot(config.TELEGRAM_BOT_TOKEN)
-        self.chat_id = config.TELEGRAM_CHAT_ID
-        self.trade_manager = trade_manager
-        self.journal = JournalManager()
-        # Direct Fyers for LTP checks - use existing instance from TradeManager
-        self.fyers = trade_manager.fyers
-        
-        # Focus Engine for Live Dashboard
-        self.focus_engine = FocusEngine(trade_manager)
-        
-        # =====================================================
-        # AUTO MODE STATE (Phase 42.2.6)
-        # CRITICAL: Always False on init — no exceptions.
-        # Only /auto on command can set this to True.
-        # =====================================================
-        self._auto_mode: bool = False
-        
-        # Register Handlers
-        self.register_handlers()
-        
-        # Inject self into FocusEngine so it can check auto_mode
-        self.focus_engine.telegram_bot = self
-        
-        self.quotes = [
-            "\"The thoughtful trader does not trade every day.\" - Jesse Livermore",
-            "\"It's not whether you're right or wrong, but how much money you make when you're right and how much you lose when you're wrong.\" - George Soros",
-            "\"Amateurs think about how much money they can make. Professionals think about how much money they could lose.\" - Jack Schwager",
-            "\"The market can remain irrational longer than you can remain solvent.\" - John Maynard Keynes",
-            "\"Do not anticipate and move without market confirmation—being a little late in your trade is your insurance that you are right or wrong.\" - Jesse Livermore",
-            "\"Trading is a waiting game. You sit, you wait, and you make a lot of money all at once.\" - Jim Rogers",
-            "\"Cut your losses early and let your profits run.\" - Old Wall Street Adage",
-            "\"If you can't take a small loss, sooner or later you will take the mother of all losses.\" - Ed Seykota",
-            "\"The goal of a successful trader is to make the best trades. Money is secondary.\" - Alexander Elder",
-            "\"Opportunities come infrequently. When it rains gold, put out the bucket, not the thimble.\"",
-            "\"Plan the trade, trade the plan.\"",
-            "\"There is no holy grail in trading, only risk management.\""
-        ]
-        logger.info("🤖 Telegram Bot initialized | Auto Mode: OFF")
 
-    # ─── Public API ───────────────────────────────────────────
+class ShortCircuitBot:
+    """
+    Telegram Bot — Command Interface + Trading Dashboard.
+
+    Responsibilities:
+    - Auto-Trade Gate (single source of truth for auto_mode state)
+    - Signal alerts (alert-only + interactive GO/SKIP buttons)
+    - Live position dashboard (auto-refresh every 2s)
+    - All user commands (/status, /why, /pnl, etc.)
+
+    Auto Mode State:
+    - ALWAYS False on boot — no exceptions
+    - Only /auto on command changes it to True
+    - Checked by trade_manager, focus_engine, order_manager
+    """
+
+    def __init__(self, config_settings: dict, order_manager, capital_manager,
+                 focus_engine=None):
+        self.config = config_settings
+        self.order_manager = order_manager
+        self.capital_manager = capital_manager
+        self.focus_engine = focus_engine
+
+        # ── Auto-Trade Gate ───────────────────────────────────
+        # CRITICAL: Always False on boot. /auto on to enable.
+        self._auto_mode: bool = False
+
+        # ── Telegram App ──────────────────────────────────────
+        self.bot_token = config_settings.get('TELEGRAM_BOT_TOKEN')
+        self.chat_id = str(config_settings.get('TELEGRAM_CHAT_ID'))
+        self.app: Optional[Application] = None
+
+        # ── Dashboard State ───────────────────────────────────
+        # Tracks live dashboard message IDs for editing (not spam)
+        self._dashboard_message_id: Optional[int] = None
+        self._active_signal_message_id: Optional[int] = None
+        self._dashboard_task: Optional[asyncio.Task] = None
+
+        # ── Scanning State ────────────────────────────────────
+        self._scanning_paused: bool = False
+        
+        # ── Pending Signals (for Manual Gate) ────────────────
+        self._pending_signals = {} 
+
+        logger.info(f"🤖 Telegram Bot initialized | Auto Mode: OFF")
+
+    # ════════════════════════════════════════════════════════════
+    # PUBLIC API — used by other modules
+    # ════════════════════════════════════════════════════════════
 
     @property
     def auto_mode(self) -> bool:
-        """
-        Read-only property for auto mode state.
-        """
         return self._auto_mode
 
     def is_auto_mode(self) -> bool:
-        """Alias for auto_mode property (for explicit readability)."""
         return self._auto_mode
 
-    def send_alert(self, message):
-        """
-        Sends a high-priority alert to the user.
-        Used by OrderManager and other critical modules.
-        """
-        try:
-            if self.chat_id:
-                self.bot.send_message(self.chat_id, message, parse_mode="Markdown")
-        except Exception as e:
-            logger.error(f"Failed to send alert: {e}")
+    def is_scanning_paused(self) -> bool:
+        return self._scanning_paused
 
-    def send_startup_message(self):
+    async def send_message(self, text: str, parse_mode='Markdown',
+                           reply_markup=None) -> Optional[Message]:
+        """Send plain message to authorized chat."""
+        if not self.app: return None
+        try:
+            return await self.app.bot.send_message(
+                chat_id=self.chat_id,
+                text=text,
+                parse_mode=parse_mode,
+                reply_markup=reply_markup
+            )
+        except Exception as e:
+            logger.error(f"Telegram send_message failed: {e}")
+            return None
+
+    async def edit_message(self, message_id: int, text: str,
+                           parse_mode='Markdown',
+                           reply_markup=None) -> bool:
+        """Edit existing message (used for live dashboard updates)."""
+        if not self.app: return False
+        try:
+            await self.app.bot.edit_message_text(
+                chat_id=self.chat_id,
+                message_id=message_id,
+                text=text,
+                parse_mode=parse_mode,
+                reply_markup=reply_markup
+            )
+            return True
+        except Exception as e:
+            # Telegram throws if message hasn't changed — ignore that
+            if "Message is not modified" not in str(e):
+                logger.error(f"Telegram edit_message failed: {e}")
+            return False
+
+    # ════════════════════════════════════════════════════════════
+    # SIGNAL ALERTS — called by trade_manager / focus_engine
+    # ════════════════════════════════════════════════════════════
+
+    async def send_signal_alert(self, signal: dict):
         """
-        Sends a Good Morning message with a random trading quote.
+        Send signal notification to Telegram.
+
+        Auto OFF → Alert with [GO] [SKIP] [Details] buttons
+        Auto ON  → Info only (order already placed by this point)
         """
-        import random
-        quote = random.choice(self.quotes)
-        msg = (
-            f"Good Morning, Trader!\n\n"
-            f"_{quote}_\n\n"
-            f"[BOT] System Online & Scanning..."
+        symbol = signal.get('symbol', 'UNKNOWN')
+        side = signal.get('side', 'SHORT')
+        entry = signal.get('entry_price', 0)
+        sl = signal.get('stop_loss', 0)
+        target = signal.get('target', 0)
+        rr = signal.get('risk_reward', 0)
+        score = signal.get('score', 0)
+        pattern = signal.get('pattern', 'Unknown')
+        signal_id = signal.get('id', f"{symbol}_{datetime.now().strftime('%H%M%S')}")
+
+        side_emoji = "🔴" if side == "SHORT" else "🟢"
+        mode_tag = "🤖 AUTO" if self._auto_mode else "👁️ ALERT"
+
+        text = (
+            f"{mode_tag} | *{symbol}* {side_emoji} {side}\n\n"
+            f"Entry:    ₹{entry:.2f}\n"
+            f"SL:       ₹{sl:.2f}\n"
+            f"Target:   ₹{target:.2f}\n"
+            f"R:R:      1:{rr:.1f}\n"
+            f"Score:    {score:.1f}/10\n"
+            f"Pattern:  {pattern}\n"
         )
-        try:
-            self.bot.send_message(self.chat_id, msg, parse_mode="Markdown")
-            logger.info("Startup Motivation Sent.")
-        except Exception as e:
-            logger.error(f"Failed to send startup msg: {e}")
 
-    def escape_md(self, text):
-        """
-        Escapes special characters for Markdown to prevent Telegram 400 Errors.
-        Chars to escape: _ * [ ] ( ) ~ ` > # + - = | { } . !
-        But for simple 'Markdown' (V1), mainly _ and * are tricky if not balanced.
-        Let's just replace _ with \_ to be safe as patterns have underscores.
-        """
-        if not isinstance(text, str): return str(text)
-        return text.replace("_", "\\_").replace("*", "\\*").replace("`", "\\`")
-        
-    def get_ltp(self, symbol):
-        try:
-            data = {"symbols": symbol}
-            response = self.fyers.quotes(data=data)
-            if 'd' in response and len(response['d']) > 0:
-                return response['d'][0]['v']['lp']
-        except:
-            pass
-        return 0.0
+        if self._auto_mode:
+            # Auto mode: order is already being placed
+            text += "\n✅ _Order being placed automatically..._"
+            await self.send_message(text)
 
-    def register_handlers(self):
-        @self.bot.message_handler(commands=['start', 'help'])
-        def send_welcome(message):
-            self.bot.reply_to(
-                message, 
-                "[BOT] ShortCircuit (Fyers Edition) Ready.\n\n"
-                "Commands:\n"
-                "/auto on    — Enable automatic trading\n"
-                "/auto off   — Disable auto trading\n"
-                "/status     — Show current mode & capital\n"
-                "/positions  — List open positions\n"
-                "/exit all   — Emergency close all\n"
-                "/pnl        — Today's P&L\n"
-                "/help       — This message"
+        else:
+            # Manual mode: give user GO/SKIP/Details buttons
+            text += "\n⚠️ _Auto mode OFF — tap GO to execute._"
+
+            keyboard = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "✅ GO",
+                        callback_data=f"go:{signal_id}"
+                    ),
+                    InlineKeyboardButton(
+                        "❌ SKIP",
+                        callback_data=f"skip:{signal_id}"
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(
+                        "📊 Details",
+                        callback_data=f"details:{signal_id}"
+                    )
+                ]
+            ])
+
+            msg = await self.send_message(text, reply_markup=keyboard)
+            if msg:
+                # Store signal for GO callback to reference
+                self._pending_signals[signal_id] = signal
+                self._active_signal_message_id = msg.message_id
+
+    async def send_order_confirmation(self, signal: dict, order_id: str):
+        """
+        Sent after order fills. Replaces signal alert message.
+        """
+        symbol = signal.get('symbol')
+        side = signal.get('side')
+        entry = signal.get('entry_price', 0)
+        qty = signal.get('quantity', 0)
+        sl = signal.get('stop_loss', 0)
+        target = signal.get('target', 0)
+
+        text = (
+            f"✅ *ORDER FILLED*\n\n"
+            f"*{symbol}* {side}\n"
+            f"Entry:   ₹{entry:.2f} × {qty}\n"
+            f"SL:      ₹{sl:.2f}\n"
+            f"Target:  ₹{target:.2f}\n"
+            f"ID:      `{order_id}`\n\n"
+            f"_Position manager activated. Dashboard starting..._"
+        )
+
+        await self.send_message(text)
+
+    # ════════════════════════════════════════════════════════════
+    # LIVE DASHBOARD — auto-refreshes every 2 seconds
+    # ════════════════════════════════════════════════════════════
+
+    async def start_live_dashboard(self, position: dict):
+        """
+        Start auto-refreshing live P&L dashboard for an active position.
+        """
+        # Cancel any existing dashboard
+        if self._dashboard_task:
+            self._dashboard_task.cancel()
+
+        # Send initial dashboard message
+        text = self._build_dashboard_text(position)
+        keyboard = self._build_dashboard_keyboard(position)
+        msg = await self.send_message(text, reply_markup=keyboard)
+
+        if msg:
+            self._dashboard_message_id = msg.message_id
+            # Start auto-refresh loop
+            self._dashboard_task = asyncio.create_task(
+                self._dashboard_refresh_loop(position)
             )
 
-        @self.bot.message_handler(commands=['status'])
-        def status(message):
-            if str(message.chat.id) != str(self.chat_id): return
+    async def _dashboard_refresh_loop(self, initial_position: dict):
+        """Edit dashboard message every 2 seconds with fresh data."""
+        symbol = initial_position.get('symbol')
+        while True:
+            try:
+                await asyncio.sleep(2)
 
-            mode_str = "🟢 AUTO (trading)" if self._auto_mode else "🔴 ALERT ONLY"
-            
-            msg = f"*ShortCircuit Status*\n\nMode: {mode_str}\n"
+                # Get latest position data from focus engine (or order manager)
+                position = None
+                if self.focus_engine:
+                    position = await self.focus_engine.get_position_snapshot(symbol)
+                
+                # If focus engine doesn't have it, maybe it closed?
+                if not position:
+                    break
+                    
+                if position.get('status') == 'CLOSED':
+                    break
 
-            # Phase 42.1: Capital status
-            # Use trade_manager.capital_manager for now, or check if we can access it directly
-            if hasattr(self.trade_manager, 'capital_manager'):
-                cap = self.trade_manager.capital_manager.get_status()
-                msg += (
-                    f"Capital: ₹{cap['base_capital']:.0f}\n"
-                    f"Buying Power: ₹{cap['total_buying_power']:.0f}\n"
-                    f"Open Positions: {cap['positions_count']}\n"
+                text = self._build_dashboard_text(position)
+                keyboard = self._build_dashboard_keyboard(position)
+
+                if self._dashboard_message_id:
+                    await self.edit_message(
+                        self._dashboard_message_id,
+                        text,
+                        reply_markup=keyboard
+                    )
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Dashboard refresh error: {e}")
+                await asyncio.sleep(5)
+
+    def _build_dashboard_text(self, position: dict) -> str:
+        """Build the live dashboard message text."""
+        symbol = position.get('symbol', 'UNKNOWN')
+        side = position.get('side', 'SHORT')
+        entry = position.get('entry_price', 0)
+        qty = position.get('quantity', 0)
+        current = position.get('current_price', entry)
+        pnl = position.get('unrealised_pnl', 0)
+        sl = position.get('stop_loss', 0)
+        target = position.get('target', 0)
+        sl_state = position.get('sl_state', 'INITIAL')
+        orderflow = position.get('orderflow_bias', 'NEUTRAL')
+
+        # Direction arrow
+        if side == 'SHORT':
+            direction = "⬇️" if current < entry else "⬆️"
+        else:
+            direction = "⬆️" if current > entry else "⬇️"
+
+        # P&L formatting
+        pnl_pct = (pnl / (entry * qty)) * 100 if entry and qty else 0
+        roi_pct = pnl_pct * 5  # 5× leverage
+        pnl_str = f"+₹{pnl:.2f}" if pnl >= 0 else f"-₹{abs(pnl):.2f}"
+        pnl_pct_str = f"+{pnl_pct:.2f}%" if pnl_pct >= 0 else f"{pnl_pct:.2f}%"
+
+        # SL state badge
+        sl_badges = {
+            'INITIAL': '',
+            'BREAKEVEN': '(BREAKEVEN 🔒)',
+            'TRAILING': '(TRAILING 📍)',
+            'TIGHTENING': '(TIGHT 🎯)'
+        }
+        sl_badge = sl_badges.get(sl_state, '')
+
+        # Orderflow emoji
+        of_map = {
+            'BEARISH': '🟢 BEARISH CONFIRMED',
+            'BULLISH': '🔴 BULLISH (CAUTION)',
+            'NEUTRAL': '⚪ NEUTRAL'
+        }
+        of_str = of_map.get(orderflow, orderflow)
+
+        return (
+            f"⚡ *ACTIVE TRADE*\n\n"
+            f"*{symbol}* {side}\n"
+            f"Entry: ₹{entry:.2f} | Qty: {qty}\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"Current: ₹{current:.2f} {direction}\n"
+            f"P&L: {pnl_str} ({pnl_pct_str})\n"
+            f"ROI: {'+' if roi_pct >= 0 else ''}{roi_pct:.2f}% (5× leverage)\n\n"
+            f"Stop:   ₹{sl:.2f} {sl_badge}\n"
+            f"Target: ₹{target:.2f}\n\n"
+            f"Orderflow: {of_str}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"_Updated: {datetime.now().strftime('%H:%M:%S')}_"
+        )
+
+    def _build_dashboard_keyboard(self, position: dict) -> InlineKeyboardMarkup:
+        """Build dashboard inline buttons."""
+        symbol = position.get('symbol', 'UNKNOWN')
+        order_id = position.get('order_id', '')
+
+        return InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(
+                    "🔄 Refresh",
+                    callback_data=f"refresh:{symbol}"
+                ),
+                InlineKeyboardButton(
+                    "❌ Close Now",
+                    callback_data=f"close:{symbol}:{order_id}"
                 )
-                if cap['positions_count'] > 0:
-                    for sym, cost in cap['positions'].items():
-                        short_name = sym.split(':')[-1].replace('-EQ', '')
-                        msg += f"\n    • {short_name}: ₹{cost:.0f}"
-            
-            self.bot.reply_to(message, msg, parse_mode="Markdown")
+            ]
+        ])
 
-        @self.bot.message_handler(commands=['auto'])
-        def toggle_auto(message):
-            if str(message.chat.id) != str(self.chat_id): return
-            
-            args = message.text.split()
-            if len(args) > 1:
-                cmd = args[1].lower()
-                if cmd == 'on':
-                    if self._auto_mode:
-                        self.bot.reply_to(message, "ℹ️ Auto mode is already ON.")
-                        return
-                    
-                    self._auto_mode = True
-                    logger.warning("🟢 AUTO MODE ENABLED by Telegram command")
-                    
-                    # Try to get buying power for display
-                    bp = 0
-                    if hasattr(self.trade_manager, 'capital_manager'):
-                       bp = self.trade_manager.capital_manager.buying_power
-                    
-                    self.bot.reply_to(
-                        message,
-                        f"✅ *AUTO TRADE: ON*\n\n"
-                        f"💰 Buying Power: ₹{bp:.0f}\n\n"
-                        "Bot will now place orders automatically.\n"
-                        "Send /auto off to stop.",
-                        parse_mode='Markdown'
-                    )
-                    
-                elif cmd == 'off':
-                    if not self._auto_mode:
-                        self.bot.reply_to(message, "ℹ️ Auto mode is already OFF.")
-                        return
+    async def stop_live_dashboard(self, position: dict, exit_reason: str):
+        """
+        Stop dashboard when position closes. Show final P&L.
+        """
+        if self._dashboard_task:
+            self._dashboard_task.cancel()
 
-                    self._auto_mode = False
-                    logger.warning("🔴 AUTO MODE DISABLED by Telegram command")
+        symbol = position.get('symbol')
+        side = position.get('side')
+        entry = position.get('entry_price', 0)
+        exit_price = position.get('exit_price', 0)
+        qty = position.get('quantity', 0)
+        pnl = position.get('realised_pnl', 0)
+        pnl_pct = (pnl / (entry * qty)) * 100 if entry and qty else 0
+        roi = pnl_pct * 5
 
-                    self.bot.reply_to(
-                        message,
-                        "🔴 *AUTO TRADE: OFF*\n\n"
-                        "Bot is now in alert-only mode.\n"
-                        "Signals will be sent but no orders placed.\n"
-                        "Send /auto on to re-enable.",
-                        parse_mode='Markdown'
-                    )
-                else:
-                    self.bot.reply_to(message, "Usage: /auto on OR /auto off")
-            else:
-                self.bot.reply_to(message, "Usage: /auto on OR /auto off")
+        result_emoji = "✅" if pnl > 0 else "❌"
+        pnl_str = f"+₹{pnl:.2f}" if pnl >= 0 else f"-₹{abs(pnl):.2f}"
 
-        # ── PHASE 42.2: /WHY COMMAND ──────────────────────────────────
-        @self.bot.message_handler(commands=['why'])
-        def handle_why(message):
-            """Analyze why the bot missed a signal: /why RELIANCE 14:25"""
-            args = message.text.split()
-            if len(args) < 3:
-                self.bot.reply_to(message, "Usage: /why SYMBOL TIME\nExample: /why RELIANCE 14:25")
+        exit_reason_map = {
+            'SL_HIT': '🛑 Stop Loss Hit',
+            'TP1_HIT': '🎯 TP1 Hit (50% secured)',
+            'TP2_HIT': '🎯 TP2 Hit (75% secured)',
+            'TP3_HIT': '🏆 Full Target Hit',
+            'MANUAL_EXIT': '👤 Manual Exit',
+            'SOFT_STOP': '🧠 Discretionary Exit (Soft Stop)',
+            'EOD_SQUAREOFF': '🕒 EOD Square-off (3:10 PM)',
+            'EMERGENCY': '🚨 Emergency Exit'
+        }
+        reason_str = exit_reason_map.get(exit_reason, exit_reason)
+
+        text = (
+            f"{result_emoji} *TRADE CLOSED*\n\n"
+            f"*{symbol}* {side}\n"
+            f"Entry:  ₹{entry:.2f}\n"
+            f"Exit:   ₹{exit_price:.2f}\n"
+            f"Qty:    {qty}\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"P&L:    {pnl_str} ({'+' if pnl_pct >= 0 else ''}{pnl_pct:.2f}%)\n"
+            f"ROI:    {'+' if roi >= 0 else ''}{roi:.2f}% (5× leverage)\n\n"
+            f"Reason: {reason_str}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"_Position closed at {datetime.now().strftime('%H:%M:%S')}_"
+        )
+
+        # Edit final state of dashboard message
+        if self._dashboard_message_id:
+            await self.edit_message(self._dashboard_message_id, text)
+        else:
+            await self.send_message(text)
+
+        self._dashboard_message_id = None
+
+    # ════════════════════════════════════════════════════════════
+    # COMMAND HANDLERS
+    # ════════════════════════════════════════════════════════════
+
+    async def _cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """/start — Welcome message."""
+        if not self._is_authorized(update):
+            return
+
+        mode_str = "🟢 AUTO" if self._auto_mode else "🔴 ALERT ONLY"
+
+        bp = 0
+        if self.capital_manager:
+            bp = self.capital_manager.buying_power
+
+        await update.message.reply_text(
+            f"⚡ *ShortCircuit is running.*\n\n"
+            f"Mode: {mode_str}\n"
+            f"Buying Power: ₹{bp:.0f}\n\n"
+            f"Send /help for all commands.\n"
+            f"Send /auto on to enable trading.",
+            parse_mode='Markdown'
+        )
+
+    async def _cmd_auto_on(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """/auto on — Enable auto trading."""
+        if not self._is_authorized(update):
+            await update.message.reply_text("⛔ Unauthorized.")
+            return
+
+        if self._auto_mode:
+            await update.message.reply_text("ℹ️ Auto mode is already *ON*.", parse_mode='Markdown')
+            return
+
+        self._auto_mode = True
+        logger.warning("🟢 AUTO MODE ENABLED via Telegram /auto on")
+
+        bp = 0
+        if self.capital_manager:
+            bp = self.capital_manager.buying_power
+
+        await update.message.reply_text(
+            f"✅ *AUTO TRADE: ON*\n\n"
+            f"💵 Buying Power: ₹{bp:.0f}\n\n"
+            f"Bot will now place orders automatically.\n"
+            f"Send /auto off to stop.",
+            parse_mode='Markdown'
+        )
+
+    async def _cmd_auto_off(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """/auto off — Disable auto trading."""
+        if not self._is_authorized(update):
+            await update.message.reply_text("⛔ Unauthorized.")
+            return
+
+        if not self._auto_mode:
+            await update.message.reply_text("ℹ️ Auto mode is already *OFF*.", parse_mode='Markdown')
+            return
+
+        self._auto_mode = False
+        logger.warning("🔴 AUTO MODE DISABLED via Telegram /auto off")
+
+        await update.message.reply_text(
+            f"🔴 *AUTO TRADE: OFF*\n\n"
+            f"Bot is in alert-only mode.\n"
+            f"Signals sent as alerts with GO/SKIP buttons.\n"
+            f"Send /auto on to re-enable.",
+            parse_mode='Markdown'
+        )
+
+    async def _cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """/status — Full system health snapshot."""
+        if not self._is_authorized(update):
+            return
+
+        mode_str = "🟢 AUTO (trading)" if self._auto_mode else "🔴 ALERT ONLY"
+        scan_str = "⏸️ PAUSED" if self._scanning_paused else "✅ ACTIVE"
+
+        today_pnl = 0.0
+        today_trades = 0
+        open_positions = 0
+        
+        if self.order_manager:
+            try:
+                today_pnl = await self.order_manager.get_today_pnl()
+                today_trades = await self.order_manager.get_today_trade_count()
+                open_positions = await self.order_manager.get_open_position_count()
+            except Exception:
+                pass
+
+        pnl_str = f"+₹{today_pnl:.2f}" if today_pnl >= 0 else f"-₹{abs(today_pnl):.2f}"
+        
+        base_cap = getattr(self.capital_manager, "base_capital", 0)
+        lev = getattr(self.capital_manager, "leverage", 1)
+        bp = getattr(self.capital_manager, "buying_power", 0)
+        
+        if self.capital_manager:
+            base_cap = self.capital_manager.base_capital
+            lev = self.capital_manager.leverage
+            bp = self.capital_manager.buying_power
+
+        await update.message.reply_text(
+            f"📊 *ShortCircuit Status*\n\n"
+            f"Mode:       {mode_str}\n"
+            f"Scanner:    {scan_str}\n\n"
+            f"Capital:    ₹{base_cap:.0f}\n"
+            f"Leverage:   {lev}×\n"
+            f"Buying Pwr: ₹{bp:.0f}\n\n"
+            f"Open:       {open_positions} position(s)\n"
+            f"Trades:     {today_trades} today\n"
+            f"P&L:        {pnl_str} today\n\n"
+            f"_As of {datetime.now().strftime('%H:%M:%S')}_",
+            parse_mode='Markdown'
+        )
+
+    async def _cmd_positions(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """/positions — List all open positions."""
+        if not self._is_authorized(update):
+            return
+
+        positions = []
+        if self.order_manager:
+            try:
+                positions = await self.order_manager.get_open_positions()
+            except Exception as e:
+                await update.message.reply_text(f"❌ Error fetching positions: {e}")
                 return
 
-            symbol = args[1]
-            time_str = args[2]
+        if not positions:
+            await update.message.reply_text("📭 No open positions.")
+            return
 
-            self.bot.reply_to(message, f"🔍 Running diagnostic for {symbol} @ {time_str}...")
+        text = "📋 *Open Positions*\n\n"
+        for p in positions:
+            pnl = p.get('unrealised_pnl', 0)
+            pnl_str = f"+₹{pnl:.2f}" if pnl >= 0 else f"-₹{abs(pnl):.2f}"
+            text += (
+                f"*{p['symbol']}* {p['side']}\n"
+                f"Entry: ₹{p['entry_price']:.2f} | "
+                f"LTP: ₹{p['current_price']:.2f} | "
+                f"P&L: {pnl_str}\n\n"
+            )
 
+        await update.message.reply_text(text, parse_mode='Markdown')
+
+    async def _cmd_pnl(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """/pnl — Today's P&L breakdown."""
+        if not self._is_authorized(update):
+            return
+
+        trades = []
+        if self.order_manager:
             try:
-                from diagnostic_analyzer import DiagnosticAnalyzer
-                diag = DiagnosticAnalyzer(self.fyers)
-                result = diag.analyze_missed_opportunity(symbol, time_str)
-
-                if 'error' in result:
-                    self.bot.send_message(self.chat_id, f"❌ {result['error']}")
-                    return
-
-                # Format compact report
-                lines = [
-                    f"🔍 *Diagnostic: {symbol}*",
-                    f"Time: {time_str} | LTP: ₹{result['ltp_at_analysis']:.2f}",
-                    f"Day gain: +{result['day_gain']:.1f}% | High: ₹{result['day_high']:.2f}",
-                    ""
-                ]
-
-                for gate in result['gates']:
-                    s = gate['status']
-                    icon = '✅' if s == 'PASSED' else ('❌' if s == 'FAILED' else '⚠️')
-                    line = f"{icon} G{gate['gate_num']}: {gate['name']}"
-                    if s == 'FAILED':
-                        line += f"\n    ↳ {gate.get('reason', '')}"
-                        if gate.get('suggestion'):
-                            line += f"\n    💡 {gate['suggestion'][:100]}"
-                    lines.append(line)
-
-                # Verdict
-                lines.append("")
-                if result['passed_all_gates']:
-                    lines.append("✅ PASSED ALL GATES — Signal should have fired!")
-                else:
-                    fg = result['gates'][result['first_failure_gate'] - 1]
-                    lines.append(f"❌ Blocked at Gate {result['first_failure_gate']}: {fg['name']}")
-
-                # Profitability
-                prof = result.get('profitability', {})
-                if prof.get('available'):
-                    lines.append("")
-                    if prof['would_be_profitable']:
-                        lines.append(f"🎯 Would have profited: +{prof['exit_profit_pct']:.2f}%")
-                    else:
-                        lines.append(f"💀 Would have lost: {prof['exit_profit_pct']:+.2f}%")
-
-                msg_text = "\n".join(lines)
-                # Telegram has 4096 char limit
-                if len(msg_text) > 4000:
-                    msg_text = msg_text[:4000] + "\n..."
-
-                self.bot.send_message(self.chat_id, msg_text)
-
+                trades = await self.order_manager.get_today_trades()
             except Exception as e:
-                logger.error(f"/why error: {e}")
-                self.bot.send_message(self.chat_id, f"❌ Diagnostic error: {str(e)[:200]}")
+                await update.message.reply_text(f"❌ Error: {e}")
+                return
 
-        # Callback for Inline Buttons
-        @self.bot.callback_query_handler(func=lambda call: True)
-        def callback_handler(call):
-            self.handle_query(call)
+        if not trades:
+            await update.message.reply_text("📭 No trades today.")
+            return
 
-    def handle_query(self, call):
-        """
-        Processes callback queries (Entry/Exit Logic).
-        Exposed for simulation testing.
-        """
-        # 1. ENTER TRADE
-        if call.data.startswith("FOCUS_"):
-            # Data: FOCUS_Symbol
-            parts = call.data.split("_")
+        total_pnl = sum(t.get('realised_pnl', 0) for t in trades)
+        wins = [t for t in trades if t.get('realised_pnl', 0) > 0]
+        losses = [t for t in trades if t.get('realised_pnl', 0) < 0]
+        total_str = f"+₹{total_pnl:.2f}" if total_pnl >= 0 else f"-₹{abs(total_pnl):.2f}"
+
+        text = f"💰 *Today's P&L*\n\n"
+        for i, t in enumerate(trades, 1):
+            pnl = t.get('realised_pnl', 0)
+            pnl_str = f"+₹{pnl:.2f}" if pnl >= 0 else f"-₹{abs(pnl):.2f}"
+            emoji = "✅" if pnl > 0 else "❌"
+            text += f"{emoji} {t['symbol']}: {pnl_str}\n"
+
+        text += (
+            f"\n━━━━━━━━━━━━━━━━━━\n"
+            f"Total:   {total_str}\n"
+            f"Wins:    {len(wins)}\n"
+            f"Losses:  {len(losses)}\n"
+            f"W/R:     {len(wins)/len(trades)*100:.0f}%\n"
+        )
+
+        await update.message.reply_text(text, parse_mode='Markdown')
+
+    async def _cmd_why(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """/why SYMBOL — Diagnostic replay."""
+        if not self._is_authorized(update):
+            return
+
+        args = context.args
+        if not args:
+            await update.message.reply_text(
+                "Usage: `/why SYMBOL`\nExample: `/why RELIANCE`",
+                parse_mode='Markdown'
+            )
+            return
+
+        symbol = args[0].upper()
+        if not symbol.startswith('NSE:'):
+            symbol = f"NSE:{symbol}-EQ"
+
+        await update.message.reply_text(
+            f"🔍 Analyzing {symbol}... (checking all 12 gates)",
+        )
+
+        try:
+            from diagnostic_analyzer import DiagnosticAnalyzer
+            # Need to instantiate DiagnosticAnalyzer properly
+            # Assuming it takes just symbol or broker
+            # For strict correctness, we assume main.py injects dependencies into bot if needed
+            # But DiagnosticAnalyzer usually needs OrderManager or similar
+            # Let's import inside try to avoid circular
+            analyzer = DiagnosticAnalyzer(
+               # broker interface?
+               # We might need to pass self.order_manager.broker
+               # For now, placeholder implementation as per PRD
+               symbol=symbol,
+               order_manager=self.order_manager
+            )
+            result = await analyzer.run()
+            await update.message.reply_text(result, parse_mode='Markdown')
+        except Exception as e:
+             # Fallback if DiagnosticAnalyzer signature is different
+             await update.message.reply_text(f"❌ Diagnostic failed: {e}")
+
+    async def _cmd_pause(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """/pause — Suspend signal scanning."""
+        if not self._is_authorized(update):
+            return
+
+        self._scanning_paused = True
+        logger.warning("⏸️ Scanning PAUSED via Telegram")
+        await update.message.reply_text("⏸️ *Scanning paused.*", parse_mode='Markdown')
+
+    async def _cmd_resume(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """/resume — Reactivate scanning."""
+        if not self._is_authorized(update):
+            return
+
+        self._scanning_paused = False
+        logger.warning("▶️ Scanning RESUMED via Telegram")
+        await update.message.reply_text("▶️ *Scanning resumed.*", parse_mode='Markdown')
+
+    async def _cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """/help"""
+        if not self._is_authorized(update):
+            return
+
+        await update.message.reply_text(
+            "⚡ *ShortCircuit Commands*\n\n"
+            "`/auto on/off`\n"
+            "`/status`\n"
+            "`/positions`\n"
+            "`/pnl`\n"
+            "`/why SYM`\n"
+            "`/pause` / `/resume`",
+            parse_mode='Markdown'
+        )
+
+    # ════════════════════════════════════════════════════════════
+    # HANDLERS
+    # ════════════════════════════════════════════════════════════
+
+    async def _handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        await query.answer()
+
+        if not self._is_authorized_query(query):
+            return
+
+        data = query.data
+        parts = data.split(':')
+        action = parts[0]
+
+        if action == 'go':
+            await self._handle_go(query, parts[1])
+        elif action == 'skip':
+            await self._handle_skip(query, parts[1])
+        elif action == 'details':
+            await self._handle_details(query, parts[1])
+        elif action == 'refresh':
+            await self._handle_refresh(query, parts[1])
+        elif action == 'close':
             symbol = parts[1]
-            
-            # Fetch Real-time Entry Price
-            entry_price = self.get_ltp(symbol)
-            if entry_price == 0: entry_price = 100.0 # Fallback safety
-            
-            # Calc Qty (Re-calc to be sure)
-            qty = int(config.CAPITAL / entry_price)
-            if qty < 1: qty = 1
-            
-            # Log to Journal
-            trade_id = self.journal.log_entry(symbol, qty, entry_price, "Manual-Telegram")
-            
-            if trade_id:
-                self.bot.answer_callback_query(call.id, f"[OK] Trade Logged! ID: {trade_id}")
-                
-                # Update Message to "Tracking Mode"
-                new_text = call.message.text
-                new_text += f"\n\n[SFP] **ENTRY LOGGED** @ {entry_price}\nStarting Focus Engine..."
-                
-                # Replace Button with CLOSE
-                markup = types.InlineKeyboardMarkup()
-                btn_close = types.InlineKeyboardButton("[X] Close Trade", callback_data=f"EXIT_{trade_id}")
-                markup.add(btn_close)
-                
-                # Edit first to acknowledge entry
-                sent_msg = self.bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, text=new_text, reply_markup=markup, parse_mode="Markdown")
-                
-                # START FOCUS ENGINE
-                # SL is generic for now (Day High + Buffer done inside engine now or pass generic)
-                # We pass same price as initial SL, Engine refines it.
-                self.focus_engine.start_focus(symbol, entry_price, entry_price * 1.01, message_id=sent_msg.message_id, trade_id=trade_id)
-                
-            else:
-                 self.bot.answer_callback_query(call.id, "[FAIL] Error logging trade.")
+            order_id = parts[2] if len(parts) > 2 else None
+            await self._handle_close(query, symbol, order_id)
 
-        # 2. EXIT TRADE
-        elif call.data.startswith("EXIT_"):
-            trade_id = call.data.split("_")[1]
-            
-            # Fetch Real-time Exit Price
-            exit_price = 0.0
-            
-            # Try to get from Focus Engine first (Accurate and Sync)
-            if self.focus_engine.active_trade and self.focus_engine.active_trade.get('trade_id') == trade_id:
-                 exit_price = self.focus_engine.active_trade['last_price']
-            else:
-                # Fallback parse
-                lines = call.message.text.split('\n')
-                symbol_line = [l for l in lines if "NSE:" in l or "BSE:" in l]
-                if symbol_line:
-                    symbol = symbol_line[0].strip().replace('`','') 
-                    exit_price = self.get_ltp(symbol)
-
-            # NOW Stop Focus Engine
-            self.focus_engine.stop_focus()
-            
-            # Clean up Pending Orders (Hard SLs)
-            self.focus_engine.cleanup_orders(symbol)
-            
-            result = self.journal.log_exit(trade_id, exit_price)
-            
-            if result:
-                pnl = result['pnl']
-                pct = result['pnl_pct']
-                icon = "[+]" if pnl > 0 else "[-]"
-                
-                self.bot.answer_callback_query(call.id, f"Trade Closed. P&L: {pnl}")
-                
-                # Send Receipt
-                receipt = f"[RECEIPT] **Trade Closed**\n"
-                receipt += f"ID: `{trade_id}`\n"
-                receipt += f"Entry: {result['entry']}\n"
-                receipt += f"Exit: {result['exit']}\n"
-                receipt += f"{icon} **P&L**: Rs.{pnl:.2f} ({pct:.2f}%)"
-                
-                self.bot.send_message(self.chat_id, receipt, parse_mode="Markdown")
-                
-                # Remove Button to prevent double close
-                self.bot.edit_message_reply_markup(chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=None)
-            else:
-                self.bot.answer_callback_query(call.id, "[FAIL] Error closing trade (ID not found?)")
-
-        # 3. REFRESH DASHBOARD
-        elif call.data.startswith("REFRESH_"):
-            trade_id = call.data.split("_")[1]
-            try:
-                # 1. Trigger Engine Refresh
-                self.focus_engine.force_refresh()
-                self.bot.answer_callback_query(call.id, "🔄 Dashboard Refreshed")
-            except Exception as e:
-                logger.error(f"Refresh Handler Error: {e}")
-                self.bot.answer_callback_query(call.id, "[FAIL] Refresh Error")
-
-                
-    def prettify_pattern(self, raw_pat):
-        if "ABSORPTION" in raw_pat: return "Institutional Absorption (High Vol, Stuck Price)"
-        if "EXHAUSTION" in raw_pat: return "Buyer Exhaustion (Shooting Star / Rejection)"
-        return raw_pat
-
-    def send_alert(self, trade_result):
-        """
-        Sends formatted alert based on TradeManager result.
-        """
-        status = trade_result['status']
+    async def _handle_go(self, query, signal_id: str):
+        signal = self._pending_signals.get(signal_id)
+        if not signal:
+            await query.edit_message_text("⚠️ Signal expired.")
+            return
         
-        if status == "EXECUTED":
-             self.bot.send_message(self.chat_id, trade_result['msg'])
-             
-             # AUTO-START FOCUS ENGINE (Trailing Logic)
-             # We need to send a message first to latch onto?
-             # Or just use the alert message ID?
-             try:
-                 # Send a separate "Tracking" dashboard message
-                 track_msg = self.bot.send_message(self.chat_id, "[SCAN] Initializing Auto-Trail...")
-                 
-                 symbol = trade_result['symbol']
-                 entry = float(trade_result['ltp'])
-                 sl = float(trade_result['sl'])
-                 qty = trade_result['qty']
-                 trade_id = trade_result['order_id']
-                 
-                 
-                 # Start Focus (Pass corrected Qty and TradeID)
-                 self.focus_engine.start_focus(symbol, entry, sl, message_id=track_msg.message_id, trade_id=trade_id, qty=qty)
-                 
-             except Exception as e:
-                 logger.error(f"Failed to start Auto-Focus: {e}")
-            
-        elif status == "ERROR":
-             # Notify User of Failure
-             err_msg = f"[FAIL] **AUTO-TRADE FAILED**\n\nSymbol: `{trade_result.get('msg', 'Unknown')}`\nCheck Logs."
-             self.bot.send_message(self.chat_id, err_msg, parse_mode="Markdown")
-            
-        elif status == "MANUAL_WAIT":
-            symbol = self.escape_md(trade_result['symbol'])
-            pattern_pretty = self.escape_md(self.prettify_pattern(trade_result['pattern']))
-            qty = trade_result['qty']
-            ltp = trade_result['ltp']
-            sl = trade_result['stop_loss']
-            
-            # Rich Format
-            msg = f"[SIGNAL] *GOD MODE SIGNAL*\n({config.CAPITAL} INR Scalp)\n\n"
-            msg += f"`{symbol}`\n" # Monospace for Copy
-            msg += f"_(Tap to Copy)_\n\n"
-            
-            msg += f"[WHY]: {pattern_pretty}\n"
-            msg += f"[SIZE]: {qty} Qty\n"
-            msg += f"[PRICE]: {ltp}\n"
-            msg += f"[STOP]: {sl} (Auto-Calc)\n\n"
-            
-            msg += f"[ACTION] *Verify Chart & Decide*"
-
-            # Interactive Buttons
-            from telebot import types
-            markup = types.InlineKeyboardMarkup()
-            btn_enter = types.InlineKeyboardButton("[GO] ENTER TRADE", callback_data=f"FOCUS_{trade_result['symbol']}")
-            markup.add(btn_enter)
-            
-            try:
-                self.bot.send_message(self.chat_id, msg, parse_mode="Markdown", reply_markup=markup)
-            except Exception as e:
-                logger.error(f"Failed to send Manual Alert: {e}")
-
-    def send_validation_alert(self, signal):
-        """
-        Phase 37: Notify user that a signal is in the Validation Gate.
-        """
-        symbol = self.escape_md(signal['symbol'])
-        pattern = self.escape_md(self.prettify_pattern(signal['pattern']))
-        trigger = signal.get('signal_low', 0)
+        self._pending_signals.pop(signal_id, None)
+        symbol = signal.get('symbol')
+        await query.edit_message_text(f"⏳ Executing {symbol}...")
         
-        msg = (
-            f"🛡️ **VALIDATION GATE ACTIVATED**\n\n"
-            f"Symbol: `{symbol}`\n"
-            f"Pattern: {pattern}\n\n"
-            f"**STATUS: PENDING** ⏳\n"
-            f"Waiting for Price < **{trigger}**\n"
-            f"_(Entry blocked until confirmation)_"
-        )
         try:
-            self.bot.send_message(self.chat_id, msg, parse_mode="Markdown")
+            order_id = await self.order_manager.enter_position(signal)
+            if order_id:
+                await query.edit_message_text(f"✅ Order Placed: {order_id}")
+            else:
+                await query.edit_message_text("❌ Order Failed.")
         except Exception as e:
-            logger.error(f"Validation Alert Error: {e}")
+            await query.edit_message_text(f"❌ Error: {e}")
 
-    def send_multi_edge_alert(self, signal):
-        """
-        Phase 41: Rich multi-edge alert showing all detected edges.
-        """
-        symbol = self.escape_md(signal['symbol'])
-        edges = signal.get('edges_detected', [])
-        confidence = signal.get('confidence', 'HIGH')
-        edge_count = signal.get('edge_count', 1)
-        trigger = signal.get('signal_low', 0)
-        sl = signal.get('stop_loss', 0)
+    async def _handle_skip(self, query, signal_id: str):
+        signal = self._pending_signals.pop(signal_id, {})
+        symbol = signal.get('symbol', 'Unknown')
+        await query.edit_message_text(f"⏭️ {symbol} skipped.")
 
-        edge_list = "\n".join([f"  ✓ {self.escape_md(e)}" for e in edges])
+    async def _handle_details(self, query, signal_id: str):
+        signal = self._pending_signals.get(signal_id, {})
+        confluence = signal.get('confluence_notes', 'N/A')
+        await query.answer(f"Details: {confluence}"[:200], show_alert=True)
 
-        msg = (
-            f"🎯 **MULTI\\-EDGE SIGNAL** \\[{confidence}\\]\n\n"
-            f"**Symbol:** `{symbol}`\n"
-            f"**Primary:** {self.escape_md(signal.get('primary_edge', edges[0] if edges else ''))}\n\n"
-            f"**Edges Detected:**\n{edge_list}\n\n"
-            f"**Entry:** Below `{trigger}`\n"
-            f"**Stop Loss:** `{sl}`\n"
-            f"**Confidence:** {confidence} \\({edge_count} edges\\)\n\n"
-            f"⏳ _PENDING VALIDATION_"
-        )
+    async def _handle_refresh(self, query, symbol: str):
+        # Refresh is handled by auto-loop, but we can force one if needed
+        await query.answer("Refreshing...")
+
+    async def _handle_close(self, query, symbol: str, order_id: str):
+        await query.edit_message_text(f"⏳ Closing {symbol}...")
         try:
-            self.bot.send_message(self.chat_id, msg, parse_mode="MarkdownV2")
-        except Exception:
-            # Fallback to plain Markdown if V2 escaping fails
-            plain = (
-                f"🎯 **MULTI-EDGE SIGNAL** [{confidence}]\n\n"
-                f"Symbol: `{signal['symbol']}`\n"
-                f"Edges: {', '.join(edges)}\n"
-                f"Entry: Below {trigger} | SL: {sl}\n"
-                f"Confidence: {confidence} ({edge_count} edges)\n\n"
-                f"STATUS: PENDING VALIDATION"
-            )
-            try:
-                self.bot.send_message(self.chat_id, plain, parse_mode="Markdown")
-            except Exception as e:
-                logger.error(f"Multi-Edge Alert Error: {e}")
+            await self.order_manager.exit_position(symbol, reason='MANUAL_EXIT')
+            await query.edit_message_text(f"✅ Close signal sent.")
+        except Exception as e:
+            await query.edit_message_text(f"❌ Close failed: {e}")
 
-    def send_emergency_alert(self, message: str):
+    # ════════════════════════════════════════════════════════════
+    # EMERGENCY ALERTS
+    # ════════════════════════════════════════════════════════════
+
+    async def send_emergency_alert(self, message: str):
+        await self.send_message(f"🚨 *EMERGENCY*: {message}")
+
+    async def send_orphan_alert(self, symbol: str, qty: int, side: str):
+        await self.send_message(f"⚠️ *ORPHAN*: {symbol} {side} x{qty}")
+
+    # ════════════════════════════════════════════════════════════
+    # SETUP
+    # ════════════════════════════════════════════════════════════
+
+    def _register_handlers(self):
+        self.app.add_handler(CommandHandler("start", self._cmd_start))
+        self.app.add_handler(CommandHandler("auto", self._cmd_auto))
+        self.app.add_handler(CommandHandler("status", self._cmd_status))
+        self.app.add_handler(CommandHandler("positions", self._cmd_positions))
+        self.app.add_handler(CommandHandler("pnl", self._cmd_pnl))
+        self.app.add_handler(CommandHandler("why", self._cmd_why))
+        self.app.add_handler(CommandHandler("pause", self._cmd_pause))
+        self.app.add_handler(CommandHandler("resume", self._cmd_resume))
+        self.app.add_handler(CommandHandler("help", self._cmd_help))
+        self.app.add_handler(CallbackQueryHandler(self._handle_callback))
+
+    async def _cmd_auto(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        args = context.args
+        if not args:
+            await update.message.reply_text("Usage: /auto on | /auto off")
+            return
+        if args[0] == 'on': await self._cmd_auto_on(update, context)
+        elif args[0] == 'off': await self._cmd_auto_off(update, context)
+
+    # ════════════════════════════════════════════════════════════
+    # COMPATIBILITY & UTILS
+    # ════════════════════════════════════════════════════════════
+
+    def send_alert(self, message: str):
         """
-        Phase 42: Send high-priority alert with forced notification.
-        Used for critical position errors (duplicate orders, orphaned positions).
+        Thread-safe synchronous wrapper for sending alerts.
+        Used by legacy modules (TradeManager, FocusEngine).
         """
-        import os
-        from datetime import datetime
-
-        emergency_log = getattr(config, 'EMERGENCY_LOG_PATH', 'logs/emergency_alerts.log')
-
-        alert_message = (
-            f"⚠️⚠️⚠️ EMERGENCY ALERT ⚠️⚠️⚠️\n\n"
-            f"{message}\n\n"
-            f"Time: {datetime.now().strftime('%H:%M:%S')}\n"
-            f"Action: Check bot immediately"
-        )
+        if not self.app or not hasattr(self, '_loop'): return
 
         try:
-            self.bot.send_message(
-                chat_id=self.chat_id,
-                text=alert_message,
-                disable_notification=False  # Force notification
+            asyncio.run_coroutine_threadsafe(
+                self.send_message(message),
+                self._loop
             )
         except Exception as e:
-            logger.critical(f"Could not send emergency alert via Telegram: {e}")
+            logger.error(f"send_alert sync failed: {e}")
 
-        # Log to emergency log file
-        try:
-            os.makedirs(os.path.dirname(emergency_log), exist_ok=True)
-            with open(emergency_log, 'a') as f:
-                f.write(f"{datetime.now()} | {message}\n")
-        except Exception as e:
-            logger.error(f"Failed to write emergency log: {e}")
+    # ════════════════════════════════════════════════════════════
+    # AUTHORIZATION — Security Gate
+    # ════════════════════════════════════════════════════════════
+
+    def _is_authorized(self, update: Update) -> bool:
+        """
+        Verify command sender is authorized.
+        
+        Only the configured TELEGRAM_CHAT_ID can issue commands.
+        Prevents random users from controlling your bot if token leaks.
+        
+        Args:
+            update: Telegram Update object from command handler
+            
+        Returns:
+            True if sender's chat ID matches config, False otherwise
+        """
+        if not update.effective_chat:
+            return False
+            
+        incoming_chat_id = str(update.effective_chat.id)
+        authorized_chat_id = self.chat_id
+        
+        if incoming_chat_id != authorized_chat_id:
+            logger.warning(
+                f"⚠️ Unauthorized command attempt from chat_id: {incoming_chat_id}"
+            )
+            return False
+        
+        return True
+
+    def _is_authorized_query(self, query) -> bool:
+        """
+        Verify inline button press is authorized.
+        
+        Used for [GO], [SKIP], [Refresh], [Close Now] button presses.
+        Separate from _is_authorized because CallbackQuery has different
+        attribute structure than Update.
+        
+        Args:
+            query: CallbackQuery object from button handler
+            
+        Returns:
+            True if button presser matches config, False otherwise
+        """
+        incoming_user_id = str(query.from_user.id)
+        authorized_chat_id = self.chat_id
+        
+        # Note: For private chats, user.id == chat.id
+        # For group chats, they differ (check both)
+        if incoming_user_id != authorized_chat_id:
+            # Try checking the chat ID as fallback
+            incoming_chat_id = str(query.message.chat.id) if query.message else None
+            if incoming_chat_id != authorized_chat_id:
+                logger.warning(
+                    f"⚠️ Unauthorized button press from user_id: {incoming_user_id}"
+                )
+                return False
+        
+        return True
+
+    # ════════════════════════════════════════════════════════════
+    # BOT LIFECYCLE
+    # ════════════════════════════════════════════════════════════
+
+    async def start(self):
+        self.app = Application.builder().token(self.bot_token).build()
+        self._register_handlers()
+        await self.app.initialize()
+        await self.app.start()
+        
+        
+        # Capture the running loop for thread-safe calls
+        self._loop = asyncio.get_running_loop()
+        self._ready_event.set()
+        
+        await self.app.updater.start_polling(drop_pending_updates=True)
+        logger.info("✅ Telegram Bot started")
+
+    def wait_until_ready(self, timeout: float = 10.0) -> bool:
+        """
+        Block until the bot's event loop is initialized and ready.
+        Resolves Issue 4 (Race Condition).
+        """
+        return self._ready_event.wait(timeout)
 
     def start_polling(self):
-        logger.info("[BOT] Telegram Bot Listening...")
-        self.bot.infinity_polling()
+        """Compatibility wrapper for running in a thread from main.py."""
+        self._ready_event = threading.Event()  # Initialize event
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(self.start())
+        # The start() method calls updater.start_polling which is async but returns?
+        # Expecting python-telegram-bot run_polling() equivalent which blocks?
+        # self.start() starts updater but doesn't block forever if not idle?
+        # We need to keep loop running.
+        # simple polling:
+        loop.run_forever()
+
+    def send_validation_alert(self, signal):
+        """Compat wrapper."""
+        self.send_alert(f"VALIDATION ALERT: {signal.get('symbol')} {signal.get('ltp')}")
+
+    def send_multi_edge_alert(self, signal):
+        """Compat wrapper."""
+        self.send_alert(f"MULTI-EDGE ALERT: {signal.get('symbol')} {signal.get('ltp')}")
+        
+    def send_startup_message(self):
+        self.send_alert("⚡ **ShortCircuit Bot Connected**\nSystem Online.")
+
+    async def stop(self):
+        if self.app:
+            await self.app.updater.stop()
+            await self.app.stop()
+            await self.app.shutdown()

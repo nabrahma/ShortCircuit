@@ -7,6 +7,11 @@ Used for EOD "what-if" analysis without live trading.
 import logging
 
 import pandas as pd
+import sys
+import os
+
+# Add Parent Directory to Path
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import config
 from scalper_risk_calculator import ScalperRiskCalculator

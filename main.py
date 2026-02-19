@@ -131,9 +131,23 @@ def main():
     logger.info("daily_bias: NEUTRAL (No bias calculated yet)")
 
     # 2. Telegram Bot (Sync)
+    # 2. Telegram Bot (Sync)
     # TradeManager (Legacy wrapper) need fyers, AND capital_manager
     trade_manager = TradeManager(fyers_client, capital_manager)
-    bot = ShortCircuitBot(trade_manager)
+    
+    # Instantiate FocusEngine manually
+    from focus_engine import FocusEngine
+    focus_engine = FocusEngine(trade_manager)
+
+    # Flatten config module to dict
+    config_settings = {k:v for k,v in vars(config).items() if not k.startswith('__')}
+    
+    # Initialize Bot (OrderManager injected later)
+    bot = ShortCircuitBot(config_settings, None, capital_manager, focus_engine)
+    
+    # Inject dependencies
+    trade_manager.bot = bot
+    focus_engine.telegram_bot = bot
 
     # 3. Async Bridge & Infrastructure (WebSocket)
     from async_utils import AsyncExecutor, SyncWrapper
@@ -193,7 +207,14 @@ def main():
     reconciler = async_exec.reconciliation
     
     # Create Sync Wrappers
+    # Create Sync Wrappers
     order_manager = SyncWrapper(raw_order_manager, async_exec)
+    
+    # Inject OrderManager into Bot
+    bot.order_manager = order_manager
+
+    # Phase 42.3.4: Inject Reconciler into TradeManager
+    trade_manager.reconciliation_engine = SyncWrapper(reconciler, async_exec)
 
     # 4. Run Startup Recovery
     # Updated to accept fyers_client as per Phase 42.2.2 refactor
@@ -269,121 +290,135 @@ def main():
 
     logger.info("[OK] System Initialized. Loop Starting...")
     
+    # Startup Message with Synchronization (Issue 4)
     try:
         if market_session.get_current_state() in ['EARLY_MARKET', 'MID_MARKET']:
-            bot.send_startup_message()
-    except:
-        pass
+            # Wait up to 10s for Telegram loop to init
+            if bot.wait_until_ready(timeout=10.0):
+                bot.send_startup_message()
+            else:
+                logger.warning("[STARTUP] Bot not ready within 10s. Skipping Good Morning.")
+    except Exception as e:
+        logger.error(f"[STARTUP] Message Failed: {e}")
 
     # 7. Main Loop
     SCAN_INTERVAL = 60
     import datetime
     last_reconciliation = datetime.datetime.now()
     
-    while True:
-        try:
-            if not market_session.should_trade_now():
-                if market_session.get_current_state() == 'POST_MARKET':
-                    logger.info("🌙 Market Closed. Stopping Loop.")
-                    break
-                time.sleep(60)
-                continue
-
-            if not config.TRADING_ENABLED:
-                logger.info("⏸️ Trading Disabled (Warmup).")
-                time.sleep(30)
-                continue
-
-            logger.info("[SCAN] Scanning Market...")
-            start_time = time.time()
-
-            # Periodic Reconciliation
-            # Note: Async ReconciliationEngine runs continuously in background now!
-            # We might keep this legacy one if it does different checks, but 
-            # for now let's rely on the background one.
-            # But the logic below called `reconciler.reconcile_positions()` which was synchronous legacy.
-            # We have replaced `reconciler` variable with the NEW Async Engine instance.
-            # The new instance has `reconcile()` which is async.
-            # Calling `reconciler.reconcile()` here would crash if called synchronously on async object.
-            # Plus, it's running in background loop.
-            # So REMOVE explicit call here.
-            
-            # CHECK TIME FOR AUTO-EXIT
-            now = datetime.datetime.now()
-            current_time = now.strftime("%H:%M")
-            if current_time >= config.SQUARE_OFF_TIME:
-                logger.warning(f"[TIME] Market Close ({current_time}). Square-off.")
-                scalper_stop_event.set()
-                msg = trade_manager.close_all_positions()
-                try:
-                    bot.bot.send_message(bot.chat_id, f"[STOP] **MARKET CLOSED**\n\n{msg}")
-                except:
-                    pass
-                break
-            
-            # A. Scan
-            candidates = scanner.scan_market()
-            
-            if not candidates:
-                logger.info("No candidates. Sleeping...")
-            
-            # B. Analyze
-            for cand in candidates:
-                symbol = cand['symbol']
-                signal = None
-                
-                if config.MULTI_EDGE_ENABLED and multi_edge:
-                    edge_payload = multi_edge.scan_all_edges({
-                        'symbol': symbol, 'ltp': cand['ltp'], 'history_df': cand.get('history_df'),
-                        'day_high': cand.get('day_high'), 'day_low': cand.get('day_low'),
-                        'open': cand.get('open'), 'tick_size': 0.05
-                    })
-                    if edge_payload:
-                        signal = analyzer.check_setup_with_edges(symbol, cand['ltp'], cand.get('oi',0), cand.get('history_df'), edge_payload)
-                else:
-                    signal = analyzer.check_setup(symbol, cand['ltp'], cand.get('oi',0), cand.get('history_df'))
-                
-                if signal:
-                    logger.info(f"[SIGNAL] {symbol} Found.")
-                    
-                    if signal.get('edges_detected'):
-                        bot.send_multi_edge_alert(signal)
-                    else:
-                        bot.send_validation_alert(signal)
-                    
-                    bot.focus_engine.add_pending_signal(signal)
-
-                    if tracker and signal.get('edges_detected'):
-                        signal_id = f"{symbol}_{int(time.time())}"
-                        signal['signal_id'] = signal_id
-                        tracker.log_signal_generated(signal_id, [e['trigger'] for e in signal.get('edges_detected', [])], symbol)
-
-                    if scalper_manager and signal.get('setup_high'):
-                        signal['_scalper_manager'] = scalper_manager
-
-            elapsed = time.time() - start_time
-            sleep_time = max(0, SCAN_INTERVAL - elapsed)
-            time.sleep(sleep_time)
-
-        except KeyboardInterrupt:
-            logger.info("Manually Stopped.")
-            scalper_stop_event.set()
-            break
-        except Exception as e:
-            logger.error(f"Loop Error: {e}")
-            time.sleep(10)
-
-    # EOD Analysis
-    logger.info("🏁 Session Ended. EOD Analysis...")
     try:
-        from eod_analyzer import EODAnalyzer
-        if hasattr(bot, 'journal') and hasattr(bot.journal, 'db'):
-             analyzer = EODAnalyzer(fyers, bot.journal.db)
-             report = analyzer.run_daily_analysis()
-             if report and getattr(config, 'EOD_CONFIG', {}).get('auto_send_telegram', True):
-                 bot.bot.send_message(bot.chat_id, report, parse_mode="Markdown")
-    except Exception as e:
-        logger.error(f"❌ EOD Analysis Failed: {e}")
+        while True:
+            try:
+                if not market_session.should_trade_now():
+                    if market_session.get_current_state() == 'POST_MARKET':
+                        logger.info("🌙 Market Closed. Stopping Loop.")
+                        break
+                    time.sleep(60)
+                    continue
+
+                if not config.TRADING_ENABLED:
+                    logger.info("⏸️ Trading Disabled (Warmup).")
+                    time.sleep(30)
+                    continue
+
+                logger.info("[SCAN] Scanning Market...")
+                start_time = time.time()
+                
+                # Check Time for Auto-Exit
+                # Phase 43: Robust Time Check (Issue 1)
+                # Use proper time objects, not string comparison
+                now_ist = datetime.datetime.now(market_session.IST)
+                current_time = now_ist.time()
+                
+                # Parse configured time once
+                h, m = map(int, config.SQUARE_OFF_TIME.split(':'))
+                square_off_time = datetime.time(h, m)
+                
+                if current_time >= square_off_time:
+                    logger.warning(f"[TIME] Market Close ({current_time.strftime('%H:%M')}). Square-off.")
+                    scalper_stop_event.set()
+                    msg = trade_manager.close_all_positions()
+                    try:
+                        bot.bot.send_message(bot.chat_id, f"[STOP] **MARKET CLOSED**\n\n{msg}")
+                    except:
+                        pass
+                    break
+                
+                # A. Scan
+                candidates = scanner.scan_market()
+                
+                if not candidates:
+                    logger.info("No candidates. Sleeping...")
+                
+                # B. Analyze
+                for cand in candidates:
+                    symbol = cand['symbol']
+                    signal = None
+                    
+                    if config.MULTI_EDGE_ENABLED and multi_edge:
+                        edge_payload = multi_edge.scan_all_edges({
+                            'symbol': symbol, 'ltp': cand['ltp'], 'history_df': cand.get('history_df'),
+                            'day_high': cand.get('day_high'), 'day_low': cand.get('day_low'),
+                            'open': cand.get('open'), 'tick_size': 0.05
+                        })
+                        if edge_payload:
+                            signal = analyzer.check_setup_with_edges(symbol, cand['ltp'], cand.get('oi',0), cand.get('history_df'), edge_payload)
+                    else:
+                        signal = analyzer.check_setup(symbol, cand['ltp'], cand.get('oi',0), cand.get('history_df'))
+                    
+                    if signal:
+                        logger.info(f"[SIGNAL] {symbol} Found.")
+                        
+                        if signal.get('edges_detected'):
+                            bot.send_multi_edge_alert(signal)
+                        else:
+                            bot.send_validation_alert(signal)
+                        
+                        bot.focus_engine.add_pending_signal(signal)
+
+                        if tracker and signal.get('edges_detected'):
+                            signal_id = f"{symbol}_{int(time.time())}"
+                            signal['signal_id'] = signal_id
+                            tracker.log_signal_generated(signal_id, [e['trigger'] for e in signal.get('edges_detected', [])], symbol)
+
+                        if scalper_manager and signal.get('setup_high'):
+                            signal['_scalper_manager'] = scalper_manager
+
+                elapsed = time.time() - start_time
+                sleep_time = max(0, SCAN_INTERVAL - elapsed)
+                time.sleep(sleep_time)
+
+            except KeyboardInterrupt:
+                logger.info("Manually Stopped.")
+                scalper_stop_event.set()
+                break
+            except Exception as e:
+                logger.error(f"Loop Error: {e}")
+                time.sleep(10)
+                
+    finally:
+        logger.info("🏁 Session Ended. Stopping Services...")
+        scalper_stop_event.set()
+        
+        # 1. Update Terminal Log (Issue 3)
+        try:
+            import subprocess
+            logger.info("📄 Updating Terminal Log...")
+            subprocess.run(["python", "dump_terminal_log.py"], check=False)
+        except Exception as e:
+            logger.error(f"Failed to update terminal log: {e}")
+
+        # 2. Run EOD Analysis (Issue 2)
+        try:
+            logger.info("📊 Running Auto-EOD Analysis...")
+            subprocess.run(["python", "eod_analysis.py"], check=False)
+        except Exception as e:
+            logger.error(f"Failed to run EOD Analysis: {e}")
+            
+        logger.info("👋 Goodnight.")
+    
+    # Preventing "RuntimeError: Event loop is closed" if we try to run async here
+    # The loop is inside main() which is just a function, but likely async components are dead.
 
 if __name__ == "__main__":
     main()

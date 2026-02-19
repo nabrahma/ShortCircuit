@@ -3,7 +3,13 @@ import logging
 import threading
 from fyers_connect import FyersConnect
 import config
-import telebot
+import time
+import logging
+import threading
+from fyers_connect import FyersConnect
+import config
+import datetime
+from order_manager import OrderManager
 import datetime
 from order_manager import OrderManager
 from discretionary_engine import DiscretionaryEngine
@@ -23,7 +29,31 @@ class FocusEngine:
         
         self.active_trade = None # Reference to OrderManager position
         self.is_running = False
-        self.bot = telebot.TeleBot(config.TELEGRAM_BOT_TOKEN) if config.TELEGRAM_BOT_TOKEN else None
+        self.telegram_bot = None # Injected by main.py
+        
+    async def get_position_snapshot(self, symbol: str) -> dict:
+        """
+        Phase 42.3.1: Provide live position data for Telegram Dashboard.
+        Called by telegram_bot.py every 2 seconds.
+        """
+        if not self.active_trade or self.active_trade.get('symbol') != symbol:
+            return None
+            
+        t = self.active_trade
+        return {
+            'symbol': t['symbol'],
+            'side': 'SHORT', # Hardcoded for now as SC is Short-only
+            'entry_price': t['entry'],
+            'quantity': t['qty'],
+            'current_price': t.get('last_price', t['entry']),
+            'unrealised_pnl': (t['entry'] - t.get('last_price', t['entry'])) * t['qty'],
+            'stop_loss': t.get('sl', 0),
+            'target': t.get('current_target', 0),
+            'sl_state': 'TRAILING' if t.get('target_extended') else 'INITIAL',
+            'order_id': t.get('trade_id'),
+            'status': t.get('status', 'OPEN'),
+            'orderflow_bias': t.get('orderflow_bias', 'NEUTRAL')
+        }
         
         # Validation Gate (Phase 37)
         self.pending_signals = {} # {symbol: {signal_data, entry_trigger, invalidation_trigger, timestamp}}
@@ -32,9 +62,6 @@ class FocusEngine:
         
         # Auto-Recovery on Init
         self.attempt_recovery()
-        
-        # Validation Gate (Phase 37)
-        self.pending_signals = {} # {symbol: {signal_data, entry_trigger, invalidation_trigger, timestamp}}
 
     def add_pending_signal(self, signal_data):
         """
@@ -242,10 +269,6 @@ class FocusEngine:
         }
         
         self.is_running = True
-        logger.info(f"[FOCUS] FOCUS MODE ACTIVATED: {symbol} | Entry: {entry_price}")
-        
-        # Send Initial Dashboard
-        self.update_dashboard(initial=True)
         
         # Start Loop
         self.thread = threading.Thread(target=self.focus_loop, daemon=True)
@@ -343,10 +366,8 @@ class FocusEngine:
                     # Keep simplistic trailing if Discretionary Engine not active?
                     # Or just rely on Hard SL (monitored by order_manager)
                     
-                    # Hard Stop is handled by `monitor_hard_stop_status` above.
                     
                 time.sleep(2)
-                self.update_dashboard()
                 
             except Exception as e:
                 logger.error(f"Focus Loop Error: {e}")
@@ -390,123 +411,11 @@ class FocusEngine:
         # If below VWAP, target previous support (mock logic for now without history)
         t['dynamic_tp'] = round(ltp * 0.98, 2) # Arbitrary 2% scalp target for visuals
 
-    def force_refresh(self):
-        """
-        Manually syncs state with Broker.
-        """
-        if not self.active_trade: return
-        
-        try:
-            # Check Net Position
-            r = self.fyers.positions()
-            if 'netPositions' in r:
-                symbol = self.active_trade['symbol']
-                net_qty = 0
-                for p in r['netPositions']:
-                    if p['symbol'] == symbol:
-                        net_qty = p['netQty']
-                        break
-                
-                # If closed externally
-                if net_qty == 0:
-                    logger.info("[REFRESH] Position found CLOSED.")
-                    self.stop_focus(reason="MANUAL_APP_CLOSE")
-                    return
-            
-            # If still open, just update dashboard
-            self.update_dashboard()
-            logger.info("[REFRESH] Dashboard Updated.")
-            
-        except Exception as e:
-            logger.error(f"Refresh Error: {e}")
-
-    def update_dashboard(self, initial=False):
-        if not self.bot or not config.TELEGRAM_CHAT_ID: return
-        
-        t = self.active_trade
-        if not t: return
-        
-        entry = t['entry']
-        ltp = t['last_price']
-        
-        # PnL Calc
-        pnl_points = entry - ltp
-        pnl_cash = pnl_points * t.get('qty', 1) 
-        emoji = "🟢" if pnl_points > 0 else "🔴"
-        
-        # ROI Calculation (5x Leverage)
-        # Margin Used = (Price * Qty) / 5
-        margin_used = (entry * t.get('qty', 1)) / 5
-        roi_pct = (pnl_cash / margin_used) * 100 if margin_used > 0 else 0.0
-        
-        # Orderflow Indicators (Simplified)
-        ba_ratio = t.get('bid_ask_ratio', 1.0)
-        ba_sentiment = "Bearish" if ba_ratio < 0.8 else "Bullish" if ba_ratio > 1.2 else "Neutral"
-        tape_msg = t.get('tape_alert', "Neutral").replace(" (No Engine)", "")
-        
-        # Dynamic Levels
-        dyn_sl = t.get('dynamic_sl', 0)
-        dyn_tp = t.get('dynamic_tp', 0)
-        
-        # BlackRock Style Dashboard
-        msg = (
-            f"**{t['symbol']}** | Live P&L (5x)\n"
-            f"**Rs.{pnl_cash:,.2f}** {emoji} ({roi_pct:+.2f}%)\n"
-            f"_{pnl_points:+.2f} pts_\n\n"
-            
-            f"LTP: **{ltp}** | Entry: {entry}\n\n"
-            
-            f"**STATUS**\n"
-            f"Action: {tape_msg}\n"
-            f"Sentiment: {ba_sentiment} ({ba_ratio})\n\n"
-            
-            f"**RISK**\n"
-            f"Stop: {dyn_sl}\n"
-            f"Target: {dyn_tp}\n\n"
-            
-            f"_[Updated: {datetime.datetime.now().strftime('%H:%M:%S')}]_"
-        )
-        
-        # Buttons
-        from telebot import types
-        markup = types.InlineKeyboardMarkup()
-        trade_id = t.get('trade_id', 'UNKNOWN')
-        
-        btn_refresh = types.InlineKeyboardButton("🔄 Refresh", callback_data=f"REFRESH_{trade_id}")
-        btn_close = types.InlineKeyboardButton("❌ Close Position", callback_data=f"EXIT_{trade_id}")
-        
-        markup.row(btn_refresh, btn_close)
-        
-        try:
-            if initial or not t['message_id']:
-                if t['message_id']:
-                     self.bot.edit_message_text(msg, config.TELEGRAM_CHAT_ID, t['message_id'], parse_mode="Markdown", reply_markup=markup)
-            else:
-                 self.bot.edit_message_text(msg, config.TELEGRAM_CHAT_ID, t['message_id'], parse_mode="Markdown", reply_markup=markup)
-        except Exception as e:
-            # NETWORK ERROR HANDLING (Crucial for Stability)
-            # If Telegram fails, we Log and Continue. We DO NOT CRASH.
-            if "message is not modified" in str(e):
-                pass # Ignore trivial
-            elif "Connection" in str(e) or "HTTPS" in str(e) or "400" in str(e):
-                logger.warning(f"[NET] Telegram Update Failed (Retrying next tick): {e}")
-            else:
-                logger.error(f"Telegram Dashboard Error: {e}")
-
     def stop_focus(self, reason="STOPPED"):
-        # self.update_dashboard() # Final Update (Risk of threading race if called from loop?)
-        # Better to update one last time carefully.
-        
         trade = self.active_trade
         self.is_running = False
         self.active_trade = None
         logger.info(f"Focus Mode Stopped. Reason: {reason}")
-        
-        # Phase 20: SFP Watch Trigger
-        if reason == "SL_HIT" and trade:
-            logger.info("[SFP] SFP WATCH ACTIVATED: Monitoring for Fakeout...")
-            # Start SFP Thread
-            threading.Thread(target=self.sfp_watch_loop, args=(trade,), daemon=True).start()
 
     def sfp_watch_loop(self, trade):
         """
@@ -545,13 +454,13 @@ class FocusEngine:
         logger.info(f"SFP Watch Ended for {symbol} (No Fakeout)")
 
     def send_sfp_alert(self, trade, ltp):
-        if not self.bot or not config.TELEGRAM_CHAT_ID: return
+        if not self.telegram_bot: return
         
         symbol = trade['symbol']
         entry = trade['entry']
         
         msg = (
-            f"[WARN] **FAKE OUT DETECTED! (SFP)**\n\n"
+            f"⚠️ **FAKE OUT DETECTED! (SFP)**\n\n"
             f"[SFP] **{symbol}** trapped buyers!\n"
             f"Price is back below Entry.\n\n"
             f"LTP: *{ltp}*\n"
@@ -559,6 +468,6 @@ class FocusEngine:
             f"[ACTION] **RE-ENTER SHORT NOW**"
         )
         
-        # Send as NEW Message (High Importance)
-        self.bot.send_message(config.TELEGRAM_CHAT_ID, msg, parse_mode="Markdown")
+        # Send using thread-safe wrapper
+        self.telegram_bot.send_alert(msg)
 
