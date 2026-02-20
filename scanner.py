@@ -9,6 +9,9 @@ class FyersScanner:
     def __init__(self, fyers):
         self.fyers = fyers
         self.symbols = [] # Cache for symbols
+        # NOTE: Do NOT use TYPO_PATCHES to suppress symbols.
+        # Zero-volume symbols are handled by quality_reject_counts blacklist.
+        # Both NSE:AKASH-EQ and NSE:AAKASH-EQ are separate listed entities.
         self.quality_reject_counts = {} # Phase 42.4: Track 0-volume rejects
 
     def fetch_nse_symbols(self):
@@ -40,10 +43,8 @@ class FyersScanner:
                 symbol = str(row.get(9, "")) # Try Col 9 first
                 if not symbol.endswith("-EQ"):
                     symbol = str(row.get(13, "")) # Try Col 13
-                
-                # Phase 42.4 Fix #6: Manual Patch for Fyers Master List Typos
-                if symbol == "NSE:AKASH-EQ":
-                    symbol = "NSE:AAKASH-EQ"
+                if not symbol.endswith("-EQ"):
+                    symbol = str(row.get(13, "")) # Try Col 13
                 
                 if symbol.startswith("NSE:") and symbol.endswith("-EQ"):
                     # Finding Tick Size (Col 4 or 12 or 2)
