@@ -549,7 +549,12 @@ class ShortCircuitBot:
         trades = []
         if self.order_manager:
             try:
-                trades = await self.order_manager.get_today_trades()
+                # Null-safe guard for get_today_trades
+                get_trades = getattr(self.order_manager, 'get_today_trades', None)
+                if get_trades is None:
+                    await update.message.reply_text("❌ PnL unavailable — OrderManager method missing.")
+                    return
+                trades = await get_trades()
             except Exception as e:
                 await update.message.reply_text(f"❌ Error: {e}")
                 return
@@ -603,23 +608,62 @@ class ShortCircuitBot:
 
         try:
             from diagnostic_analyzer import DiagnosticAnalyzer
-            # Need to instantiate DiagnosticAnalyzer properly
-            # Assuming it takes just symbol or broker
-            # For strict correctness, we assume main.py injects dependencies into bot if needed
-            # But DiagnosticAnalyzer usually needs OrderManager or similar
-            # Let's import inside try to avoid circular
-            analyzer = DiagnosticAnalyzer(
-               # broker interface?
-               # We might need to pass self.order_manager.broker
-               # For now, placeholder implementation as per PRD
-               symbol=symbol,
-               order_manager=self.order_manager
+            
+            # Extract raw fyers client needed by DiagnosticAnalyzer
+            fyers = None
+            if self.focus_engine and hasattr(self.focus_engine, 'fyers'):
+                fyers = self.focus_engine.fyers
+            elif self.order_manager and hasattr(self.order_manager, 'broker'):
+                fyers = getattr(self.order_manager.broker, 'rest_client', None)
+                
+            if not fyers:
+                await update.message.reply_text("❌ Diagnostic failed: Fyers client not accessible.")
+                return
+                
+            analyzer = DiagnosticAnalyzer(fyers)
+            
+            # Format time
+            import datetime
+            now_str = datetime.datetime.now().strftime("%H:%M")
+            if len(args) > 1:
+                now_str = args[1]
+                
+            import asyncio
+            loop = asyncio.get_event_loop()
+            result_dict = await loop.run_in_executor(
+                None,
+                analyzer.analyze_missed_opportunity,
+                symbol,
+                now_str
             )
-            result = await analyzer.run()
-            await update.message.reply_text(result, parse_mode='Markdown')
+            
+            if isinstance(result_dict, dict):
+                if 'error' in result_dict:
+                    result_msg = f"❌ {result_dict['error']}"
+                else:
+                    ts_str = result_dict['timestamp'].strftime('%H:%M') if hasattr(result_dict.get('timestamp'), 'strftime') else str(result_dict.get('timestamp'))
+                    result_msg = f"🔍 **Diagnostic for {symbol} @ {ts_str}**\n\n"
+                    if 'gates' in result_dict:
+                        for g in result_dict['gates']:
+                            icon = "✅" if g.get('status') == 'PASSED' else "❌" if g.get('status') == 'FAILED' else "⚠️"
+                            result_msg += f"{icon} {g.get('name')}: {g.get('reason', 'OK')}\n"
+                    
+                    if result_dict.get('passed_all_gates'):
+                         result_msg += "\n✅ **PASSED ALL GATES!** Should have been signaled."
+                    else:
+                         fail_gate = result_dict.get('first_failure_gate')
+                         result_msg += f"\n⛔ **BLOCKED AT GATE {fail_gate}**"
+            else:
+                result_msg = str(result_dict)
+                
+            await update.message.reply_text(result_msg, parse_mode='Markdown')
+            
+        except TypeError as e:
+            logger.error(f"DiagnosticAnalyzer init failed: {e}")
+            await update.message.reply_text(f"❌ Diagnostic init error: {e}")
         except Exception as e:
-             # Fallback if DiagnosticAnalyzer signature is different
-             await update.message.reply_text(f"❌ Diagnostic failed: {e}")
+            logger.error(f"Diagnostic failed: {e}")
+            await update.message.reply_text(f"❌ Diagnostic failed: {e}")
 
     async def _cmd_pause(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """/pause — Suspend signal scanning."""

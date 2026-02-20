@@ -9,6 +9,7 @@ class FyersScanner:
     def __init__(self, fyers):
         self.fyers = fyers
         self.symbols = [] # Cache for symbols
+        self.quality_reject_counts = {} # Phase 42.4: Track 0-volume rejects
 
     def fetch_nse_symbols(self):
         """
@@ -39,6 +40,10 @@ class FyersScanner:
                 symbol = str(row.get(9, "")) # Try Col 9 first
                 if not symbol.endswith("-EQ"):
                     symbol = str(row.get(13, "")) # Try Col 13
+                
+                # Phase 42.4 Fix #6: Manual Patch for Fyers Master List Typos
+                if symbol == "NSE:AKASH-EQ":
+                    symbol = "NSE:AAKASH-EQ"
                 
                 if symbol.startswith("NSE:") and symbol.endswith("-EQ"):
                     # Finding Tick Size (Col 4 or 12 or 2)
@@ -105,7 +110,9 @@ class FyersScanner:
                 
                 # Threshold: If > 50% have zero volume, it's illiquid/choppy
                 if zero_vol_ratio > 0.5:
-                    logger.warning(f"[SKIP] Quality Reject: {symbol} | Zero Volume: {int(zero_vol_ratio*100)}%")
+                    reject_pct = int(zero_vol_ratio*100)
+                    logger.warning(f"[SKIP] Quality Reject: {symbol} | Zero Volume: {reject_pct}%")
+                    self.quality_reject_counts[symbol] = self.quality_reject_counts.get(symbol, 0) + 1
                     return False, None
                     
                 # Return Success AND the Dataframe (Reuse Strategy)
@@ -114,10 +121,11 @@ class FyersScanner:
                 df['datetime'] = pd.to_datetime(df['epoch'], unit='s').dt.tz_localize('UTC').dt.tz_convert('Asia/Kolkata')
                 return True, df
             
-            # CHANGED: If insufficient data, PASS the stock (don't reject)
-            # We assume liquid stocks may have API delays
-            logger.info(f"[INFO] {symbol}: Insufficient candle data ({len(response.get('candles', []))}), allowing...")
-            return True, None  # PASS with no cached DF
+            # Fix #4: Hard block 0-candle data instead of allowing
+            candle_count = len(response.get('candles', []))
+            logger.warning(f"SKIP {symbol} — Insufficient candle data ({candle_count}). Blocking.")
+            self.quality_reject_counts[symbol] = self.quality_reject_counts.get(symbol, 0) + 1
+            return False, None
             
         except Exception as e:
             logger.error(f"Quality Check Error {symbol}: {e}")
@@ -174,6 +182,12 @@ class FyersScanner:
                         
                     # Filter: Gain 6-18%, Vol > 100k, LTP > 5
                     if 6.0 <= change_p <= 18.0 and volume > 100000 and ltp > 5:
+                        
+                        # Fix #5: Blacklist Check
+                        if self.quality_reject_counts.get(symbol, 0) >= 3:
+                            logger.debug(f"BLACKLIST {symbol} — Quality rejected 3x today, skipping history fetch.")
+                            continue
+                            
                         tick_size = self.symbols.get(symbol, 0.05)
                         oi = quote_data.get('oi', 0)
                         pre_candidates.append({

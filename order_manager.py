@@ -42,13 +42,42 @@ class OrderManager:
             self.position_locks[symbol] = asyncio.Lock()
         return self.position_locks[symbol]
 
+    async def get_today_trades(self) -> list:
+        """Returns today's trades and PnL using the Fyers positions API."""
+        try:
+            positions = await self.broker.get_all_positions()
+            trades = []
+            for p in positions:
+                trades.append({
+                    'symbol': p.get('symbol', 'UNKNOWN'),
+                    'realised_pnl': float(p.get('realized_profit', 0)),
+                    'unrealised_pnl': float(p.get('unrealized_profit', 0)),
+                    'qty': p.get('netQty', 0)
+                })
+            return trades
+        except Exception as e:
+            logger.error(f"Error fetching today's trades: {e}")
+            return []
+
     async def startup_reconciliation(self):
         """
         Runs at startup to sync state.
         Uses WebSocket cache for instant position check.
         """
+        import time
+        start_time = time.time()
         logger.info("🔍 [STARTUP] Running Async Order Reconciliation...")
         try:
+            # DB Pool Warmup (Phase 42.4 Fix #7)
+            if self.db:
+                try:
+                    pool = await self.db.get_pool()
+                    async with pool.acquire() as conn:
+                        await conn.fetchval("SELECT 1")
+                    logger.info("DB Pool warmed up.")
+                except Exception as e:
+                    logger.warning(f"DB Pool warmup failed: {e}")
+
             # 1. Fetch Positions (Uses Cache/REST transparently)
             open_positions = await self.broker.get_all_positions()
             
@@ -77,12 +106,23 @@ class OrderManager:
             loop = asyncio.get_event_loop()
             orderbook = await loop.run_in_executor(None, self.broker.rest_client.orderbook)
             
-            if orderbook.get('s') == 'ok':
+            if orderbook and isinstance(orderbook, dict) and orderbook.get('s') == 'ok':
                 pending = [o for o in orderbook.get('orderBook', []) if o['status'] == 6] # 6 = Pending
                 for order in pending:
                     logger.info(f"[STARTUP] Cancelling stale order {order['id']}")
                     await self.broker.cancel_order(order['id'])
             
+            elapsed_ms = (time.time() - start_time) * 1000
+            
+            if elapsed_ms > 3000:
+                logger.error(f"CRITICAL Slow Reconciliation {elapsed_ms:.0f}ms — possible position state lag")
+                if self.telegram:
+                    await self.telegram.send_alert(f"⚠️ Reconciliation lag {elapsed_ms:.0f}ms — check positions manually")
+            elif elapsed_ms > 1500:
+                logger.error(f"Slow Reconciliation {elapsed_ms:.0f}ms")
+            elif elapsed_ms > 500:
+                logger.warning(f"Slow Reconciliation {elapsed_ms:.0f}ms")
+                
             logger.info("✅ [STARTUP] Reconciliation Done.")
             
         except Exception as e:
