@@ -316,8 +316,12 @@ def main():
         while True:
             try:
                 if not market_session.should_trade_now():
-                    if market_session.get_current_state() == 'POST_MARKET':
+                    current_state = market_session.get_current_state()
+                    if current_state == 'POST_MARKET':
                         logger.info("🌙 Market Closed. Stopping Loop.")
+                        break
+                    elif current_state == 'EOD_WINDOW':
+                        logger.info("🌙 EOD WINDOW active — breaking scan loop.")
                         break
                     time.sleep(60)
                     continue
@@ -373,6 +377,16 @@ def main():
                         signal = analyzer.check_setup(symbol, cand['ltp'], cand.get('oi',0), cand.get('history_df'))
                     
                     if signal:
+                        if signal.get('cooldown_blocked'):
+                            try:
+                                import datetime
+                                unlock_at = analyzer.signal_manager.last_signal_time[symbol] + datetime.timedelta(minutes=analyzer.signal_manager.cooldown_minutes)
+                                bot.focus_engine.queue_cooldown_signal(signal, unlock_at)
+                                logger.info(f"PENDING {symbol} — queued for cooldown unlock at {unlock_at.strftime('%H:%M')}")
+                            except Exception as e:
+                                logger.error(f"Failed to queue cooldown signal: {e}")
+                            continue
+
                         logger.info(f"[SIGNAL] {symbol} Found.")
                         
                         if signal.get('edges_detected'):

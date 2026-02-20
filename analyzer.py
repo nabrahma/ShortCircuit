@@ -207,14 +207,8 @@ class FyersAnalyzer:
         return None
 
     def _check_filters(self, symbol: str) -> bool:
-        """Runs pre-analysis checks: Signal Manager, Market Regime."""
-        # 1. Signal Manager
-        can_signal, reason = self.signal_manager.can_signal(symbol)
-        if not can_signal:
-            logger.info(f"BLOCKED by Signal Manager: {symbol} - {reason}")
-            return False
-            
-        # 2. Market Regime
+        """Runs pre-analysis checks: Market Regime."""
+        # 1. Market Regime
         allow_short, reason = self.market_context.should_allow_short()
         if not allow_short:
             logger.info(f"BLOCKED by Market Regime: {symbol} - {reason}")
@@ -618,11 +612,8 @@ class FyersAnalyzer:
             logger.warning(f"   [ML] Logging error: {e}")
         
         # Record & Return
-        self.signal_manager.record_signal(symbol, ltp, sl_price, pattern_desc)
-        remaining = self.signal_manager.get_remaining_signals()
-        logger.info(f"   Signals remaining today: {remaining}")
-        
-        return {
+        # Record & Return
+        signal_data = {
             'symbol': symbol,
             'ltp': ltp,
             'pattern': pattern_desc,
@@ -634,3 +625,20 @@ class FyersAnalyzer:
             'atr': atr,                       # Phase 41.2: For legacy simulation
             'meta': meta_str
         }
+
+        can_signal, reason = self.signal_manager.can_signal(symbol)
+        if not can_signal:
+            if "Cooldown" in reason:
+                logger.info(f"   [PENDING] {symbol} blocked by cooldown.")
+                signal_data['cooldown_blocked'] = True
+                signal_data['cooldown_reason'] = reason
+                return signal_data
+            else:
+                logger.info(f"   [BLOCKED] by Signal Manager: {symbol} - {reason}")
+                return None
+        
+        self.signal_manager.record_signal(symbol, ltp, sl_price, pattern_desc)
+        remaining = self.signal_manager.get_remaining_signals()
+        logger.info(f"   Signals remaining today: {remaining}")
+        
+        return signal_data

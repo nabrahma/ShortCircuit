@@ -87,8 +87,8 @@ class FyersConnect:
 
         # Step 2: Saved token invalid/missing - run auth flow ONCE
         if os.getenv("FYERS_NO_INTERACTIVE"):
-            logger.warning("⚠️ Interactive login disabled (FYERS_NO_INTERACTIVE). Cannot authenticate.")
-            return
+            logger.error("⚠️ Token expired/missing. FYERS_NO_INTERACTIVE is set — cannot re-authenticate.")
+            raise ConnectionError("No valid token and interactive login is disabled.")
 
         logger.info("⚠️ Token Invalid/Expired. Re-login required.")
         self._access_token = self._run_auth_flow()

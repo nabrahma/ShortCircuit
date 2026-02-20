@@ -31,6 +31,15 @@ class FocusEngine:
         self.is_running = False
         self.telegram_bot = None # Injected by main.py
         
+        # Validation Gate & Cooldown Queue (Phase 37 / 43.4)
+        self.pending_signals = {} # {symbol: {signal_data, entry_trigger, invalidation_trigger, timestamp}}
+        self.cooldown_signals = {} # Phase 43.4: {symbol: {data, unlock_at}}
+        self.monitoring_active = False
+        self.monitor_thread = None
+        
+        # Auto-Recovery on Init
+        self.attempt_recovery()
+        
     async def get_position_snapshot(self, symbol: str) -> dict:
         """
         Phase 42.3.1: Provide live position data for Telegram Dashboard.
@@ -54,14 +63,6 @@ class FocusEngine:
             'status': t.get('status', 'OPEN'),
             'orderflow_bias': t.get('orderflow_bias', 'NEUTRAL')
         }
-        
-        # Validation Gate (Phase 37)
-        self.pending_signals = {} # {symbol: {signal_data, entry_trigger, invalidation_trigger, timestamp}}
-        self.monitoring_active = False
-        self.monitor_thread = None
-        
-        # Auto-Recovery on Init
-        self.attempt_recovery()
 
     def add_pending_signal(self, signal_data):
         """
@@ -92,6 +93,55 @@ class FocusEngine:
         if not self.monitoring_active:
             self.start_pending_monitor()
 
+        # Start Background Monitor if not running
+        if not self.monitoring_active:
+            self.start_pending_monitor()
+
+    def queue_cooldown_signal(self, signal_data, unlock_at):
+        """Phase 43.4: Queues a signal that passed gates but hit cooldown."""
+        symbol = signal_data['symbol']
+        self.cooldown_signals[symbol] = {
+            'data': signal_data,
+            'unlock_at': unlock_at
+        }
+        # Start Background Monitor if not running
+        if not self.monitoring_active:
+            self.start_pending_monitor()
+
+    def flush_pending_signals(self):
+        """Phase 43.4: Promotes signals whose cooldown has expired."""
+        now = datetime.datetime.now()
+        
+        # EOD Guard
+        if now.hour == 15 and now.minute >= 10:
+            if self.cooldown_signals:
+                logger.info("EOD Window active - clearing pending cooldown signals.")
+                self.cooldown_signals.clear()
+            return
+            
+        for symbol, meta in list(self.cooldown_signals.items()):
+            if now >= meta['unlock_at']:
+                # Re-validate live gain before promoting
+                try:
+                    data = {"symbols": symbol}
+                    resp = self.fyers.quotes(data=data)
+                    if 'd' in resp and resp['d']:
+                        ltp = resp['d'][0]['v']['lp']
+                        open_val = resp['d'][0]['v']['open_price']
+                        if open_val > 0:
+                            gain = ((ltp - open_val) / open_val) * 100
+                            
+                            # Assuming SC uses DAY_GAIN_PCT_THRESHOLD as positive scalar e.g. 5.0
+                            if abs(gain) >= config.DAY_GAIN_PCT_THRESHOLD: 
+                                logger.info(f"PROMOTED {symbol} from pending — cooldown expired, gain {gain:.2f}%")
+                                self.add_pending_signal(meta['data'])
+                            else:
+                                logger.info(f"DROPPED {symbol} from pending — gain {gain:.2f}% < threshold")
+                except Exception as e:
+                    logger.error(f"Failed to re-evaluate cooldown signal {symbol}: {e}")
+                    
+                del self.cooldown_signals[symbol]
+
     def start_pending_monitor(self):
         """Starts the background thread for validation checks."""
         self.monitoring_active = True
@@ -104,6 +154,14 @@ class FocusEngine:
         Background loop to check pending signals every 2 seconds.
         """
         while self.monitoring_active:
+            # 1. Check Cooldown Signals (Phase 43.4)
+            if self.cooldown_signals:
+                try:
+                    self.flush_pending_signals()
+                except Exception as e:
+                    logger.error(f"Cooldown flush error: {e}")
+
+            # 2. Check Validation Gate Signals
             if not self.pending_signals:
                 time.sleep(5) # Sleep longer if empty
                 continue
