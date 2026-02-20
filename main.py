@@ -4,6 +4,8 @@ import threading
 import sys
 import os
 import config
+import pytz
+IST = pytz.timezone('Asia/Kolkata')
 # Force UTF-8 for Console Output (Windows Fix)
 if sys.platform.startswith('win'):
     try:
@@ -304,7 +306,11 @@ def main():
     # 7. Main Loop
     SCAN_INTERVAL = 60
     import datetime
+    SCAN_INTERVAL = 60
+    import datetime
     last_reconciliation = datetime.datetime.now()
+    consecutive_errors = 0
+    MAX_ERRORS = 5
     
     try:
         while True:
@@ -327,7 +333,7 @@ def main():
                 # Check Time for Auto-Exit
                 # Phase 43: Robust Time Check (Issue 1)
                 # Use proper time objects, not string comparison
-                now_ist = datetime.datetime.now(market_session.IST)
+                now_ist = datetime.datetime.now(IST)
                 current_time = now_ist.time()
                 
                 # Parse configured time once
@@ -388,12 +394,20 @@ def main():
                 sleep_time = max(0, SCAN_INTERVAL - elapsed)
                 time.sleep(sleep_time)
 
+                # Reset error count on successful iteration
+                consecutive_errors = 0
+
             except KeyboardInterrupt:
                 logger.info("Manually Stopped.")
                 scalper_stop_event.set()
                 break
             except Exception as e:
-                logger.error(f"Loop Error: {e}")
+                consecutive_errors += 1
+                logger.error(f"Loop Error: {e} (Attempt {consecutive_errors}/{MAX_ERRORS})")
+                if consecutive_errors >= MAX_ERRORS:
+                    logger.critical("❌ Circuit Breaker Tripped: Too many consecutive errors. Shutting down.")
+                    scalper_stop_event.set()
+                    break
                 time.sleep(10)
                 
     finally:

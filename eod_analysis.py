@@ -35,7 +35,8 @@ class EODAnalyzer:
         try:
             from fyers_connect import FyersConnect
             # Singleton will reuse existing token/session if available
-            conn = FyersConnect() 
+            os.environ["FYERS_NO_INTERACTIVE"] = "true"
+            conn = FyersConnect()  
             return conn.authenticate()
         except Exception as e:
             logger.error(f"Fyers auth failed: {e}")
