@@ -90,10 +90,26 @@ class FyersScanner:
             
             # Check Time: If < 10:00 AM, we won't have many candles (Market opens 09:15)
             import datetime
+            import config
             now_dt = datetime.datetime.fromtimestamp(to_date)
             is_early_morning = now_dt.hour < 10
             
-            min_candles = 5 if is_early_morning else 10  # Reduced from 15 (30min has ~10-30 candles)
+            # RVOL validity gate — replaces is_early_morning heuristic
+            # RVOL calculation requires minimum 20 candles (iloc[-20:-2])
+            # Market opens 9:15 AM IST → earliest valid signal: 9:35 AM
+            _mins_open = config.minutes_since_market_open()
+            _rvol_valid = _mins_open >= config.RVOL_MIN_CANDLES  # 20 minutes from open
+            
+            if config.RVOL_VALIDITY_GATE_ENABLED:
+                if not _rvol_valid:
+                    logger.warning(f"SKIP {symbol} — RVOL_VALIDITY_GATE: {_mins_open:.1f} min since open — need {config.RVOL_MIN_CANDLES} min for valid RVOL. Skip.")
+                    self.quality_reject_counts[symbol] = self.quality_reject_counts.get(symbol, 0) + 1
+                    return False, None
+                # Candle count: keep as absolute floor for API data integrity only
+                min_candles = 10  # No longer varies by time — cliff-edge removed
+            else:
+                # Rollback to pre-PRD heuristic behavior
+                min_candles = 5 if is_early_morning else 10
             
             if 'candles' in response and len(response['candles']) >= min_candles:
                 candles = response['candles'] # [[ts, o, h, l, c, v], ...]

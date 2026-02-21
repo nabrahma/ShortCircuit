@@ -83,6 +83,20 @@ SCANNER_PARALLEL_WORKERS = 10  # Max concurrent API calls
 # SCALPER RISK MANAGEMENT (Phase 41.2)
 # ============================================================================
 
+import datetime
+import pytz
+
+# Early Session Data Validity Gate Phase 44.3
+RVOL_MIN_CANDLES = 20           # Minimum candles for valid RVOL calculation
+RVOL_VALIDITY_GATE_ENABLED = True  # Feature flag — set False to disable instantly
+
+def minutes_since_market_open() -> float:
+    """Returns minutes elapsed since NSE market open (9:15 AM IST) safely accounting for server timezone."""
+    IST = pytz.timezone('Asia/Kolkata')
+    now_ist = datetime.datetime.now(IST)
+    open_today = now_ist.replace(hour=9, minute=15, second=0, microsecond=0)
+    return max(0.0, (now_ist - open_today).total_seconds() / 60.0)
+
 # Feature flag — Set to True to enable new scalper system
 USE_SCALPER_RISK_MANAGEMENT = False  # DEFAULT: OFF (backward compatible)
 

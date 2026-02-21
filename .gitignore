@@ -16,7 +16,9 @@ __pycache__/
 *.py[cod]
 *$py.class
 *.pyc
+*.pyo
 .pytest_cache/
+.venv/
 
 # ── Logs (machine-specific, not code) ─────────────────────────
 logs/
@@ -39,6 +41,9 @@ desktop.ini
 verification/
 # Also ignore the generated report if generic
 terminal_log.md
+
+# ── Runtime Files ─────────────────────────────────────────────
+shortcircuit.lock
 
 # ── Data Directory (runtime data, not code) ───────────────────
 data/

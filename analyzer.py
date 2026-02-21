@@ -3,6 +3,7 @@ import logging
 import datetime
 import csv
 import os
+import config
 from typing import Optional, Dict, Any, Tuple
 from collections import deque
 
@@ -112,6 +113,12 @@ class FyersAnalyzer:
              
         if df is None or df.empty:
 
+            return None
+            
+        # Hard guard (Change 3): if df has fewer than RVOL_MIN_CANDLES rows, RVOL is unreliable.
+        # This fixes a confirmed false-positive bug where avg_vol=0 -> rvol=0, falsely passing as exhaustion vacuum.
+        if config.RVOL_VALIDITY_GATE_ENABLED and len(df) < config.RVOL_MIN_CANDLES:
+            logger.warning(f"SKIP {symbol} — RVOL_VALIDITY_GATE: Only {len(df)} candles — need {config.RVOL_MIN_CANDLES}")
             return None
             
         # Define prev_df (used for structural analysis components that need history context)
@@ -461,6 +468,12 @@ class FyersAnalyzer:
         else:
             df = self.get_history(symbol)
         if df is None or df.empty:
+            return None
+
+        # Hard guard (Change 3): if df has fewer than RVOL_MIN_CANDLES rows, RVOL is unreliable.
+        # This fixes a confirmed false-positive bug where avg_vol=0 -> rvol=0, falsely passing as exhaustion vacuum.
+        if config.RVOL_VALIDITY_GATE_ENABLED and len(df) < config.RVOL_MIN_CANDLES:
+            logger.warning(f"SKIP {symbol} — RVOL_VALIDITY_GATE: Only {len(df)} candles — need {config.RVOL_MIN_CANDLES}")
             return None
 
         prev_df = df.iloc[:-1]
