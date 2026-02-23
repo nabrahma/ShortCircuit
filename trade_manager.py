@@ -1,4 +1,5 @@
 import os
+import json
 import time
 import logging
 from datetime import datetime
@@ -213,8 +214,10 @@ class TradeManager:
 
         tick_size = signal.get('tick_size', 0.05)
 
-        # Calculate Qty (uses base capital, not buying power)
-        qty = int(config.CAPITAL_PER_TRADE / ltp)
+        # Phase 44.4 follow-up: align sizing with live available capital (matches OrderManager path)
+        cap_status = self.capital_manager.get_status() if self.capital_manager else {}
+        available_capital = float(cap_status.get('available', config.CAPITAL_PER_TRADE))
+        qty = int(available_capital / ltp)
 
         # ── PHASE 42.1: QTY ZERO CHECK ────────────────────────────
         if qty == 0:
@@ -230,7 +233,7 @@ class TradeManager:
                         f"Symbol: {symbol}\n"
                         f"Price: ₹{ltp:.2f}\n"
                         f"Reason: Stock too expensive\n"
-                        f"(Need minimum ₹{ltp:.2f}, have ₹{config.CAPITAL_PER_TRADE:.0f} base capital)"
+                        f"(Need minimum ₹{ltp:.2f}, have ₹{available_capital:.2f} available capital)"
                     )
                     self.bot.send_alert(msg)
                 except Exception:
@@ -247,8 +250,6 @@ class TradeManager:
 
             self._log_signal_skipped(signal, capital_check['reason'], qty, required_cost)
 
-            # Telegram alert
-            cap_status = self.capital_manager.get_status()
             # Telegram alert
             cap_status = self.capital_manager.get_status()
             if self.bot:
@@ -288,18 +289,39 @@ class TradeManager:
 
             # ── PLACE ENTRY ORDER ─────────────────────────────────
             try:
+                product_type = "INTRADAY"
                 entry_data = {
                     "symbol": symbol,
                     "qty": qty,
                     "type": 2,   # Market Order
                     "side": -1,  # Sell
-                    "productType": "INTRADAY",
+                    "productType": product_type,
                     "limitPrice": 0,
                     "stopPrice": 0,
                     "validity": "DAY",
                     "disclosedQty": 0,
                     "offlineOrder": False,
                 }
+
+                # Phase 44.4: Pre-execution payload logging
+                logger.debug(
+                    "[PRE-EXEC] trade_manager.execute_logic order_snapshot=%s",
+                    json.dumps(
+                        {
+                            "symbol": symbol,
+                            "qty": qty,
+                            "ltp": ltp,
+                            "productType": product_type,
+                            "entry_data": entry_data,
+                        },
+                        default=str,
+                    ),
+                )
+                logger.debug(f"[PRE-EXEC] Entry payload: {json.dumps(entry_data, indent=2)}")
+                logger.info(
+                    f"[PRE-EXEC] {symbol} SELL qty={qty} @ ₹{ltp:.2f} "
+                    f"(cost=₹{required_cost:.2f}, avail=₹{available_capital:.2f})"
+                )
 
                 resp_entry = self.fyers.place_order(data=entry_data)
 
@@ -375,15 +397,53 @@ class TradeManager:
                     }
 
                 else:
-                    # ENTRY FAILED
+                    # ENTRY FAILED — Phase 44.4: Telegram alert with full payload
+                    error_code = resp_entry.get('code', 'N/A')
+                    error_msg = resp_entry.get('message', 'Unknown Error')
                     logger.error(f"Entry FAILED: {resp_entry}")
+                    
+                    # Determine suspected field
+                    suspected = "Unknown"
+                    if error_code == -50 or 'Invalid input' in str(error_msg):
+                        if qty == 0:
+                            suspected = "qty (calculated as 0)"
+                        elif required_cost > self.capital_manager.available:
+                            suspected = f"qty × price (₹{required_cost:.0f}) exceeds margin (₹{self.capital_manager.available:.0f})"
+                        else:
+                            suspected = "productType or payload field type"
+                    
+                    if self.bot:
+                        try:
+                            self.bot.send_alert(
+                                f"🚨 *ORDER FAILED*\n\n"
+                                f"Symbol: `{symbol}`\n"
+                                f"Error:  `code {error_code}: {error_msg}`\n\n"
+                                f"━━━ Payload ━━━\n"
+                                f"Qty:     {qty}\n"
+                                f"LTP:     ₹{ltp:.2f}\n"
+                                f"Capital: ₹{required_cost:.2f}\n"
+                                f"Avail:   ₹{self.capital_manager.available:.2f}\n\n"
+                                f"🔍 Suspected: {suspected}"
+                            )
+                        except Exception:
+                            pass
+                    
                     return {
                         "status": "ERROR",
-                        "msg": f"[FAIL] Entry Failed: {resp_entry.get('message', 'Unknown Error')}"
+                        "msg": f"[FAIL] Entry Failed: code {error_code} — {error_msg}"
                     }
 
             except Exception as e:
                 logger.error(f"Execution Exception: {e}")
+                if self.bot:
+                    try:
+                        self.bot.send_alert(
+                            f"🚨 *EXECUTION EXCEPTION*\n\n"
+                            f"Symbol: `{symbol}`\n"
+                            f"Error: `{str(e)[:200]}`"
+                        )
+                    except Exception:
+                        pass
                 return {
                     "status": "ERROR",
                     "msg": f"[FAIL] Execution Exception: {e}"

@@ -41,6 +41,7 @@ desktop.ini
 verification/
 # Also ignore the generated report if generic
 terminal_log.md
+md/
 
 # ── Runtime Files ─────────────────────────────────────────────
 shortcircuit.lock

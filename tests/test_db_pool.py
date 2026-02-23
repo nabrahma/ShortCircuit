@@ -4,6 +4,10 @@ import pytest
 import logging
 from database import DatabaseManager
 import time
+from dotenv import load_dotenv
+
+# Ensure DB_* env vars are loaded even when this test is run in isolation.
+load_dotenv()
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -22,12 +26,21 @@ async def test_connection_pooling():
     
     logger.info("✅ Connection Pool Initialized")
 
-    # Test Concurrent Writes
+    table_name = "test_concurrency"
+
+    # Prepare table once (DDL outside concurrent workers to avoid race on pg_type)
+    async with pool.acquire() as conn:
+        await conn.execute(f"CREATE TABLE IF NOT EXISTS {table_name} (id INT, val TEXT)")
+        await conn.execute(f"TRUNCATE TABLE {table_name}")
+
+    # Test concurrent writes
     async def write_op(i):
         async with pool.acquire() as conn:
-            # Create a dummy table if not exists
-            await conn.execute("CREATE TABLE IF NOT EXISTS test_concurrency (id INT, val TEXT)")
-            await conn.execute("INSERT INTO test_concurrency (id, val) VALUES ($1, $2)", i, f"test_{i}")
+            await conn.execute(
+                f"INSERT INTO {table_name} (id, val) VALUES ($1, $2)",
+                i,
+                f"test_{i}"
+            )
             return i
 
     start_time = time.time()
@@ -43,6 +56,6 @@ async def test_connection_pooling():
 
     # Clean up
     async with pool.acquire() as conn:
-        await conn.execute("DROP TABLE IF EXISTS test_concurrency")
+        await conn.execute(f"DROP TABLE IF EXISTS {table_name}")
     
     await db.close_pool()

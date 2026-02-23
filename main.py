@@ -251,6 +251,10 @@ def main():
     scanner = FyersScanner(fyers_client)
     analyzer = FyersAnalyzer(fyers_client, morning_high=mh, morning_low=ml)
     
+    # ── PHASE 44.4: Inject dependencies for rich command UX ──
+    bot.signal_manager = analyzer.signal_manager
+    bot.market_session = market_session
+    
     # ── PHASE 41.3: INTELLIGENT EXITS ──
     if getattr(config, 'ENABLE_DISCRETIONARY_EXITS', True):
         from discretionary_engine import DiscretionaryEngine
@@ -357,6 +361,12 @@ def main():
                 # A. Scan
                 candidates = scanner.scan_market()
                 
+                # Phase 44.4: Update scan metadata for /status and /resume
+                bot._scan_metadata = {
+                    'last_scan_time': datetime.datetime.now(),
+                    'candidate_count': len(candidates) if candidates else 0,
+                }
+                
                 if not candidates:
                     logger.info("No candidates. Sleeping...")
                 
@@ -435,6 +445,20 @@ def main():
             subprocess.run(["python", "dump_terminal_log.py"], check=False)
         except Exception as e:
             logger.error(f"Failed to update terminal log: {e}")
+
+        # Phase 44.4: Send EOD Summary to Telegram
+        try:
+            logger.info("📊 Sending EOD Summary to Telegram...")
+            bot.send_alert("📊 Generating End-of-Day Summary...")
+            # Use send_eod_summary via async bridge
+            import asyncio
+            if hasattr(bot, '_loop') and bot._loop and bot._loop.is_running():
+                future = asyncio.run_coroutine_threadsafe(bot.send_eod_summary(), bot._loop)
+                future.result(timeout=15)  # Wait up to 15s
+            else:
+                logger.warning("[EOD] Bot event loop not running, skipping EOD summary")
+        except Exception as e:
+            logger.error(f"Failed to send EOD summary: {e}")
 
         # 2. Run EOD Analysis (Issue 2)
         try:

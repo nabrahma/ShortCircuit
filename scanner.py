@@ -222,6 +222,30 @@ class FyersScanner:
             logger.info("No pre-candidates passed filter.")
             return []
 
+        # ── PHASE 44.4: ETF CLUSTER DEDUPLICATION (Section 7) ──────
+        # Silver ETFs (and future: GOLD, NIFTY) often fire simultaneously.
+        # Keep highest-volume member per cluster, suppress duplicates.
+        if getattr(config, 'ETF_CLUSTER_DEDUP_ENABLED', False):
+            cluster_keywords = getattr(config, 'ETF_CLUSTER_KEYWORDS', [])
+            for keyword in cluster_keywords:
+                keyword_upper = keyword.upper()
+                cluster = [c for c in pre_candidates if keyword_upper in c['symbol'].upper()]
+                if len(cluster) > 1:
+                    # Sort by volume descending, keep the top one
+                    cluster.sort(key=lambda x: x['volume'], reverse=True)
+                    keeper = cluster[0]
+                    suppressed = cluster[1:]
+                    suppressed_syms = [c['symbol'] for c in suppressed]
+                    
+                    # Remove suppressed from pre_candidates
+                    pre_candidates = [c for c in pre_candidates if c not in suppressed]
+                    
+                    logger.info(
+                        f"[DEDUP] {keyword} cluster: kept {keeper['symbol']} "
+                        f"(vol={keeper['volume']:,}), suppressed {len(suppressed)}: "
+                        f"{', '.join(suppressed_syms)}"
+                    )
+
         logger.info(f"Pre-filter: {len(pre_candidates)} candidates. Starting parallel quality check...")
 
         # Phase B: Parallel history + quality check

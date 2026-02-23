@@ -175,7 +175,22 @@ async def test_order_manager_backward_compatible():
     broker_mock.place_order.return_value = 'ORDER123'
     broker_mock.wait_for_fill.return_value = True
     broker_mock.get_order_status.return_value = 'FILLED'
-    broker_mock.get_ltp.return_value = 100.0 # Mocking potential missing method
+    broker_mock.get_ltp.return_value = 100.0
+
+    # Phase 44.4: capital_manager.get_status() now called for position sizing
+    capital_mock.get_status.return_value = {
+        'base_capital': 1800.0,
+        'leverage': 5.0,
+        'total_buying_power': 9000.0,
+        'available': 9000.0,
+        'in_use': 0.0,
+        'positions_count': 0,
+        'positions': {}
+    }
+
+    # Phase 44.4: telegram_bot may receive send_alert calls (awaited in order_manager)
+    alert_mock.send_alert = AsyncMock()
+    alert_mock.is_auto_mode = MagicMock(return_value=True)
     
     om = OrderManager(
         broker=broker_mock,

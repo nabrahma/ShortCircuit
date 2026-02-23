@@ -63,10 +63,10 @@ class EODAnalyzer:
 
     def _generate_session_log(self, date):
         """
-        Extracts log entries for the specific date and writes them to terminal_log.md.
+        Extracts log entries for the specific date and writes them to md/terminal_log.md.
         """
         log_path = getattr(config, 'LOG_FILE', 'logs/bot.log')
-        output_path = 'terminal_log.md'
+        output_path = 'md/terminal_log.md'
         date_str = str(date)
 
         if not os.path.exists(log_path):
@@ -74,6 +74,7 @@ class EODAnalyzer:
             return
 
         try:
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
             matching_lines = []
             with open(log_path, 'r', encoding='utf-8', errors='replace') as f:
                 for line in f:

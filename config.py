@@ -227,3 +227,14 @@ EOD_CONFIG = {
     'save_reports_locally': True,
     'auto_send_telegram': True
 }
+
+# ============================================================================
+# PHASE 44.4: TELEGRAM UX + EXECUTION OBSERVABILITY
+# ============================================================================
+
+# ETF Cluster Deduplication (Section 7)
+ETF_CLUSTER_DEDUP_ENABLED = True
+ETF_CLUSTER_KEYWORDS = ["SILVER"]  # Extend: ["SILVER", "GOLD", "NIFTY"]
+
+# Editable Signal Message Flow (Section 2.1/2.2) — behind feature flag
+EDITABLE_SIGNAL_FLOW_ENABLED = False  # Set True only after stability confirmed

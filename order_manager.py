@@ -1,11 +1,19 @@
 import asyncio
+import json
 import logging
+import math
 import uuid
 from datetime import datetime
 from typing import Dict, Optional, Any
 from fyers_broker_interface import FyersBrokerInterface
 
 logger = logging.getLogger(__name__)
+
+# FYERS orderbook status code used for filled/traded orders.
+# Sources:
+# 1) FYERS API Connect docs (Transaction/Orderbook section): https://myapi.fyers.in/docsv3/#tag/Transaction-Info
+# 2) FYERS community status-code mapping thread: https://fyers.in/community/questions-5gz5j8db/post/what-are-the-order-status-codes-in-fyers-api-v3-orderbook-response-FbEQ31ykj5fN7WJ
+FYERS_ORDER_STATUS_TRADED = 2
 
 class OrderManager:
     """
@@ -41,6 +49,117 @@ class OrderManager:
         if symbol not in self.position_locks:
             self.position_locks[symbol] = asyncio.Lock()
         return self.position_locks[symbol]
+
+    async def _finalize_closed_position(
+        self,
+        symbol: str,
+        reason: str,
+        exit_price: float = 0.0,
+        pnl: float = 0.0,
+        send_alert: bool = False,
+    ) -> None:
+        """
+        Shared close-path cleanup to keep state, capital, and DB in sync.
+        """
+        self.active_positions.pop(symbol, None)
+        self.hard_stops.pop(symbol, None)
+        self.exit_in_progress.pop(symbol, None)
+
+        if self.capital:
+            try:
+                self.capital.release(symbol)
+            except Exception as e:
+                logger.error(f"[CLOSE] Capital release failed for {symbol}: {e}")
+
+        if self.db:
+            try:
+                await self.db.log_trade_exit(
+                    symbol,
+                    {
+                        'exit_price': exit_price,
+                        'pnl': pnl,
+                        'exit_reason': reason,
+                        'status': 'CLOSED',
+                    }
+                )
+            except Exception as e:
+                logger.error(f"[CLOSE] DB close log failed for {symbol}: {e}")
+
+        if send_alert and self.telegram and hasattr(self.telegram, 'send_alert'):
+            try:
+                await self.telegram.send_alert(
+                    f"🛑 **HARD STOP FILLED**\n\n"
+                    f"Symbol: `{symbol}`\n"
+                    f"Exit Price: ₹{exit_price:.2f}\n"
+                    f"Reason: {reason}"
+                )
+            except Exception:
+                pass
+
+    async def monitor_hard_stop_status(self, symbol: str) -> bool:
+        """
+        Hard-stop monitor used by FocusEngine's sync loop.
+        Detects SL fill from broker orderbook and clears local position state.
+        Returns True when hard-stop fill is detected and state is closed.
+        """
+        lock = self._get_lock(symbol)
+        async with lock:
+            pos = self.active_positions.get(symbol)
+            if not pos or pos.get('status') != 'OPEN':
+                return False
+
+            sl_id = pos.get('sl_id') or self.hard_stops.get(symbol)
+            if not sl_id:
+                return False
+
+            try:
+                orderbook = None
+                rest_client = getattr(self.broker, 'rest_client', None)
+                if rest_client and hasattr(rest_client, 'orderbook'):
+                    loop = asyncio.get_event_loop()
+                    orderbook = await loop.run_in_executor(None, rest_client.orderbook)
+                elif hasattr(self.broker, 'orderbook'):
+                    loop = asyncio.get_event_loop()
+                    # Legacy/mock fallback used in tests.
+                    orderbook = await loop.run_in_executor(None, self.broker.orderbook)
+
+                if not isinstance(orderbook, dict) or orderbook.get('s') != 'ok':
+                    return False
+
+                for order in orderbook.get('orderBook', []):
+                    if str(order.get('id')) != str(sl_id):
+                        continue
+
+                    if order.get('status') == FYERS_ORDER_STATUS_TRADED:
+                        # Status 2 is treated as traded/filled per FYERS v3 references.
+                        exit_price = 0.0
+                        for price_key in ('tradedPrice', 'tradePrice', 'limitPrice', 'stopPrice'):
+                            try:
+                                raw = order.get(price_key, 0)
+                                if raw:
+                                    exit_price = float(raw)
+                                    break
+                            except Exception:
+                                continue
+
+                        logger.warning(
+                            f"[HARD_STOP] Filled for {symbol} (sl_id={sl_id}). "
+                            "Syncing state/capital/db cleanup."
+                        )
+                        await self._finalize_closed_position(
+                            symbol=symbol,
+                            reason='HARD_STOP_FILLED',
+                            exit_price=exit_price,
+                            pnl=0.0,
+                            send_alert=True,
+                        )
+                        return True
+                    return False
+
+            except Exception as e:
+                logger.error(f"[HARD_STOP] Monitor failed for {symbol}: {e}")
+
+            return False
 
     async def get_today_trades(self) -> list:
         """Returns today's trades and PnL using the Fyers positions API."""
@@ -131,6 +250,7 @@ class OrderManager:
     async def enter_position(self, signal: dict) -> Optional[dict]:
         """
         Async Entry + SL-M using WebSocket Fill Detection.
+        Phase 44.4: Full execution observability.
         """
         symbol = signal['symbol']
         lock = self._get_lock(symbol)
@@ -151,21 +271,77 @@ class OrderManager:
                     return None
             # =========================================================
 
-            # Basic Sizing Logic
-            capital = 10000 # Default or from capital_manager
+            # ── PHASE 44.4: CAPITAL-AWARE SIZING ──────────────────────
+            # Get real buying power from capital_manager (fixes code -50 root cause)
+            buying_power = 9000  # Fallback default
             if self.capital:
-                # Placeholder for capital manager logic if implemented
-                pass
-
-            ltp = signal.get('ltp', 100)
-            if ltp == 0: ltp = await self.broker.get_ltp(symbol) or 0
-            if ltp == 0: return None
+                cap_status = self.capital.get_status()
+                buying_power = cap_status.get('available', 9000)
             
-            qty = int(capital / ltp)
-            if qty == 0: return None
+            ltp = signal.get('ltp', 0)
+            if ltp == 0: ltp = await self.broker.get_ltp(symbol) or 0
+            if ltp == 0:
+                logger.error(f"❌ [ENTRY] {symbol}: LTP is 0, cannot size position")
+                return None
+            
+            # Calculate quantity with breakdown
+            raw_qty = buying_power / ltp
+            qty = int(math.floor(raw_qty))
+            required_capital = qty * ltp
+            
+            logger.info(
+                f"[SIZING] {symbol}: buying_power=₹{buying_power:.2f} / "
+                f"ltp=₹{ltp:.2f} = {raw_qty:.4f} → floor → qty={qty} "
+                f"(cost=₹{required_capital:.2f})"
+            )
+            
+            # ── QTY ZERO GUARD ────────────────────────────────────────
+            if qty == 0:
+                msg = (
+                    f"🚫 *ORDER BLOCKED — QTY ZERO*\n\n"
+                    f"Symbol:  `{symbol}`\n"
+                    f"LTP:     ₹{ltp:.2f}\n"
+                    f"Capital: ₹{buying_power:.2f}\n\n"
+                    f"Stock too expensive for available buying power.\n"
+                    f"Need minimum ₹{ltp:.2f} per share."
+                )
+                logger.warning(f"❌ [ENTRY] {symbol}: qty=0 (₹{buying_power:.2f} / ₹{ltp:.2f})")
+                if self.telegram and hasattr(self.telegram, 'send_alert'):
+                    await self.telegram.send_alert(msg)
+                return None
+            
+            # ── OVER-MARGIN PRE-FLIGHT CHECK ──────────────────────────
+            if required_capital > buying_power:
+                msg = (
+                    f"🚫 *ORDER BLOCKED — OVER MARGIN*\n\n"
+                    f"Symbol:   `{symbol}`\n"
+                    f"Qty:      {qty} × ₹{ltp:.2f} = ₹{required_capital:.2f}\n"
+                    f"Available: ₹{buying_power:.2f}\n"
+                    f"Shortfall: ₹{required_capital - buying_power:.2f}\n\n"
+                    f"⚠️ This would have caused Fyers `code -50`."
+                )
+                logger.error(f"🚫 [ENTRY] {symbol}: over-margin ₹{required_capital:.2f} > ₹{buying_power:.2f}")
+                if self.telegram and hasattr(self.telegram, 'send_alert'):
+                    await self.telegram.send_alert(msg)
+                return None
             
             signal_type = signal.get('signal_type', 'SHORT')
             side = 'SELL' if signal_type == 'SHORT' else 'BUY'
+            
+            # ── PRE-EXECUTION PAYLOAD LOG ─────────────────────────────
+            order_payload = {
+                'symbol': symbol,
+                'side': side,
+                'qty': qty,
+                'order_type': 'MARKET',
+                'productType': 'INTRADAY',
+                'ltp_at_signal': ltp,
+                'buying_power': buying_power,
+                'required_capital': required_capital,
+                'sizing_calc': f"floor({buying_power:.2f} / {ltp:.2f}) = floor({raw_qty:.4f}) = {qty}"
+            }
+            logger.debug(f"[PRE-EXEC] Entry payload: {json.dumps(order_payload, indent=2)}")
+            logger.info(f"[PRE-EXEC] {symbol} {side} qty={qty} @ ₹{ltp:.2f} (₹{required_capital:.2f})")
             
             try:
                 # 1. Place Entry Order
@@ -175,23 +351,34 @@ class OrderManager:
                     qty=qty,
                     order_type='MARKET'
                 )
-                logger.info(f"✅ Entry Placed: {entry_id}")
+                
+                # ── POST-SUCCESS: Order ID Confirmation ───────────────
+                logger.info(f"✅ Entry Placed: {entry_id} | {symbol} {side} x{qty}")
+                if self.telegram and hasattr(self.telegram, 'send_alert'):
+                    await self.telegram.send_alert(
+                        f"✅ *ENTRY ORDER PLACED*\n\n"
+                        f"Symbol: `{symbol}` {side}\n"
+                        f"Qty: {qty} × ₹{ltp:.2f}\n"
+                        f"Order ID: `{entry_id}`"
+                    )
                 
                 # 2. Wait for Fill (WebSocket Push)
                 filled = await self.broker.wait_for_fill(entry_id, timeout=30.0)
                 if not filled:
                     logger.error(f"❌ Entry Timeout/Failed: {entry_id}")
-                    # Try to cancel?
                     await self.broker.cancel_order(entry_id)
+                    if self.telegram and hasattr(self.telegram, 'send_alert'):
+                        await self.telegram.send_alert(
+                            f"❌ *ENTRY FILL TIMEOUT*\n\n"
+                            f"Symbol: `{symbol}`\n"
+                            f"Order ID: `{entry_id}`\n"
+                            f"Action: Order cancelled."
+                        )
                     return None
                 
                 # 3. Get actual fill price
-                fill_price = ltp # Fallback
+                fill_price = ltp  # Fallback
                 status = await self.broker.get_order_status(entry_id)
-                # If we had access to fill price here easily we'd use it. 
-                # Broker interface caches updates, so we can check cache.
-                # But get_order_status returns string. 
-                # We trust the strategy logic roughly knows price.
                 
                 # 4. Place SL-M (Immediate)
                 sl_pct = 0.02
@@ -210,10 +397,17 @@ class OrderManager:
                 
                 if not sl_id:
                     logger.critical("🚨 SL PLACEMENT FAILED! EXITING NOW!")
+                    if self.telegram and hasattr(self.telegram, 'send_alert'):
+                        await self.telegram.send_alert(
+                            f"🚨 *SL PLACEMENT FAILED*\n\n"
+                            f"Symbol: `{symbol}`\n"
+                            f"Entry filled but stop loss could not be placed.\n"
+                            f"⚡ Emergency exit triggered."
+                        )
                     await self._emergency_exit(symbol, qty, sl_side)
                     return None
 
-                logger.info(f"🛡️ SL Placed: {sl_id}")
+                logger.info(f"🛡️ SL Placed: {sl_id} @ ₹{stop_price:.2f}")
                 self.hard_stops[symbol] = sl_id
                 
                 # 5. Register Position
@@ -224,7 +418,9 @@ class OrderManager:
                     'entry_id': entry_id,
                     'sl_id': sl_id,
                     'status': 'OPEN',
-                    'entry_time': datetime.now()
+                    'entry_time': datetime.now(),
+                    'entry_price': ltp,
+                    'stop_loss': stop_price,
                 }
                 self.active_positions[symbol] = pos_state
                 
@@ -240,8 +436,38 @@ class OrderManager:
                 return pos_state
                 
             except Exception as e:
-                logger.error(f"Entry Exception: {e}")
+                # ── POST-FAILURE: Telegram Alert ──────────────────────
+                error_msg = str(e)
+                logger.error(f"❌ [ENTRY] Exception for {symbol}: {error_msg}")
+                
+                # Determine suspected field from error pattern
+                suspected = "Unknown"
+                if "Invalid input" in error_msg or "code -50" in error_msg.lower():
+                    if qty == 0:
+                        suspected = "qty (calculated as 0)"
+                    elif required_capital > buying_power:
+                        suspected = "qty × price exceeds margin"
+                    else:
+                        suspected = "productType or offlineOrder type"
+                
+                failure_msg = (
+                    f"🚨 *ORDER FAILED*\n\n"
+                    f"Symbol: `{symbol}` {side}\n"
+                    f"Error:  `{error_msg[:200]}`\n\n"
+                    f"━━━ Payload ━━━\n"
+                    f"Qty:     {qty}\n"
+                    f"LTP:     ₹{ltp:.2f}\n"
+                    f"Capital: ₹{required_capital:.2f}\n"
+                    f"Avail:   ₹{buying_power:.2f}\n"
+                    f"Sizing:  floor({buying_power:.0f}/{ltp:.2f})={qty}\n\n"
+                    f"🔍 Suspected: {suspected}"
+                )
+                
+                if self.telegram and hasattr(self.telegram, 'send_alert'):
+                    await self.telegram.send_alert(failure_msg)
+                    
                 return None
+
 
     async def safe_exit(self, symbol: str, reason: str, emergency: bool = False) -> bool:
         """
@@ -286,9 +512,13 @@ class OrderManager:
                         pos_check = await self.broker.get_position(symbol)
                         if pos_check is None:
                             logger.info(f"POSITION_CLOSED_BY_SL {symbol}")
-                            # Clean up
-                            del self.active_positions[symbol]
-                            if symbol in self.hard_stops: del self.hard_stops[symbol]
+                            await self._finalize_closed_position(
+                                symbol=symbol,
+                                reason='HARD_STOP_FILLED',
+                                exit_price=0.0,
+                                pnl=0.0,
+                                send_alert=True,
+                            )
                             return True
                         
                         if not emergency:
@@ -311,15 +541,18 @@ class OrderManager:
                 
                 if filled:
                     logger.info(f"✅ Exit Filled: {symbol}")
-                    # DB Log
-                    if self.db:
-                        await self.db.log_trade_exit(symbol, {'exit_price': 0, 'pnl': 0})
                 else:
                     logger.error(f"❌ Exit Not Filled: {symbol}")
                     # Logic to handle stuck exit?
                 
                 # STEP 4: CLEANUP
-                del self.active_positions[symbol]
+                await self._finalize_closed_position(
+                    symbol=symbol,
+                    reason=reason,
+                    exit_price=0.0,
+                    pnl=0.0,
+                    send_alert=False,
+                )
                 if self.telegram:
                     await self.telegram.send_alert(f"✅ **CLOSED**: {symbol}")
                 

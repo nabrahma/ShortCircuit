@@ -1,86 +1,95 @@
-import sys
-import os
 import unittest
-from datetime import datetime
 
-# Add project root to path
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
-from database import DatabaseManager
 from eod_analyzer import EODAnalyzer
+
+
+class FakeDB:
+    def __init__(self):
+        self._trades = {}
+        self._soft_stop_events = []
+        self.daily_summaries = []
+
+    def log_trade_entry(self, data):
+        trade_id = data["trade_id_str"]
+        self._trades[trade_id] = {
+            "trade_id_str": trade_id,
+            "date": data["date"],
+            "symbol": data["symbol"],
+            "qty": data["qty"],
+            "entry_price": data["entry_price"],
+            "pnl": 0.0,
+            "pnl_pct": None,
+            "status": "OPEN",
+        }
+
+    def log_trade_exit(self, trade_id, data):
+        trade = self._trades[trade_id]
+        trade["pnl"] = data.get("pnl", 0.0)
+        trade["pnl_pct"] = data.get("pnl_pct")
+        trade["status"] = data.get("status", "CLOSED")
+
+    def log_event(self, event_type, details):
+        if event_type == "soft_stop_events":
+            self._soft_stop_events.append(details)
+        elif event_type == "daily_summaries":
+            self.daily_summaries.append(details)
+
+    def query(self, query, params):
+        date = params[0]
+        if "FROM trades" in query:
+            return [t for t in self._trades.values() if t["date"] == date]
+        if "FROM soft_stop_events" in query:
+            return [e for e in self._soft_stop_events if e["date"] == date]
+        return []
+
 
 class TestEODFlow(unittest.TestCase):
     def setUp(self):
-        # Use in-memory DB or temporary file for testing?
-        # DatabaseManager uses "data/short_circuit.db" by default.
-        # We'll use the real DB logic but maybe a test file if configurable.
-        # DatabaseManager hardcodes DB_FILE. 
-        # For this test, we'll use the real DB but insert test data with a specific date.
-        self.db = DatabaseManager()
-        self.test_date = "2099-01-01" # Future date to avoid messing up today's data
+        self.db = FakeDB()
+        self.test_date = "2099-01-01"
 
     def test_eod_pipeline(self):
-        print(f"\n[TEST] Running EOD Pipeline Test for {self.test_date}")
-        
-        
-        # 1. Clean up potential old test data
-        conn = self.db.get_connection()
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM trades WHERE date = ?", (self.test_date,))
-        cursor.execute("DELETE FROM soft_stop_events WHERE date = ?", (self.test_date,))
-        conn.commit()
-        conn.close()
-
-        # 2. Insert Mock Trades
         trade_id = "TEST_TRADE_001"
-        self.db.log_trade_entry({
-            'trade_id_str': trade_id,
-            'date': self.test_date,
-            'symbol': 'NSE:TEST-EQ',
-            'qty': 50,
-            'side': 'BUY',
-            'entry_price': 100.0,
-            'entry_time': f"{self.test_date} 09:30:00",
-            'sl': 98.0,
-            'hard_stop': 97.5,
-            'strategy_tag': 'TEST_STRAT'
-        })
-        
-        self.db.log_trade_exit(trade_id, {
-            'exit_price': 102.0,
-            'exit_time': f"{self.test_date} 10:00:00",
-            'pnl': 100.0, # (102-100)*50
-            'pnl_pct': 2.0,
-            'exit_reason': 'TARGET_HIT',
-            'status': 'CLOSED'
-        })
-        
-        # 3. Insert Mock Soft Stop Event
-        self.db.log_event('soft_stop_events', {
-            'trade_id': trade_id,
-            'date': self.test_date,
-            'symbol': 'NSE:TEST-EQ',
-            'soft_stop_decision': 'HOLD',
-            'soft_stop_trigger_price': 99.0,
-            'outcome': 'Simulated Recovery'
-        })
-        
-        # 4. Run Analyzer
-        analyzer = EODAnalyzer(None, self.db) # Fyers is None
+        self.db.log_trade_entry(
+            {
+                "trade_id_str": trade_id,
+                "date": self.test_date,
+                "symbol": "NSE:TEST-EQ",
+                "qty": 50,
+                "entry_price": 100.0,
+            }
+        )
+
+        self.db.log_trade_exit(
+            trade_id,
+            {
+                "exit_price": 102.0,
+                "pnl": 100.0,
+                "pnl_pct": 2.0,
+                "status": "CLOSED",
+            },
+        )
+
+        self.db.log_event(
+            "soft_stop_events",
+            {
+                "trade_id": trade_id,
+                "date": self.test_date,
+                "symbol": "NSE:TEST-EQ",
+                "soft_stop_decision": "HOLD",
+                "soft_stop_trigger_price": 99.0,
+            },
+        )
+
+        analyzer = EODAnalyzer(None, self.db)
         report = analyzer.run_daily_analysis(self.test_date)
-        
-        print(f"\n[REPORT OUTPUT]\n{report}")
-        
-        # 5. Verify Report Content
+
         self.assertIn("# 📊 EOD Report", report)
         self.assertIn("Net P&L", report)
         self.assertIn("Safety Audit", report)
         self.assertIn("Decisions Made: 1", report)
-        # Report format checks
-        if "No Trades Executed" in report:
-            self.fail("Analyzer failed to find inserted trades")
-            
-        print("[TEST] EOD Pipeline Verified Successfully")
+        self.assertNotIn("No Trades Executed", report)
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     unittest.main()

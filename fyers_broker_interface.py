@@ -607,7 +607,7 @@ class FyersBrokerInterface:
                 "side": 1 if side == 'BUY' else -1,
                 "productType": "INTRADAY",
                 "validity": "DAY",
-                "offlineOrder": "False"
+                "offlineOrder": False
             }
             if order_type == 'LIMIT':
                 data['limitPrice'] = price

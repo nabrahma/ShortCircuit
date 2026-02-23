@@ -321,16 +321,16 @@ class EODAnalyzer:
 
         # Phase 42.3: Generate Terminal Log for the analyzed day
         self._generate_session_log(date)
-        print(f"✓ Session log saved to terminal_log.md")
+        print(f"✓ Session log saved to md/terminal_log.md")
         print(f"\n{'='*80}\n")
 
     def _generate_session_log(self, date):
         """
-        Extracts log entries for the specific date and writes them to terminal_log.md.
+        Extracts log entries for the specific date and writes them to md/terminal_log.md.
         This allows the user to inspect the full session log for the analyzed day.
         """
         log_path = 'logs/bot.log'
-        output_path = 'terminal_log.md'
+        output_path = 'md/terminal_log.md'
         date_str = str(date)
 
         if not os.path.exists(log_path):
@@ -338,6 +338,7 @@ class EODAnalyzer:
             return
 
         try:
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
             matching_lines = []
             with open(log_path, 'r', encoding='utf-8', errors='replace') as f:
                 for line in f:

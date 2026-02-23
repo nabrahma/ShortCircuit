@@ -4,7 +4,7 @@ import re
 from datetime import datetime
 
 LOG_FILE = "logs/bot.log"
-OUTPUT_FILE = "terminal_log.md"
+OUTPUT_FILE = "md/terminal_log.md"
 DATE_STR = datetime.now().strftime('%Y-%m-%d')
 
 def update_log():
