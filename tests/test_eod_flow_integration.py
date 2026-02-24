@@ -101,7 +101,7 @@ class PostgresEODAdapter:
         self.logged_events = []
 
     def query(self, query: str, params):
-        if "FROM trades" in query:
+        if "FROM positions" in query:
             return self._trades
         if "FROM soft_stop_events" in query:
             return []
@@ -143,7 +143,7 @@ def test_eod_pipeline_postgres_integration():
     adapter = PostgresEODAdapter(trades)
     try:
         analyzer = EODAnalyzer(None, adapter)
-        report = analyzer.run_daily_analysis(session_date.isoformat())
+        report = _run(analyzer.run_daily_analysis(session_date.isoformat()))
 
         assert "# 📊 EOD Report" in report
         assert "No Trades Executed Today." not in report

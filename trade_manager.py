@@ -235,7 +235,7 @@ class TradeManager:
                         f"Reason: Stock too expensive\n"
                         f"(Need minimum ₹{ltp:.2f}, have ₹{available_capital:.2f} available capital)"
                     )
-                    self.bot.send_alert(msg)
+                    asyncio.create_task(self.bot.send_alert(msg))
                 except Exception:
                     pass
 
@@ -267,7 +267,7 @@ class TradeManager:
                         f"  Active Positions: {cap_status['positions_count']}\n\n"
                         f"Signal logged for EOD analysis."
                     )
-                    self.bot.send_alert(msg)
+                    asyncio.create_task(self.bot.send_alert(msg))
                 except Exception:
                     pass
 
@@ -414,7 +414,7 @@ class TradeManager:
                     
                     if self.bot:
                         try:
-                            self.bot.send_alert(
+                            asyncio.create_task(self.bot.send_alert(
                                 f"🚨 *ORDER FAILED*\n\n"
                                 f"Symbol: `{symbol}`\n"
                                 f"Error:  `code {error_code}: {error_msg}`\n\n"
@@ -424,7 +424,7 @@ class TradeManager:
                                 f"Capital: ₹{required_cost:.2f}\n"
                                 f"Avail:   ₹{self.capital_manager.available:.2f}\n\n"
                                 f"🔍 Suspected: {suspected}"
-                            )
+                            ))
                         except Exception:
                             pass
                     
@@ -437,11 +437,11 @@ class TradeManager:
                 logger.error(f"Execution Exception: {e}")
                 if self.bot:
                     try:
-                        self.bot.send_alert(
+                        asyncio.create_task(self.bot.send_alert(
                             f"🚨 *EXECUTION EXCEPTION*\n\n"
                             f"Symbol: `{symbol}`\n"
                             f"Error: `{str(e)[:200]}`"
-                        )
+                        ))
                     except Exception:
                         pass
                 return {

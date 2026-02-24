@@ -782,3 +782,7 @@ class FyersBrokerInterface:
         # Close sockets?
         # Fyers SDK doesn't always have clean close methods exposed easily for async.
         pass
+
+    async def disconnect(self):
+        """Phase 44.5 compatibility alias for supervisor cleanup."""
+        await self.shutdown()

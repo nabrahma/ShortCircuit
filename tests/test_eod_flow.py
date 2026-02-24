@@ -1,4 +1,5 @@
 import unittest
+import asyncio
 
 from eod_analyzer import EODAnalyzer
 
@@ -36,7 +37,7 @@ class FakeDB:
 
     def query(self, query, params):
         date = params[0]
-        if "FROM trades" in query:
+        if "FROM positions" in query:
             return [t for t in self._trades.values() if t["date"] == date]
         if "FROM soft_stop_events" in query:
             return [e for e in self._soft_stop_events if e["date"] == date]
@@ -82,7 +83,7 @@ class TestEODFlow(unittest.TestCase):
         )
 
         analyzer = EODAnalyzer(None, self.db)
-        report = analyzer.run_daily_analysis(self.test_date)
+        report = asyncio.run(analyzer.run_daily_analysis(self.test_date))
 
         self.assertIn("# 📊 EOD Report", report)
         self.assertIn("Net P&L", report)

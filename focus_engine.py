@@ -85,7 +85,8 @@ class FocusEngine:
             'data': signal_data,
             'trigger': entry_trigger,
             'invalidate': invalidation_trigger,
-            'timestamp': time.time()
+            'timestamp': time.time(),
+            'correlation_id': signal_data.get('correlation_id'),
         }
         logger.info(f"[GATE] Added {symbol} to Validation Gate. Trigger: < {entry_trigger}")
         
@@ -195,10 +196,33 @@ class FocusEngine:
                 trigger_price = pending['trigger']
                 inval_price = pending['invalidate']
                 timestamp = pending['timestamp']
+
+                def _queue_validation_update(outcome, details=None):
+                    correlation_id = pending.get('correlation_id')
+                    if not correlation_id:
+                        return
+                    if self.telegram_bot and hasattr(self.telegram_bot, 'queue_signal_validation_update'):
+                        # None message_id is expected on very fast validations; bot falls back
+                        # to a fresh message when discovery send has not completed yet.
+                        asyncio.create_task(self.telegram_bot.queue_signal_validation_update(
+                            correlation_id=correlation_id,
+                            signal=pending['data'],
+                            outcome=outcome,
+                            details=details or {}
+                        ))
                 
                 # A. CHECK TRIGGER (VALIDATION CONFIRMED)
                 # For Short: LTP < Trigger (Signal Low)
                 if ltp < trigger_price:
+                    _queue_validation_update(
+                        outcome='VALIDATED',
+                        details={
+                            'reason': 'GATE12_TRIGGER_BROKEN',
+                            'trigger_price': trigger_price,
+                            'ltp': ltp,
+                        }
+                    )
+
                     # =========================================================
                     # AUTO MODE GATE (Phase 42.2.6)
                     # =========================================================
@@ -219,7 +243,7 @@ class FocusEngine:
                                  f"**Action: Auto-Trade OFF 🛑**\n\n"
                                  f"Enable with `/auto on` for NEXT signal."
                              )
-                             self.telegram_bot.send_alert(msg)
+                             asyncio.create_task(self.telegram_bot.send_alert(msg))
                              
                          # Remove from pending (consumed)
                          del self.pending_signals[symbol]
@@ -242,14 +266,33 @@ class FocusEngine:
                     
                 # B. CHECK INVALIDATION (STOP HIT BEFORE ENTRY)
                 elif ltp > inval_price:
+                    _queue_validation_update(
+                        outcome='REJECTED',
+                        details={
+                            'reason': 'INVALIDATED_PRE_ENTRY',
+                            'trigger_price': trigger_price,
+                            'invalidation_price': inval_price,
+                            'ltp': ltp,
+                        }
+                    )
                     logger.info(f"🚫 [INVALIDATED] {symbol} hit {inval_price} before entry. Removed.")
                     del self.pending_signals[symbol]
                     
                 # C. TIMEOUT (configurable, default 15 mins — Phase 41.1)
                 elif (time.time() - timestamp) > (config.VALIDATION_TIMEOUT_MINUTES * 60):
-                     timeout_min = config.VALIDATION_TIMEOUT_MINUTES
-                     logger.info(f"⌛ [TIMEOUT] {symbol} pending for >{timeout_min}m. Removed.")
-                     del self.pending_signals[symbol]
+                    _queue_validation_update(
+                        outcome='TIMEOUT',
+                        details={
+                            'reason': 'VALIDATION_TIMEOUT',
+                            'timeout_minutes': config.VALIDATION_TIMEOUT_MINUTES,
+                            'trigger_price': trigger_price,
+                            'invalidation_price': inval_price,
+                            'ltp': ltp,
+                        }
+                    )
+                    timeout_min = config.VALIDATION_TIMEOUT_MINUTES
+                    logger.info(f"⌛ [TIMEOUT] {symbol} pending for >{timeout_min}m. Removed.")
+                    del self.pending_signals[symbol]
                      
             except Exception as e:
                 logger.error(f"Validation Check Error {symbol}: {e}")
@@ -527,5 +570,5 @@ class FocusEngine:
         )
         
         # Send using thread-safe wrapper
-        self.telegram_bot.send_alert(msg)
+        asyncio.create_task(self.telegram_bot.send_alert(msg))
 

@@ -367,5 +367,19 @@ if __name__ == "__main__":
     # Accept optional date argument: python eod_analysis.py 2026-02-15
     date_arg = sys.argv[1] if len(sys.argv) > 1 else None
 
+    os.environ["FYERS_NO_INTERACTIVE"] = "true"
+    try:
+        from fyers_connect import FyersConnect
+
+        conn = FyersConnect(config)
+        if not conn.fyers:
+            raise RuntimeError("No authenticated Fyers client available.")
+    except Exception:
+        print(
+            "ERROR: Token expired. Run with active bot session or re-authenticate manually.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     analyzer = EODAnalyzer()
     analyzer.analyze_all_signals(date_str=date_arg)

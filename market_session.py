@@ -277,7 +277,7 @@ class MarketSession:
         """Send formatted alert via Telegram"""
         try:
             if self.telegram and MARKET_SESSION_CONFIG.get('telegram_state_transitions'):
-                self.telegram.send_alert(msg)
+                asyncio.create_task(self.telegram.send_alert(msg))
         except:
             pass
         

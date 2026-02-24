@@ -1,476 +1,440 @@
-import time
+# -*- coding: utf-8 -*-
+import asyncio
+from collections import deque
+from dataclasses import dataclass
+from datetime import datetime, timedelta
 import logging
-import threading
-import sys
+import logging.handlers
 import os
+import signal
+import subprocess
+import sys
+import time
+from typing import Any, Callable, Optional
+
 import config
 import pytz
-IST = pytz.timezone('Asia/Kolkata')
-# Force UTF-8 for Console Output (Windows Fix)
-if sys.platform.startswith('win'):
-    try:
-        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
-        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
-    except Exception as e:
-        print(f"Warning: Could not force UTF-8: {e}")
 
-from fyers_connect import FyersConnect
-from scanner import FyersScanner
 from analyzer import FyersAnalyzer
-from trade_manager import TradeManager
+from capital_manager import CapitalManager
+from database import DatabaseManager
+from eod_analyzer import EODAnalyzer
+from eod_scheduler import eod_scheduler
+from focus_engine import FocusEngine
+from fyers_broker_interface import FyersBrokerInterface
+from fyers_connect import FyersConnect
+from market_session import MarketSession
+from market_utils import is_market_hours
+from reconciliation import ReconciliationEngine
+from scanner import FyersScanner
+from startup_recovery import StartupRecovery
 from telegram_bot import ShortCircuitBot
+from trade_manager import TradeManager
 
-# Logging Setup
-import logging.handlers
-log_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+IST = pytz.timezone("Asia/Kolkata")
+logger = logging.getLogger("shortcircuit.supervisor")
+_supervised_sleep = asyncio.sleep
 
-file_handler = logging.handlers.RotatingFileHandler(
-    config.LOG_FILE, 
-    maxBytes=10*1024*1024, 
-    backupCount=5, 
-    encoding='utf-8'
-)
-file_handler.setFormatter(log_formatter)
 
-console_handler = logging.StreamHandler(sys.stdout)
-console_handler.setFormatter(log_formatter)
-
-logging.basicConfig(
-    level=logging.INFO,
-    handlers=[file_handler, console_handler],
-    force=True
-)
-logger = logging.getLogger(__name__)
-
-def scalper_position_monitor(scalper_manager, trade_manager, fyers, bot, stop_event):
-    """
-    Phase 41.2: Background thread that polls LTP every 2s.
-    """
-    while not stop_event.is_set():
+def _configure_logging() -> None:
+    if sys.platform.startswith("win"):
         try:
-            pos = scalper_manager.active_position
-            if pos is None:
-                time.sleep(2)
-                continue
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
 
-            # Fetch LTP
-            # We should ideally use Broker Interface here too, but for legacy compat keep direct fyers
-            # or update ScalperManager to use Broker later.
-            resp = fyers.quotes(data={"symbols": pos.symbol})
-            if 'd' not in resp or not resp['d']:
-                time.sleep(2)
-                continue
+    log_formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+    file_handler = logging.handlers.RotatingFileHandler(
+        config.LOG_FILE,
+        maxBytes=10 * 1024 * 1024,
+        backupCount=5,
+        encoding="utf-8",
+    )
+    file_handler.setFormatter(log_formatter)
 
-            current_ltp = resp['d'][0]['v']['lp']
-            action = scalper_manager.update_position(current_ltp)
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setFormatter(log_formatter)
 
-            if action['action'] == 'UPDATE_STOP':
-                trade_manager.update_stop_loss(pos.symbol, action['new_stop'])
-
-            elif action['action'] == 'CLOSE_PARTIAL':
-                trade_manager.close_partial_position(
-                    pos.symbol, action['quantity'], action['reason']
-                )
-                try:
-                    msg = (f"[SCALPER] {action['reason']}: Closed {action['quantity']} "
-                           f"shares @ ₹{action['price']:.2f}")
-                    bot.bot.send_message(bot.chat_id, msg)
-                except Exception:
-                    pass
-
-            elif action['action'] in ('STOP_HIT', 'CLOSE_ALL'):
-                trade_manager.close_partial_position(
-                    pos.symbol, action['quantity'], action['reason']
-                )
-                try:
-                    emoji = "🏠" if action['reason'] == 'TP3_HOME_RUN' else "🛑"
-                    msg = (f"{emoji} [SCALPER] {action['reason']}: "
-                           f"Closed ALL @ ₹{action['price']:.2f}")
-                    bot.bot.send_message(bot.chat_id, msg)
-                except Exception:
-                    pass
-
-        except Exception as e:
-            logger.error(f"Scalper monitor error: {e}")
-
-        time.sleep(2)
-
-
-def main():
-    logger.info("--- [BOT] Starting ShortCircuit (WebSocket Phase 42.2) ---")
-
-    # ===================================================================
-    # STEP 1: FYERS CONNECTION - HAPPENS EXACTLY ONCE
-    # ===================================================================
-    logger.info("🔐 Authenticating with Fyers...")
-    # This is the ONLY call to FyersConnect() in the entire codebase.
-    # The singleton pattern ensures subsequent imports return this same instance.
-    fyers_conn = FyersConnect(config)
-    fyers_client = fyers_conn.fyers          # fyersModel.FyersModel instance
-    access_token = fyers_conn.access_token   # Raw token string
-    
-    if not fyers_client or not access_token:
-         logger.critical("❌ Fyers Authentication Failed. Exiting.")
-         return
-
-    logger.info("✅ Fyers Connected Successfully")
-
-    # ===================================================================
-    # STEP 2: WARN-UP & RECOVERY
-    # ===================================================================
-    from capital_manager import CapitalManager
-    # CapitalManager uses fixed capital from config, not Fyers funds
-    capital_manager = CapitalManager(
-        base_capital=getattr(config, 'CAPITAL_PER_TRADE', 1800.0),
-        leverage=getattr(config, 'INTRADAY_LEVERAGE', 5.0)
+    logging.basicConfig(
+        level=logging.INFO,
+        handlers=[file_handler, console_handler],
+        force=True,
     )
 
-    from startup_recovery import StartupRecovery
-    # Pass object, don't re-authenticate
-    recovery = StartupRecovery(fyers_client)  
-    recovery.scan_orphaned_trades()
 
-    logger.info("daily_bias: NEUTRAL (No bias calculated yet)")
+def _install_signal_handlers(loop: asyncio.AbstractEventLoop, shutdown_event: asyncio.Event):
+    def _handler(signum: Optional[int] = None, frame: Optional[Any] = None):
+        logger.warning("[SUPERVISOR] Shutdown signal received: %s", signum)
+        shutdown_event.set()
 
-    # 2. Telegram Bot (Sync)
-    # 2. Telegram Bot (Sync)
-    # TradeManager (Legacy wrapper) need fyers, AND capital_manager
+    # Unix path
+    try:
+        loop.add_signal_handler(signal.SIGINT, _handler)
+        loop.add_signal_handler(signal.SIGTERM, _handler)
+        return
+    except (NotImplementedError, RuntimeError):
+        pass
+
+    # Windows fallback
+    signal.signal(signal.SIGINT, _handler)
+    if hasattr(signal, "SIGTERM"):
+        signal.signal(signal.SIGTERM, _handler)
+
+
+async def _supervised(
+    name: str,
+    coro_factory: Callable[[], asyncio.Future],
+    shutdown_event: asyncio.Event,
+    max_retries: int = 3,
+    retry_window_secs: float = 60.0,
+    on_before_restart: Optional[Callable[[], asyncio.Future]] = None,
+):
+    """
+    Restart-on-crash wrapper with crash-loop cutoff.
+    """
+    crash_times = deque(maxlen=max_retries)
+    while not shutdown_event.is_set():
+        try:
+            await coro_factory()
+            return  # clean exit must not restart
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            now = time.monotonic()
+            crash_times.append(now)
+            if (
+                len(crash_times) == max_retries
+                and (crash_times[-1] - crash_times[0]) < retry_window_secs
+            ):
+                logger.critical(
+                    "[SUPERVISOR] %s crash-looping (%s failures in %ss). Aborting.",
+                    name,
+                    max_retries,
+                    retry_window_secs,
+                )
+                raise
+
+            if name == "main_trading_loop" and is_market_hours():
+                logger.warning(
+                    "[SUPERVISOR] Trading loop crashed during market hours; "
+                    "running recovery scan before restart."
+                )
+                if on_before_restart is not None:
+                    try:
+                        await on_before_restart()
+                    except Exception as restart_exc:
+                        logger.error(
+                            "[SUPERVISOR] Recovery scan before restart failed: %s",
+                            restart_exc,
+                        )
+                await _supervised_sleep(5)
+
+            logger.error("[SUPERVISOR] %s crashed: %r. Restarting...", name, exc)
+            await _supervised_sleep(2)
+
+
+@dataclass
+class RuntimeContext:
+    fyers_client: Any
+    access_token: str
+    capital_manager: CapitalManager
+    trade_manager: TradeManager
+    focus_engine: FocusEngine
+    bot: ShortCircuitBot
+    market_session: MarketSession
+    scanner: FyersScanner
+    analyzer: FyersAnalyzer
+    db_manager: DatabaseManager
+    broker: FyersBrokerInterface
+    reconciliation_engine: ReconciliationEngine
+    startup_recovery: StartupRecovery
+
+
+async def _initialize_runtime() -> RuntimeContext:
+    logger.info("[INIT] Authenticating with Fyers...")
+    fyers_conn = FyersConnect(config)
+    fyers_client = fyers_conn.fyers
+    access_token = fyers_conn.access_token
+    if not fyers_client or not access_token:
+        raise RuntimeError("Fyers authentication failed.")
+
+    capital_manager = CapitalManager(
+        base_capital=getattr(config, "CAPITAL_PER_TRADE", 1800.0),
+        leverage=getattr(config, "INTRADAY_LEVERAGE", 5.0),
+    )
+    startup_recovery = StartupRecovery(fyers_client)
+    startup_recovery.scan_orphaned_trades()
+
     trade_manager = TradeManager(fyers_client, capital_manager)
-    
-    # Instantiate FocusEngine manually
-    from focus_engine import FocusEngine
     focus_engine = FocusEngine(trade_manager)
 
-    # Flatten config module to dict
-    config_settings = {k:v for k,v in vars(config).items() if not k.startswith('__')}
-    
-    # Initialize Bot (OrderManager injected later)
+    config_settings = {k: v for k, v in vars(config).items() if not k.startswith("__")}
     bot = ShortCircuitBot(config_settings, None, capital_manager, focus_engine)
-    
-    # Inject dependencies
     trade_manager.bot = bot
     focus_engine.telegram_bot = bot
 
-    # 3. Async Bridge & Infrastructure (WebSocket)
-    from async_utils import AsyncExecutor, SyncWrapper
-
-    logger.info("🌉 Initializing Async Bridge...")
-    
-    # Adapter for Async OrderManager to call Sync Bot
-    class AsyncBotAdapter:
-        def __init__(self, bot):
-            self.bot = bot
-        async def send_alert(self, msg):
-            # We use the AsyncExecutor loop which is running this to offload to thread?
-            # No, OrderManager runs in AsyncExecutor loop. 
-            # We need to run sync code in executor.
-            import asyncio
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, lambda: self.bot.send_alert(msg))
-        @property
-        def journal(self): return self.bot.journal # Journal access used by OrderManager?
-
-        def is_auto_mode(self):
-            """Pass-through to real bot's auto_mode check."""
-            return self.bot.is_auto_mode()
-        
-    # Construct Config for AsyncExecutor
-    # We populate it with values from config.py and env vars
-    async_config = {
-        'database': {}, # Uses env vars internally in DatabaseManager
-        'fyers': {
-            'client_id': os.getenv('FYERS_CLIENT_ID'), # fyers_connect uses FYERS_APP_ID
-            'access_token': access_token, # Pass the token we just generated/loaded
-        },
-        'risk': {
-            'base_capital': 1800.0,    # ← NUMBER not object
-            'leverage': 5.0,           # ← NUMBER not object
-            'max_positions': 2,
-            'max_daily_loss': 500.0
-        },
-        'logging': {
-            'level': 'INFO',
-            'path': 'logs/'
-        },
-        'telegram_bot_instance': AsyncBotAdapter(bot), # Pass the WRAPPED adapter
-        'capital_manager_instance': capital_manager   # Inject existing instance (Fix Double Init)
-    }
-
-    async_exec = AsyncExecutor()
-    try:
-        async_exec.start(async_config)
-    except Exception as e:
-        logger.critical(f"Async Bridge Start Failed: {e}")
-        return
-
-    # Retrieve Initialized Components
-    raw_order_manager = async_exec.order_manager
-    db_manager = async_exec.db
-    reconciler = async_exec.reconciliation
-    
-    # Create Sync Wrappers
-    # Create Sync Wrappers
-    order_manager = SyncWrapper(raw_order_manager, async_exec)
-    
-    # Inject OrderManager into Bot
-    bot.order_manager = order_manager
-
-    # Phase 42.3.4: Inject Reconciler into TradeManager
-    trade_manager.reconciliation_engine = SyncWrapper(reconciler, async_exec)
-
-    # 4. Run Startup Recovery
-    # Updated to accept fyers_client as per Phase 42.2.2 refactor
-    # recovery = StartupRecovery(fyers_client) <--- REMOVED DUPLICATE
-    # Note: scan_orphaned_trades is sync now, but if we need async execution we can wrap it
-    # For now, running valid sync method
-    recovery.scan_orphaned_trades()
-    
-    # ──────────────────────────────────────────────────────
-
-    # 5. Dependency Injection for Sync Modules
-    
-    # Inject Async Order Manager (Wrapper) into TradeManager? 
-    # TradeManager logic manages its own state currently (legacy).
-    # Ideally, we should update TradeManager to use order_manager for execution.
-    # For Phase 42.2, we focus on preserving layout.
-    
-    # FIX: Update Raw Order Manager's Telegram Adapter if not passed in config
-    # We passed 'telegram_bot_instance' in config, so AsyncExecutor should have handled it.
-    
-    # ── PHASE 41.3.1: MARKET SESSION AWARENESS ──
-    from market_session import MarketSession
     market_session = MarketSession(fyers_client, bot)
-    
-    logger.info("🕐 Analyzing market session state...")
+    logger.info("[INIT] Evaluating market session...")
     morning_context = market_session.initialize_session()
-    
-    mh = morning_context['high'] if morning_context else None
-    ml = morning_context['low'] if morning_context else None
-    
-    # Init components that depend on context
+    mh = morning_context["high"] if morning_context else None
+    ml = morning_context["low"] if morning_context else None
+
     scanner = FyersScanner(fyers_client)
     analyzer = FyersAnalyzer(fyers_client, morning_high=mh, morning_low=ml)
-    
-    # ── PHASE 44.4: Inject dependencies for rich command UX ──
     bot.signal_manager = analyzer.signal_manager
     bot.market_session = market_session
-    
-    # ── PHASE 41.3: INTELLIGENT EXITS ──
-    if getattr(config, 'ENABLE_DISCRETIONARY_EXITS', True):
-        from discretionary_engine import DiscretionaryEngine
-        discretionary_engine = DiscretionaryEngine(fyers_client, order_manager)
-        
-        bot.focus_engine.order_manager = order_manager
-        bot.focus_engine.discretionary_engine = discretionary_engine
-        logger.info("[INIT] ✓ OrderManager & DiscretionaryEngine ENABLED")
 
-    # Phase 41.1: Multi-Edge Detector
-    multi_edge = None
-    tracker = None
-    if config.MULTI_EDGE_ENABLED:
-        from multi_edge_detector import MultiEdgeDetector
-        multi_edge = MultiEdgeDetector(config.ENABLED_DETECTORS)
-    if getattr(config, 'ENABLE_DETECTOR_TRACKING', False):
-        from detector_performance_tracker import DetectorPerformanceTracker
-        tracker = DetectorPerformanceTracker(getattr(config, 'DETECTOR_LOG_PATH', 'logs/detector_performance.csv'))
+    db_manager = DatabaseManager()
+    await db_manager.initialize()
 
-    # Phase 41.2: Scalper Position Manager
-    scalper_manager = None
-    scalper_stop_event = threading.Event()
-    if getattr(config, 'USE_SCALPER_RISK_MANAGEMENT', False):
-        from scalper_position_manager import ScalperPositionManager
-        scalper_manager = ScalperPositionManager(trade_manager)
-        
-        scalper_thread = threading.Thread(
-            target=scalper_position_monitor,
-            args=(scalper_manager, trade_manager, fyers, bot, scalper_stop_event),
-            daemon=True
-        )
-        scalper_thread.start()
-        logger.info("[INIT] ✓ Scalper Risk Management ENABLED")
+    broker = FyersBrokerInterface(
+        access_token=access_token,
+        client_id=os.getenv("FYERS_CLIENT_ID"),
+        db_manager=db_manager,
+        emergency_logger=None,
+    )
+    await broker.initialize()
 
-    # 6. Start Telegram Thread
-    t_bot = threading.Thread(target=bot.start_polling)
-    t_bot.daemon = True
-    t_bot.start()
+    reconciliation_engine = ReconciliationEngine(
+        broker=broker,
+        db_manager=db_manager,
+        telegram_bot=bot,
+    )
 
-    logger.info("[OK] System Initialized. Loop Starting...")
-    
-    # Startup Message with Synchronization (Issue 4)
-    try:
-        if market_session.get_current_state() in ['EARLY_MARKET', 'MID_MARKET']:
-            # Wait up to 10s for Telegram loop to init
-            if bot.wait_until_ready(timeout=10.0):
-                bot.send_startup_message()
-            else:
-                logger.warning("[STARTUP] Bot not ready within 10s. Skipping Good Morning.")
-    except Exception as e:
-        logger.error(f"[STARTUP] Message Failed: {e}")
+    return RuntimeContext(
+        fyers_client=fyers_client,
+        access_token=access_token,
+        capital_manager=capital_manager,
+        trade_manager=trade_manager,
+        focus_engine=focus_engine,
+        bot=bot,
+        market_session=market_session,
+        scanner=scanner,
+        analyzer=analyzer,
+        db_manager=db_manager,
+        broker=broker,
+        reconciliation_engine=reconciliation_engine,
+        startup_recovery=startup_recovery,
+    )
 
-    # 7. Main Loop
-    SCAN_INTERVAL = 60
-    import datetime
-    SCAN_INTERVAL = 60
-    import datetime
-    last_reconciliation = datetime.datetime.now()
+
+async def _trading_loop(shutdown_event: asyncio.Event, ctx: RuntimeContext):
+    logger.info("[TRADING] Trading loop started.")
+    scan_interval = 60
     consecutive_errors = 0
-    MAX_ERRORS = 5
-    
-    try:
-        while True:
-            try:
-                if not market_session.should_trade_now():
-                    current_state = market_session.get_current_state()
-                    if current_state == 'POST_MARKET':
-                        logger.info("🌙 Market Closed. Stopping Loop.")
-                        break
-                    elif current_state == 'EOD_WINDOW':
-                        logger.info("🌙 EOD WINDOW active — breaking scan loop.")
-                        break
-                    time.sleep(60)
+    max_errors = 5
+
+    while not shutdown_event.is_set():
+        try:
+            if not ctx.market_session.should_trade_now():
+                current_state = ctx.market_session.get_current_state()
+                if current_state in ("POST_MARKET", "EOD_WINDOW"):
+                    logger.info("[TRADING] Session state %s, exiting trading loop.", current_state)
+                    return
+                await asyncio.sleep(60)
+                continue
+
+            if not config.TRADING_ENABLED:
+                logger.info("[TRADING] Trading disabled; waiting.")
+                await asyncio.sleep(30)
+                continue
+
+            start_ts = time.monotonic()
+            logger.info("[SCAN] Scanning market...")
+            candidates = await asyncio.to_thread(ctx.scanner.scan_market)
+
+            ctx.bot._scan_metadata = {
+                "last_scan_time": datetime.now(),
+                "candidate_count": len(candidates) if candidates else 0,
+            }
+
+            for cand in candidates or []:
+                if shutdown_event.is_set():
+                    return
+
+                symbol = cand["symbol"]
+                signal = await asyncio.to_thread(
+                    ctx.analyzer.check_setup,
+                    symbol,
+                    cand["ltp"],
+                    cand.get("oi", 0),
+                    cand.get("history_df"),
+                )
+                if not signal:
                     continue
 
-                if not config.TRADING_ENABLED:
-                    logger.info("⏸️ Trading Disabled (Warmup).")
-                    time.sleep(30)
-                    continue
-
-                logger.info("[SCAN] Scanning Market...")
-                start_time = time.time()
-                
-                # Check Time for Auto-Exit
-                # Phase 43: Robust Time Check (Issue 1)
-                # Use proper time objects, not string comparison
-                now_ist = datetime.datetime.now(IST)
-                current_time = now_ist.time()
-                
-                # Parse configured time once
-                h, m = map(int, config.SQUARE_OFF_TIME.split(':'))
-                square_off_time = datetime.time(h, m)
-                
-                if current_time >= square_off_time:
-                    logger.warning(f"[TIME] Market Close ({current_time.strftime('%H:%M')}). Square-off.")
-                    scalper_stop_event.set()
-                    msg = trade_manager.close_all_positions()
+                if signal.get("cooldown_blocked"):
                     try:
-                        bot.bot.send_message(bot.chat_id, f"[STOP] **MARKET CLOSED**\n\n{msg}")
-                    except:
-                        pass
-                    break
-                
-                # A. Scan
-                candidates = scanner.scan_market()
-                
-                # Phase 44.4: Update scan metadata for /status and /resume
-                bot._scan_metadata = {
-                    'last_scan_time': datetime.datetime.now(),
-                    'candidate_count': len(candidates) if candidates else 0,
-                }
-                
-                if not candidates:
-                    logger.info("No candidates. Sleeping...")
-                
-                # B. Analyze
-                for cand in candidates:
-                    symbol = cand['symbol']
-                    signal = None
-                    
-                    if config.MULTI_EDGE_ENABLED and multi_edge:
-                        edge_payload = multi_edge.scan_all_edges({
-                            'symbol': symbol, 'ltp': cand['ltp'], 'history_df': cand.get('history_df'),
-                            'day_high': cand.get('day_high'), 'day_low': cand.get('day_low'),
-                            'open': cand.get('open'), 'tick_size': 0.05
-                        })
-                        if edge_payload:
-                            signal = analyzer.check_setup_with_edges(symbol, cand['ltp'], cand.get('oi',0), cand.get('history_df'), edge_payload)
+                        unlock_at = (
+                            ctx.analyzer.signal_manager.last_signal_time[symbol]
+                            + timedelta(minutes=ctx.analyzer.signal_manager.cooldown_minutes)
+                        )
+                        ctx.bot.focus_engine.queue_cooldown_signal(signal, unlock_at)
+                        logger.info(
+                            "PENDING %s queued for cooldown unlock at %s",
+                            symbol,
+                            unlock_at.strftime("%H:%M"),
+                        )
+                    except Exception as exc:
+                        logger.error("Failed to queue cooldown signal: %s", exc)
+                    continue
+
+                pending_signal = signal
+                editable_enabled = False
+                try:
+                    editable_enabled = ctx.bot.is_editable_signal_flow_enabled()
+                except Exception:
+                    editable_enabled = False
+
+                if editable_enabled and hasattr(ctx.bot, "queue_signal_discovery"):
+                    pending_signal = dict(signal)
+                    correlation_id = await ctx.bot.queue_signal_discovery(pending_signal)
+                    pending_signal["correlation_id"] = correlation_id
+                else:
+                    if signal.get("edges_detected"):
+                        ctx.bot.send_multi_edge_alert(signal)
                     else:
-                        signal = analyzer.check_setup(symbol, cand['ltp'], cand.get('oi',0), cand.get('history_df'))
-                    
-                    if signal:
-                        if signal.get('cooldown_blocked'):
-                            try:
-                                import datetime
-                                unlock_at = analyzer.signal_manager.last_signal_time[symbol] + datetime.timedelta(minutes=analyzer.signal_manager.cooldown_minutes)
-                                bot.focus_engine.queue_cooldown_signal(signal, unlock_at)
-                                logger.info(f"PENDING {symbol} — queued for cooldown unlock at {unlock_at.strftime('%H:%M')}")
-                            except Exception as e:
-                                logger.error(f"Failed to queue cooldown signal: {e}")
-                            continue
+                        ctx.bot.send_validation_alert(signal)
 
-                        logger.info(f"[SIGNAL] {symbol} Found.")
-                        
-                        if signal.get('edges_detected'):
-                            bot.send_multi_edge_alert(signal)
-                        else:
-                            bot.send_validation_alert(signal)
-                        
-                        bot.focus_engine.add_pending_signal(signal)
+                ctx.bot.focus_engine.add_pending_signal(pending_signal)
 
-                        if tracker and signal.get('edges_detected'):
-                            signal_id = f"{symbol}_{int(time.time())}"
-                            signal['signal_id'] = signal_id
-                            tracker.log_signal_generated(signal_id, [e['trigger'] for e in signal.get('edges_detected', [])], symbol)
+            elapsed = time.monotonic() - start_ts
+            await asyncio.sleep(max(0, scan_interval - elapsed))
+            consecutive_errors = 0
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            consecutive_errors += 1
+            logger.error(
+                "[TRADING] Loop error: %s (attempt %s/%s)",
+                exc,
+                consecutive_errors,
+                max_errors,
+            )
+            if consecutive_errors >= max_errors:
+                raise RuntimeError("Trading loop circuit breaker tripped.") from exc
+            await asyncio.sleep(10)
 
-                        if scalper_manager and signal.get('setup_high'):
-                            signal['_scalper_manager'] = scalper_manager
 
-                elapsed = time.time() - start_time
-                sleep_time = max(0, SCAN_INTERVAL - elapsed)
-                time.sleep(sleep_time)
+def _update_terminal_log() -> None:
+    try:
+        logger.info("[CLEANUP] Updating terminal log.")
+        subprocess.run([sys.executable, "dump_terminal_log.py"], check=False)
+    except Exception as exc:
+        logger.error("[CLEANUP] Failed to update terminal log: %s", exc)
 
-                # Reset error count on successful iteration
-                consecutive_errors = 0
 
-            except KeyboardInterrupt:
-                logger.info("Manually Stopped.")
-                scalper_stop_event.set()
-                break
-            except Exception as e:
-                consecutive_errors += 1
-                logger.error(f"Loop Error: {e} (Attempt {consecutive_errors}/{MAX_ERRORS})")
-                if consecutive_errors >= MAX_ERRORS:
-                    logger.critical("❌ Circuit Breaker Tripped: Too many consecutive errors. Shutting down.")
-                    scalper_stop_event.set()
-                    break
-                time.sleep(10)
-                
+async def _cleanup_runtime(ctx: Optional[RuntimeContext]):
+    if ctx is None:
+        return
+
+    try:
+        await ctx.reconciliation_engine.stop()
+    except Exception as exc:
+        logger.error("[CLEANUP] Reconciliation stop failed: %s", exc)
+
+    try:
+        await ctx.bot.stop()
+    except Exception as exc:
+        logger.error("[CLEANUP] Telegram stop failed: %s", exc)
+
+    try:
+        await ctx.db_manager.close()
+    except Exception as exc:
+        logger.error("[CLEANUP] DB close failed: %s", exc)
+
+    try:
+        await ctx.broker.disconnect()
+    except Exception as exc:
+        logger.error("[CLEANUP] Broker disconnect failed: %s", exc)
+
+
+async def main() -> int:
+    _configure_logging()
+    shutdown_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    _install_signal_handlers(loop, shutdown_event)
+
+    exit_code = 0
+    ctx: Optional[RuntimeContext] = None
+    bot_start_time = datetime.now(IST)
+
+    try:
+        ctx = await _initialize_runtime()
+
+        async def _notify(message: str):
+            try:
+                await ctx.bot.send_message(message)
+            except Exception as exc:
+                logger.error("[NOTIFY] Failed: %s", exc)
+
+        async def _trigger_squareoff():
+            message = await asyncio.to_thread(ctx.trade_manager.close_all_positions)
+            await _notify(f"[EOD] Square-off result:\n{message}")
+
+        async def _run_analysis():
+            analyzer = EODAnalyzer(fyers_client=ctx.broker.rest_client, db=ctx.db_manager)
+            report = await analyzer.run_daily_analysis()
+            await _notify(f"EOD Analysis Complete.\n\n{str(report)[:3000]}")
+
+        async def _get_open_positions():
+            return await ctx.broker.get_all_positions()
+
+        async def _restart_recovery():
+            await asyncio.to_thread(ctx.startup_recovery.scan_orphaned_trades)
+
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(
+                _supervised(
+                    "main_trading_loop",
+                    lambda: _trading_loop(shutdown_event, ctx),
+                    shutdown_event,
+                    on_before_restart=_restart_recovery,
+                ),
+                name="main_trading_loop",
+            )
+            tg.create_task(
+                _supervised(
+                    "telegram_bot",
+                    lambda: ctx.bot.run(shutdown_event),
+                    shutdown_event,
+                    max_retries=5,
+                ),
+                name="telegram_bot",
+            )
+            tg.create_task(
+                _supervised(
+                    "reconciliation",
+                    lambda: ctx.reconciliation_engine.run(shutdown_event),
+                    shutdown_event,
+                    max_retries=999,
+                    retry_window_secs=3600,
+                ),
+                name="reconciliation",
+            )
+            tg.create_task(
+                eod_scheduler(
+                    shutdown_event=shutdown_event,
+                    trigger_eod_squareoff=_trigger_squareoff,
+                    run_eod_analysis=_run_analysis,
+                    notify=_notify,
+                    get_open_positions=_get_open_positions,
+                    bot_start_time=bot_start_time,
+                ),
+                name="eod_scheduler",
+            )
+    except* Exception as eg:
+        logger.critical("[SUPERVISOR] TaskGroup failed: %s", eg)
+        exit_code = 1
     finally:
-        logger.info("🏁 Session Ended. Stopping Services...")
-        scalper_stop_event.set()
-        
-        # 1. Update Terminal Log (Issue 3)
-        try:
-            import subprocess
-            logger.info("📄 Updating Terminal Log...")
-            subprocess.run(["python", "dump_terminal_log.py"], check=False)
-        except Exception as e:
-            logger.error(f"Failed to update terminal log: {e}")
+        shutdown_event.set()
+        await _cleanup_runtime(ctx)
+        _update_terminal_log()  # keep last, captures full session shutdown
+        logger.info("[SUPERVISOR] Cleanup complete.")
 
-        # Phase 44.4: Send EOD Summary to Telegram
-        try:
-            logger.info("📊 Sending EOD Summary to Telegram...")
-            bot.send_alert("📊 Generating End-of-Day Summary...")
-            # Use send_eod_summary via async bridge
-            import asyncio
-            if hasattr(bot, '_loop') and bot._loop and bot._loop.is_running():
-                future = asyncio.run_coroutine_threadsafe(bot.send_eod_summary(), bot._loop)
-                future.result(timeout=15)  # Wait up to 15s
-            else:
-                logger.warning("[EOD] Bot event loop not running, skipping EOD summary")
-        except Exception as e:
-            logger.error(f"Failed to send EOD summary: {e}")
+    return exit_code
 
-        # 2. Run EOD Analysis (Issue 2)
-        try:
-            logger.info("📊 Running Auto-EOD Analysis...")
-            subprocess.run(["python", "eod_analysis.py"], check=False)
-        except Exception as e:
-            logger.error(f"Failed to run EOD Analysis: {e}")
-            
-        logger.info("👋 Goodnight.")
-    
-    # Preventing "RuntimeError: Event loop is closed" if we try to run async here
-    # The loop is inside main() which is just a function, but likely async components are dead.
 
 if __name__ == "__main__":
-    main()
+    sys.exit(asyncio.run(main()))

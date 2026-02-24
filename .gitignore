@@ -41,7 +41,8 @@ desktop.ini
 verification/
 # Also ignore the generated report if generic
 terminal_log.md
-md/
+md/*
+!md/PHASE44_5_OPEN_ITEMS.md
 
 # ── Runtime Files ─────────────────────────────────────────────
 shortcircuit.lock

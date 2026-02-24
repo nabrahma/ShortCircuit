@@ -43,16 +43,18 @@ class ReconciliationEngine:
     async def start(self):
         if self.running:
             return
-        self.running = True
-        logger.info("✅ Reconciliation Engine Started (WebSocket Mode).")
-        asyncio.create_task(self._loop())
+        asyncio.create_task(self.run())
 
     async def stop(self):
         self.running = False
         logger.info("🛑 Reconciliation Engine Stopped.")
 
-    async def _loop(self):
-        while self.running:
+    async def run(self, shutdown_event: asyncio.Event = None):
+        if self.running:
+            return
+        self.running = True
+        logger.info("✅ Reconciliation Engine Started (WebSocket Mode).")
+        while self.running and (shutdown_event is None or not shutdown_event.is_set()):
             start_time = asyncio.get_event_loop().time()
             try:
                 await self.reconcile()

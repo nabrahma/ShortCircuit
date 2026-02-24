@@ -6,6 +6,12 @@ import os
 import json
 import asyncio
 from typing import Optional, List, Dict, Any
+try:
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+except Exception:  # pragma: no cover - import fallback for environments without psycopg2
+    psycopg2 = None
+    RealDictCursor = None
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +72,10 @@ class DatabaseManager:
         """Helper to init pool."""
         await self.get_pool()
 
+    async def close(self):
+        """Close asyncpg pool for graceful application shutdown."""
+        await self.close_pool()
+
     async def execute(self, query: str, *args):
         """Execute a write operation."""
         pool = await self.get_pool()
@@ -89,6 +99,54 @@ class DatabaseManager:
         pool = await self.get_pool()
         async with pool.acquire() as conn:
             return await conn.fetchval(query, *args)
+
+    def query(self, sql: str, params=None) -> List[Dict[str, Any]]:
+        """
+        Synchronous query interface for standalone/offline scripts.
+
+        Implementation contract (Phase 44.5):
+        - Uses a fresh blocking psycopg2 connection per call.
+        - Reuses the same DB env-var credentials as asyncpg config.
+        - No persistent psycopg2 pool (script path only, not hot path).
+        - Returns [] when there are no rows.
+        """
+        if not sql:
+            return []
+        if psycopg2 is None:
+            raise RuntimeError(
+                "DatabaseManager.query() requires psycopg2-binary. "
+                "Install dependencies before using sync script query path."
+            )
+
+        params = params or ()
+        cfg = DB_CONFIG.copy()
+        cfg["user"] = os.getenv("DB_USER", cfg["user"])
+        cfg["password"] = os.getenv("DB_PASSWORD", cfg["password"])
+        cfg["host"] = os.getenv("DB_HOST", cfg["host"])
+        cfg["port"] = int(os.getenv("DB_PORT", cfg["port"]))
+        cfg["database"] = os.getenv("DB_NAME", cfg["database"])
+
+        conn = None
+        try:
+            conn = psycopg2.connect(
+                host=cfg["host"],
+                port=cfg["port"],
+                user=cfg["user"],
+                password=cfg["password"],
+                dbname=cfg["database"],
+            )
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                cursor.execute(sql, params)
+                if cursor.description is None:
+                    return []
+                rows = cursor.fetchall() or []
+                return [dict(row) for row in rows]
+        except Exception:
+            logger.exception("Synchronous query() failed")
+            raise
+        finally:
+            if conn is not None:
+                conn.close()
 
     # --- HFT Trading Logics ---
 
@@ -131,6 +189,55 @@ class DatabaseManager:
                     realized_pnl = $2
                 WHERE symbol = $3 AND state = 'OPEN'
             """, exit_data.get('exit_price'), exit_data.get('pnl'), symbol)
+
+    async def get_today_trades(self, session_date: Optional[datetime.date] = None) -> List[Dict[str, Any]]:
+        """
+        Return today's CLOSED trades from positions table for EOD summaries.
+        Normalized shape: symbol, pnl, status, exit_reason, closed_at.
+        """
+        if session_date is None:
+            session_date = datetime.date.today()
+
+        rows = await self.fetch(
+            """
+            SELECT
+                symbol,
+                COALESCE(realized_pnl, 0) AS pnl,
+                state AS status,
+                closed_at,
+                notes
+            FROM positions
+            WHERE session_date = $1
+              AND state = 'CLOSED'
+            ORDER BY COALESCE(closed_at, opened_at) ASC
+            """,
+            session_date
+        )
+
+        trades: List[Dict[str, Any]] = []
+        for row in rows:
+            record = dict(row)
+            exit_reason = "N/A"
+            notes = record.get('notes')
+            if notes:
+                try:
+                    parsed = notes
+                    if isinstance(notes, str):
+                        parsed = json.loads(notes)
+                    if isinstance(parsed, dict):
+                        exit_reason = parsed.get('exit_reason') or parsed.get('reason') or "N/A"
+                except Exception:
+                    exit_reason = "N/A"
+
+            trades.append({
+                "symbol": record.get('symbol', 'UNKNOWN'),
+                "pnl": float(record.get('pnl', 0.0) or 0.0),
+                "status": record.get('status', 'CLOSED'),
+                "exit_reason": exit_reason,
+                "closed_at": record.get('closed_at'),
+            })
+
+        return trades
             
     async def log_event(self, event_type: str, details: dict):
         """
