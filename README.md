@@ -1,420 +1,585 @@
 # ShortCircuit ⚡
 
-> **Institutional-grade algorithmic trading for the individual.**
-> Precision. Intelligence. Execution.
+> *The market is not a place. It is a conversation between participants
+> with asymmetric information, asymmetric conviction, and asymmetric speed.
+> This system is an attempt to listen more carefully than the other side.*
 
-***
+---
 
-## The System
+## Origin
 
-ShortCircuit is a fully automated, event-driven trading system built for NSE equities. It identifies institutional reversal patterns in real-time, validates them through **12 sequential gates**, and executes with sub-2-second latency — delivering the complete signal-to-execution pipeline directly to your Telegram.
+This project did not start with code. It started with a conversation.
 
-**Built on the same architectural principles that power institutional desks. Available to individual traders.**
+A friend — a sharper market observer than most — had a simple thesis:
+*pumped stocks fail. Every time. The question is only when.*
 
-***
+He was right. The microstructure of a stock up 10% intraday on retail FOMO
+is consistent, readable, and tradeable. The absorption at the top. The trapped longs.
+The 15-minute structure breaking down quietly while the 1-minute chart still looks
+like momentum.
 
-## What's Different
+I borrowed that thesis entirely. What I added was the attempt to formalize it —
+to ask: what does this look like, precisely, in data? What are the exact conditions
+that separate the setups that work from the ones that look identical but don't?
+And can those conditions be verified automatically, without hesitation, every time?
 
-Most retail algo systems fail at the infrastructure layer — wrong fills, duplicate orders, missed stops, token loops. ShortCircuit solves the infrastructure first, then the strategy.
+ShortCircuit is the answer to those questions. The core idea belongs to him.
+The implementation is mine. The debt is acknowledged.
 
-- **Zero auth loops** — Singleton token architecture. One authentication. Persisted across restarts.
-- **Zero duplicate orders** — 5-layer auto-trade gate. Default: `OFF`. You decide when it fires.
-- **Zero silent failures** — Every component has a fallback. WebSocket drops → REST fallback. DB lag → Emergency logger. Crash → Orphan recovery.
-- **PostgreSQL-backed** — Not SQLite. Real concurrent-write infrastructure with asyncpg connection pooling (10 min, 50 max).
+---
 
-***
+## Why This Exists
 
-## Architecture
+Every market participant believes they have an edge.
+
+Most are wrong — not because their ideas are bad, but because the gap between
+*having an insight* and *acting on it correctly, every time, without hesitation,
+without error* is wider than any strategy can bridge manually.
+
+Human judgment degrades under pressure. Execution hesitates at exactly the wrong
+moment. Stops get moved. Rules get broken at 2:47 PM when a position is down and
+the brain starts negotiating with itself.
+
+ShortCircuit is not an attempt to replace judgment.
+It is an attempt to protect it — by removing the execution layer from human control
+entirely, and trusting only what can be verified, logged, and audited.
+
+---
+
+## What It Is
+
+A fully automated, event-driven intraday trading system for NSE equities.
+
+It watches the market continuously. It identifies a specific microstructure event —
+institutional exhaustion at intraday highs. It validates that observation through
+twelve independent checks. When all twelve pass, it executes.
+
+Between signals, it does nothing.
+It does not overtrade. It does not hedge. It does not improvise.
+
+The discipline is in the architecture.
+
+---
+
+## The Philosophy of Infrastructure First
+
+Before any strategy logic was written, three problems were solved completely:
+
+**Authentication:**
+A trading system that re-authenticates mid-session is not a trading system.
+It is a liability. ShortCircuit uses a singleton OAuth token — one authentication
+per deploy, persisted to disk, validated on startup with a lightweight profile call.
+The broker session does not expire during trading hours. Ever.
+
+**State:**
+A single `asyncio` event loop. A single `asyncio.Event` (`shutdown_event`) shared
+by every concurrent task. There is no ambiguity about what the system is doing
+at any point in time. There is no thread racing on position state. There is no
+"was that order filled?" — the Order WebSocket answers that question, and it
+answers it exactly once, immediately, without polling.
+
+**Failure:**
+Systems fail. The question is not whether failure happens — it is whether failure
+is recoverable. Every component has a documented failure mode. Every failure mode
+has a handler. Crashes are followed by orphan recovery. WebSocket drops are handled
+by SDK reconnect. DB lag triggers the emergency logger. A hung cleanup task times
+out in 10 seconds and force-exits. Nothing fails silently.
+
+---
+
+## The Architecture
 
 ```
-Market Data Feed (Fyers WebSocket v3)
-    ↓
-Scanner — 2,000+ NSE symbols, parallelized, microstructure filtered
-    ↓
-Multi-Edge Detector — 5 institutional pattern engines in parallel
-    ↓
-12-Gate Validation Framework — 95% rejection rate
-    ↓
-Auto-Trade Gate — Default OFF. /auto on required to trade
-    ↓
-Capital Manager — Real-time margin verification
-    ↓
-Order Manager — Atomic entry + SL placement
-    ↓
-Scalper Position Manager — BE → Trail → TP1/TP2/TP3
-    ↓
-ML Logger + Telegram Dashboard — 40+ features logged per signal
+NSE Market (9:15 AM → 3:30 PM IST)
+    │
+    ├─ Data WebSocket (fyers_apiv3)
+    │   Real-time tick feed. All subscribed symbols.
+    │   Powers: Gate 12 validation, live P&L, position SL monitoring.
+    │
+    └─ REST API (fyers_apiv3)
+        Batch quotes, candle history, order submission.
+        Powers: Scan, Gates 1–11, entry/exit orders.
+
+Scanner
+    2,418 NSE-EQ symbols. Batch-fetched via REST in groups of 50.
+    Pre-filter: gain 6–18%, volume > 100k, LTP > ₹5.
+    Parallel quality check: asyncio workers, candle history fetch.
+    Output: candidate list, every ~60 seconds.
+
+12-Gate Validation Framework
+    Sequential. Failure at any gate = immediate rejection.
+    Gates 1–11: REST snapshot data.
+    Gate 12: WebSocket tick — real-time LTP break of entry trigger.
+    Rejection rate: ~95% of candidates.
+
+Order Manager
+    Entry: REST submit → WebSocket fill confirmation.
+    SL: REST submit, atomically with entry.
+    Position: registered in-memory and in PostgreSQL.
+    Exits: REST submit → WebSocket fill confirmation.
+
+Position Manager
+    SL state machine: INITIAL → BREAKEVEN → TRAILING → TIGHTENING.
+    Exits: TP1 (50%) / TP2 (25%) / TP3 (25% runner) / EOD 15:10 / SOFT_STOP / EMERGENCY.
+    DiscretionaryEngine monitors orderflow for soft-stop signals.
+
+ML Logger
+    Every signal → structured Parquet observation. Always. Regardless of outcome.
+    40+ features. UUID4 observation ID. Daily file.
+    Not used in signal scoring today. Training data for tomorrow.
+
+Telegram
+    The only interface. No web UI. No dashboard server.
+    Every signal. Every fill. Every alert. Every exit. Real-time.
 ```
 
-***
+---
 
-## Signal Intelligence
+## The 12 Gates
+
+There is a specific reason there are twelve and not three.
+
+A single strong signal is a hypothesis. Twelve independent confirmations
+are closer to a fact. Each gate is designed to kill the trade — not to approve it.
+The system is structurally biased toward inaction. A trade happens only
+when the system runs out of reasons to reject it.
+
+| Gate | What It Kills |
+|---|---|
+| **1. Signal Manager** | Signals that exceed the daily cap (5), breach the 45-min cooldown, or follow 3 consecutive losses |
+| **2. Market Regime** | Shorts during confirmed institutional uptrends — NIFTY first-hour range analysis |
+| **3. Data Quality** | Illiquid symbols, corrupt microstructure, doji-spam patterns |
+| **4. Technical Context** | Setups too far from VWAP, insufficient gain, wrong position in day range |
+| **5. Hard Constraints** | Gain outside 6–15% band — too little momentum, too much risk |
+| **6. Circuit Guard** | Upper-circuit proximity via Level 2 depth — cannot short into a circuit |
+| **7. Momentum Filter** | Freight-train detection — extreme RVOL × VWAP slope means the move is not over |
+| **8. Pattern Recognition** | Five parallel edge detectors — weighted confidence scoring, not majority vote |
+| **9. Breakdown Confirmation** | The pattern must have already broken the setup low — anticipation is not a trade |
+| **10. Institutional Confluence** | DOM, RSI, Fibonacci, OI, round-number analysis — the full picture |
+| **11. Higher Timeframe** | 15-minute Lower High structure — no macro context, no trade |
+| **12. Validation Gate** | Real-time LTP break of entry trigger via Data WebSocket — the final proof |
+
+Gate 12 alone eliminates ~40% of signals that cleared Gates 1–11.
+
+---
+
+## The Microstructure Event
+
+The system hunts one specific setup.
+
+A stock has moved 7–15% intraday on elevated volume. Retail momentum buyers
+are extended. Market makers have been absorbing the buying at the high.
+The last retail breakout buyers are now trapped above their entry.
+
+The tell is not the candle pattern. The candle pattern is the last confirmation.
+The tell is the combination of: order flow evidence (absorption, trapped longs),
+market profile deviation (LTP far from POC), higher-timeframe structure failure
+(15m Lower High), and volume character (high volume, zero price progress).
+
+When all five edge detectors confirm simultaneously — the setup is not a prediction.
+It is an observation of something that has already happened.
+
+The trade executes on the WebSocket tick that confirms entry trigger breach.
+Not a prediction. Not an anticipation. A confirmation.
 
 ### Five Parallel Edge Detectors
 
 | Detector | What It Finds |
-|----------|--------------|
-| **Absorption Engine** | Hidden limit orders — high volume, zero price progress |
-| **Bad High Analyzer** | Supply walls at day extremes via Level 2 DOM |
-| **Trapped Long Scanner** | Failed breakouts with trapped retail positions |
-| **Failed Auction Detector** | Exhaustion after extended range expansion |
-| **Classic Pattern Engine** | Shooting stars, engulfing, evening stars with volume confirmation |
+|---|---|
+| **Absorption Engine** | High volume, zero price progress — hidden limit supply |
+| **Bad High Analyzer** | Level 2 DOM supply wall at day extreme |
+| **Trapped Long Scanner** | Failed breakout — retail buyers trapped above entry |
+| **Failed Auction Detector** | Range expansion exhaustion — price rejected by time, not force |
+| **Classic Pattern Engine** | Bearish Engulfing, Shooting Star, Evening Star — volume-confirmed |
 
-**Weighted confidence scoring.** A single extreme edge qualifies. Three weak edges qualify. The system knows the difference.
+Confidence tiers: `EXTREME ≥ 5.0` | `HIGH ≥ 3.0` | `MEDIUM ≥ 2.0`
 
-### The 12-Gate Framework
+A single MEDIUM edge without confluence is rejected.
 
-Every signal traverses twelve sequential validations. Failure at any gate = immediate rejection.
+---
 
-| Gate | Function |
-|------|----------|
-| **1. Signal Manager** | Daily caps, 45-min symbol cooldowns, 3-loss circuit breaker |
-| **2. Market Regime** | Nifty trend filter — blocks shorts in strong institutional uptrends |
-| **3. Data Quality** | Liquidity verification, microstructure analysis, doji spam rejection |
-| **4. Technical Context** | VWAP distance, gain percentage, day high proximity |
-| **5. Hard Constraints** | Gain limits (6–15%), distance-from-high thresholds |
-| **6. Circuit Guard** | Upper circuit proximity check via Level 2 depth |
-| **7. Momentum Filter** | Freight train detection — extreme RVOL × VWAP slope |
-| **8. Pattern Recognition** | Multi-edge detection with confidence scoring |
-| **9. Breakdown Confirmation** | Price must break below setup low — not just form the pattern |
-| **10. Institutional Confluence** | DOM, RSI, Fibonacci, OI, round number analysis |
-| **11. Higher Timeframe** | 15-minute structural alignment — Lower Highs required |
-| **12. Validation Gate** | Final price confirmation — eliminates 40% of false signals |
-
-**Output: 1–2 signals per day. Each one cleared through 12 independent checks.**
-
-***
-
-## Safety Architecture
-
-### Six Independent Protection Layers
-
-**Before execution:**
-- Capital availability verification
-- Position state confirmation
-- Directional conflict detection
-
-**During trade management:**
-- Real-time broker synchronization every 2 seconds
-- Double-verification on stop exits (4-step protocol)
-- Emergency circuit breakers on system failures
-
-**Continuous:**
-- Startup orphan detection — broker flat vs DB mismatch caught on boot
-- Periodic reconciliation audits — market-aware intervals (6s live, 5min post-market)
-- Immediate Telegram alerts on any anomaly
-
-### Auto-Trade Gate (5 Layers Deep)
-
-The most critical safety mechanism. Prevents any order from being placed without explicit authorization.
+## Two WebSockets. Separate Concerns.
 
 ```
-Layer 1: config.py          → AUTO_MODE = False  (hardcoded boot default)
-Layer 2: telegram_bot.py    → self._auto_mode = False  (runtime state)
-Layer 3: trade_manager.py   → gate check before routing
-Layer 4: focus_engine.py    → gate check before order_manager call
-Layer 5: order_manager.py   → final secondary verification
+Data WebSocket
+    ─ Tick feed for subscribed symbols
+    ─ Gate 12: LTP monitored in real-time for entry trigger breach
+    ─ Position monitor: SL/TP levels checked on every tick
+    ─ Dashboard: 2s P&L refresh, broker-verified LTP
+
+Order WebSocket
+    ─ Fill events: PENDING → TRADED status change
+    ─ Entry fill confirmation, SL hit detection, exit confirmation
+    ─ Capital released only after TRADED event — never on REST response alone
 ```
 
-**Default state: Alert-only.** The bot scans, detects, and notifies. It never touches your capital until you send `/auto on`.
+Both run as background daemon threads (blocking Fyers SDK calls).
+Callbacks are bridged to the asyncio event loop via `call_soon_threadsafe`.
+No polling. No `asyncio.sleep` refresh loops on order state.
+Events arrive. Handlers fire. State updates. Done.
 
-***
+### REST vs WebSocket — Where Each Is Used
 
-## Execution Engine
+| Operation | Transport | Reason |
+|---|---|---|
+| Scanner: 2,418 symbol quote batch | REST | No bulk WebSocket subscription available |
+| Gates 1–11 signal analysis | REST (cached snapshot) | Point-in-time batch analysis |
+| Gate 12 price monitoring | **WebSocket** | Real-time tick — no polling lag acceptable |
+| Dashboard P&L refresh (2s) | **WebSocket** | Zero-latency broker-verified LTP |
+| Order submission (entry / exit) | REST | Fyers requires REST for new orders |
+| Fill confirmation | **WebSocket** | Fastest fill notification — no REST poll |
+| EOD reconciliation | REST | Point-in-time position verification |
 
-### Two Modes. Your Choice.
+---
 
-**Manual Mode (Default)**
-System generates signal → Telegram alert with full confluence breakdown → You tap **GO** → Pre-configured entry + stop placed atomically.
+## The Single Asyncio Event Loop
 
-**Autonomous Mode** (`/auto on`)
-Signal validated → 12 gates cleared → Capital checked → Position verified → Entry + SL placed → Scalper manager activated → Dashboard live.
-All in under 2 seconds.
+One process. One event loop. Five concurrent tasks.
 
-### Position Lifecycle
+```python
+async with asyncio.TaskGroup() as tg:
+    tg.create_task(_trading_loop(ctx, shutdown_event))
+    tg.create_task(bot.run(shutdown_event))
+    tg.create_task(reconciliation_engine.run(shutdown_event))
+    tg.create_task(eod_scheduler(...))
+    tg.create_task(eod_watchdog(shutdown_event))
+```
+
+All five share `shutdown_event`. Setting it from any component
+exits every loop cleanly on its next iteration. No `os._exit`. No `sys.exit(1)`
+in the middle of a cleanup sequence. Structured. Deterministic.
+
+`_supervised()` wraps each task — crashes are retried up to the configured limit.
+
+`_validate_dependencies()` runs before the TaskGroup starts.
+If any critical dependency is `None`, the process hard-crashes before the
+first scan. No degraded state. No silent no-ops.
+
+```python
+def _validate_dependencies(ctx: RuntimeContext) -> None:
+    if ctx.order_manager is None:
+        raise RuntimeError("FATAL: OrderManager not initialized")
+    if ctx.broker is None:
+        raise RuntimeError("FATAL: Broker not initialized")
+    # ... all critical deps verified
+```
+
+---
+
+## The Auto-Trade Gate (5 Layers)
+
+No order is placed without clearing all five. In sequence.
 
 ```
-Entry confirmed
-    ↓
-Breakeven trigger    → SL moves to Entry + buffer (after 1× risk profit)
-    ↓
-Trailing activated   → Aggressively follows price (after 2× risk profit)
-    ↓
-TP1 (50% position)   → Half secured
-    ↓
-TP2 (25% position)   → More secured
-    ↓
-TP3 (25% runner)     → Runs until structure break or deep target
-    ↓
-Discretionary exit   → Soft stop on orderflow reversal (before hard SL)
+Layer 1 — config.py          AUTO_MODE = False   [hardcoded boot default]
+Layer 2 — telegram_bot.py    self._auto_mode = False   [runtime state]
+Layer 3 — trade_manager.py   gate check before routing
+Layer 4 — focus_engine.py    gate check before order_manager call
+Layer 5 — order_manager.py   final verification before broker REST call
 ```
 
-***
+Default state: alert-only. The engine scans, detects, and notifies.
+It never touches capital until you send `/auto on` from your registered Telegram.
 
-## Live Dashboard
+---
 
-Every active position streams to Telegram in real-time:
+## Reconciliation
+
+The reconciliation engine runs continuously in the background.
+
+It compares DB state to broker state. It detects orphaned positions
+(broker open, DB closed), phantom positions (DB open, broker flat),
+and price mismatches. It alerts immediately on any discrepancy.
+
+It is aware of its own cost:
 
 ```
-⚡ ACTIVE TRADE
+Market hours, open positions   → every 6 seconds
+Off-hours, open positions      → every 30 seconds
+Off-hours, fully flat          → every 300 seconds
+```
 
-TATASTEEL SHORT
-Entry: ₹849.20 | Qty: 2
+When flat off-hours, a single cache check (`_has_open_positions = False`)
+short-circuits the entire reconciliation cycle. Zero DB queries. Zero broker calls.
+The system is not busy when there is nothing to do.
+
+---
+
+## EOD Shutdown (Two Independent Layers)
+
+EOD is the highest-risk operational moment.
+A stuck scan loop, a hung DB query, a WebSocket reconnect thread —
+any of these can prevent a clean shutdown.
+
+Two independent mechanisms. Neither depends on the other.
+
+```
+15:10 IST  — TradeManager.close_all_positions()  [hard square-off]
+15:32 IST  — eod_scheduler: analysis fires → shutdown_event.set()
+15:32 IST  — eod_watchdog: independently fires shutdown_event.set()
+15:40 IST  — eod_watchdog: os.kill(os.getpid(), SIGTERM)  [hard kill]
+```
+
+`eod_watchdog` checks every 30 seconds. It is isolated in its own task.
+No scan loop, DB hang, or WebSocket thread can prevent it from running.
+
+Maximum graceful shutdown window: **25 seconds.**
+
+```
+bot.stop()                    → 5s timeout
+reconciliation_engine.stop()  → 10s timeout
+db_pool.close()               → 5s timeout
+broker.shutdown()             → 5s timeout
+```
+
+---
+
+## The SL State Machine
+
+A stop loss is not a number. It is a state.
+
+```
+INITIAL      → placed at entry. Fixed distance. REST order submitted atomically.
+     ↓
+BREAKEVEN    → SL moved to entry + buffer.
+               Trigger: 1× risk profit reached.
+               Reason: eliminate the possibility of a winning trade becoming a loss.
+     ↓
+TRAILING     → SL follows price.
+               0.20% trail at 2× risk. 0.15% at 3×. 0.10% near target.
+               Reason: let winners run. Tighten as conviction grows.
+     ↓
+TIGHTENING   → SL tightens aggressively near TP.
+               Reason: prevent giveback on the final move into target.
+```
+
+### Exit Hierarchy
+
+Six exit types. Priority order is fixed.
+
+```
+1. EMERGENCY      → Immediate full close. Circuit breaker. No confirmation.
+2. HARD_SL        → WebSocket price breach. Broker SL order triggered.
+3. SOFT_STOP      → DiscretionaryEngine: orderflow reversal detected.
+4. TP1 (50%)      → +1.5% from entry. Half position closed. REST order.
+5. TP2 (25%)      → +2.5% from entry. Quarter position closed. REST order.
+6. TP3 (25%)      → +3.5% from entry. Runner. Structure break closes it.
+7. EOD_SQUAREOFF  → 15:10 IST. Hard close. No exceptions.
+```
+
+---
+
+## The Live Dashboard
+
+```
+⚡ ACTIVE TRADE — SHORT
+
+NSE:TATASTEEL-EQ
+Entry: ₹849.20  |  Qty: 2  |  Margin: ₹1,698
 
 ━━━━━━━━━━━━━━━━━━━━━━━━
-Current: ₹842.50 ⬇️
-P&L: +₹13.40 (+0.79%)
-ROI: +3.95% (5× leverage)
+LTP:    ₹842.50  ⬇️
+P&L:    +₹13.40  (+0.79%)
+ROI:    +3.95%  (5× leverage)
 
-Stop: ₹849.20 (BREAKEVEN 🔒)
-Target: ₹832.50 (-2.0%)
+SL:     ₹849.20  [BREAKEVEN 🔒]
+TP1:    ₹836.60  (-1.5%) — 50% exit
+TP2:    ₹828.20  (-2.5%) — 25% exit
+TP3:    ₹819.80  (-3.5%) — runner
 
-Orderflow: 🟢 BEARISH CONFIRMED
+OF:     🔴 BEARISH CONFIRMED — Trapped longs detected
+HTF:    ✅ 15m Lower High: 849.80 → 847.40
 ━━━━━━━━━━━━━━━━━━━━━━━━
 
-[🔄 Refresh] [❌ Close Now]
+[🔄 Refresh]  [❌ Close Now]
 ```
 
-Updated every 2 seconds. Automatically. Always broker-verified.
+Broker-verified every 2 seconds. Not estimated. Not cached.
 
-***
+---
 
-## Diagnostic Intelligence
+## What Gets Logged
 
-### `/why` Command
+Everything.
 
-Saw a setup the bot skipped? Ask it:
+```
+logs/bot.log                       — rotating, 10MB × 5, every system event
+logs/signals.csv                   — every signal, executed and rejected, gate results
+logs/diagnostic_analysis.csv       — every /why query, gate-by-gate breakdown
+logs/emergency_alerts.log          — critical failure events only
+data/ml/data{YYYY-MM-DD}.parquet   — 40+ features per signal observation
+data/trade_journal.csv             — human-readable trade record
+```
+
+The signal log exists because the most useful data is the data
+about what the system rejected — and why. Every rejected signal is queryable.
+Every threshold that caused a rejection is visible.
+
+The ML log exists because today's rejected signals are tomorrow's training labels.
+The system is not yet smart enough to learn from its own history.
+It is building the dataset that will eventually allow it to.
+
+---
+
+## The `/why` Command
 
 ```
 /why RELIANCE 14:25
 ```
 
-```
-🔍 ANALYSIS: RELIANCE @ 14:25
+The system reruns the full 12-gate analysis on historical data for that symbol
+at that timestamp and returns a gate-by-gate pass/fail breakdown.
 
-Price: ₹2,847.30 | Gain: +8.2%
+Every missed signal has a reason. Every reason has a threshold.
+Every threshold is adjustable. The system does not hide its logic.
 
-✅ Gates 1–4:  PASSED
-❌ Gate 5:     FAILED
-   Reason:     TOO_FAR_FROM_HIGH (5.2% below day high)
-   Threshold:  4.0% maximum
-   
-   💡 Suggestion: Increase threshold to 6.0%
-   Historical profitability at 5–6%: +73% win rate
+Every run is appended to `logs/diagnostic_analysis.csv`. Cumulative.
+The record of every time the system said no — and whether it was right.
 
-📊 30-min outcome: +0.94% (would have been profitable)
-```
+---
 
-**Every miss becomes a data point. Every data point improves tomorrow.**
+## The Database
 
-***
+PostgreSQL 14+. asyncpg. Pool: 10 minimum, 50 maximum connections.
 
-## End-of-Day Analytics
-
-```bash
-python eod_analysis.py
-```
+Three tables:
 
 ```
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-EOD ANALYSIS: 2026-02-19
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Signals Generated:  5
-  ✅ Executed:       3
-  ⏸️  Skipped:       2
-
-━━━━ EXECUTED ━━━━
-#1 TATASTEEL:   +₹18.50 (+1.08%)
-#2 INFY:        +₹36.20 (+2.49%)
-#3 WIPRO:       -₹7.20  (-0.41%)
-
-Session P&L:    +₹47.50
-Win Rate:        66.7% (2/3)
-
-━━━━ SKIPPED (What You Missed) ━━━━
-#4 RELIANCE:   Insufficient funds
-               Outcome: +1.8% (₹32)
-
-#5 HDFCBANK:   Position already active
-               Outcome: +0.9% (₹18)
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+positions           — every trade: entry, exit, size, P&L, status
+orders              — every order: submission time, fill price, status, broker ID
+reconciliation_log  — every reconciliation cycle: mismatches, timestamps
 ```
 
-***
+Migration: `migrations/v42_1_0_postgresql.sql`
 
-## Performance Profile
+`log_trade_entry()` wraps the `positions` and `orders` inserts in a single
+atomic transaction. Either both succeed or neither does.
+There is no state where a position exists without a corresponding order record.
 
-### Conservative Projections (₹1,800 base capital, 5× leverage)
-
-| Metric | Value |
-|--------|-------|
-| Win Rate | 65–70% |
-| Average Win | +2.0% (₹36/trade) |
-| Average Loss | -0.4% (₹7/trade) |
-| Profit Factor | ~3.5 |
-| Risk per Trade | 0.8–1.2% |
-| Signals per Day | 1–2 |
-
-**Monthly estimate (40 trades):**
-```
-28 wins  × ₹36  =  +₹1,008
-12 losses × ₹7  =   -₹84
-━━━━━━━━━━━━━━━━━━
-Net: ~₹924/month
-ROI: ~51% monthly on ₹1,800 base
-```
-
-These are forward-looking projections, not guarantees. Markets are adversarial. Drawdowns are inevitable. The system is designed to tilt probability — not eliminate risk.
-
-***
+---
 
 ## Technical Stack
 
 | Layer | Technology |
-|-------|-----------|
-| **Language** | Python 3.10+ |
-| **Broker API** | Fyers API v3 (REST + WebSocket) |
-| **Concurrency** | asyncio event loop + threading |
-| **Database** | PostgreSQL via asyncpg (pool: 10–50 connections) |
-| **Interface** | Telegram Bot API |
-| **Data** | pandas, numpy, Parquet columnar storage |
-| **Auth** | OAuth 2.0, singleton token, file persistence |
+|---|---|
+| Language | Python 3.10+ |
+| Concurrency | `asyncio.TaskGroup` + `threading` (WebSocket daemon threads) |
+| Broker | Fyers API v3 — REST + dual WebSocket |
+| Database | PostgreSQL 14+ via asyncpg (pool: 10–50) |
+| Interface | python-telegram-bot v20+ (PTB) |
+| Data | pandas, numpy, Apache Parquet |
+| Auth | OAuth 2.0, singleton token, file persistence |
+| Logging | `RotatingFileHandler` — 10MB × 5 backups |
 
-***
+---
 
-## Deployment
-
-### Setup (15 Minutes)
+## Setup
 
 ```bash
-# 1. Clone
 git clone https://github.com/nabrahma/ShortCircuit.git
 cd ShortCircuit
 
-# 2. Install dependencies (pinned for stability)
 pip install -r requirements.txt
 
-# 3. Configure credentials
 cp .env.example .env
-# Edit .env — Fyers API keys, PostgreSQL credentials, Telegram token
+# FYERS_CLIENT_ID, FYERS_SECRET, FYERS_REDIRECT_URI
+# DB_HOST, DB_NAME, DB_USER, DB_PASS
+# TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
 
-# 4. Setup database
 psql -U postgres -c "CREATE DATABASE shortcircuit_trading;"
 python apply_migration.py
 
-# 5. First run — authenticates Fyers, saves token
 python main.py
-# Token saved to data/access_token.txt — no re-auth needed on restart
+# Token saved to data/access_token.txt after first OAuth flow.
+# No re-auth needed on subsequent restarts.
 ```
 
-### System Requirements
+Before enabling auto-trade, verify the startup log contains all three lines:
 
-- Python 3.10+
-- 4GB RAM (8GB recommended)
-- PostgreSQL 14+
-- 5 Mbps+ stable connection
-- Fyers account with API v3 access
-- Telegram account
+```
+[INIT]     ✅ OrderManager constructed and injected into FocusEngine.
+[STARTUP]  ✅ All dependency checks passed. Safe to trade.
+[WATCHDOG] ✅ EOD watchdog started. Monitoring for 15:32 IST.
+```
 
-**Recommended:** Cloud VPS (₹500–1,000/month) for uninterrupted 9:15 AM–3:30 PM operation.
+If any line is missing — do not trade. Diagnose first.
 
-***
+---
 
-## Command Reference
+## Commands
 
-| Command | Function |
-|---------|----------|
+| Command | What It Does |
+|---|---|
 | `/auto on` | Enable autonomous execution |
 | `/auto off` | Revert to alert-only mode |
-| `/status` | Capital, positions, P&L, system health |
-| `/why SYMBOL TIME` | Diagnostic replay of any missed signal |
+| `/status` | Capital state, open positions, session P&L, system health |
+| `/positions` | All open positions with live broker-verified P&L |
+| `/pnl` | Session P&L summary |
+| `/why SYMBOL TIME` | Full gate-by-gate replay of any signal or miss |
 | `/pause` | Suspend signal generation |
-| `/resume` | Reactivate scanning |
+| `/resume` | Resume scanning |
 
-***
+---
 
-## Growth Path
+## Who Should Use This
 
-**Months 1–2: Validation**
-Paper trade 50+ signals. Verify safety systems. Tune parameters. Target: Break-even.
+People who understand that an algo does not make you a better trader.
+It makes you a *more consistent* trader — which is only valuable if the
+underlying judgment is already sound.
 
-**Months 3–4: Consistency**
-Enable auto-execution after proving manual success. Increase capital to ₹3,000. Target: ₹2,000–3,000/month.
+The system enforces discipline mechanically. But the parameters it enforces —
+the gain thresholds, the RVOL requirements, the HTF structure rules —
+those were written by a human. If that human's understanding of markets
+is wrong, the system will execute that wrongness with perfect consistency.
 
-**Months 5–6: Optimization**
-Analyze 200+ trades. Fine-tune gate thresholds. Enable ML-driven weight adjustments. Target: ₹3,000–5,000/month.
+Read the code before running it with real capital.
+Understand every gate before trusting any of them.
+Monitor the system during market hours.
 
-**Months 7+: Scale**
-Increase to ₹5,000/trade. Multi-position deployment. Target: ₹5,000–10,000/month.
+This is a tool. The responsibility for how it is used remains entirely
+with the person who runs it.
 
-***
+---
 
-## Who This Is For
+## Risk
 
-**✅ Right fit:**
-- Experienced intraday traders seeking disciplined automation
-- Technical analysts who understand VWAP, orderflow, DOM
-- Risk-aware individuals who prioritize capital preservation
-- Data-driven traders who want diagnostics, not black boxes
+Markets are adversarial. The system is designed around a statistical edge —
+not certainty. Losses are expected. Drawdowns are modeled for.
+Three consecutive losses trigger an automatic pause.
 
-**❌ Wrong fit:**
-- Complete beginners (learn manual trading first)
-- Traders seeking guaranteed returns
-- Anyone unable to monitor a live system during market hours
-- Undercapitalized traders (₹10,000 minimum recommended)
+The edge, if it exists, is in the microstructure event described above —
+a real phenomenon in liquid markets, detectable with the right instrumentation.
+Whether that edge persists, and for how long, is an empirical question
+that only a live trading record can answer.
 
-***
+This system is built to generate that record cleanly.
 
-## Data & Security
+---
 
-- All credentials stored locally — never transmitted to any third party
-- No telemetry, no usage tracking, no phone-home
-- OAuth 2.0 authentication — no password storage
-- Trade/read permissions only — zero withdrawal access
-- Full open-source transparency — audit every line
+## Security
 
-***
+- All credentials in `.env` — never transmitted, never logged
+- No telemetry, no external data collection, no phone-home
+- OAuth 2.0 — no broker password stored anywhere
+- Trade and read permissions only — withdrawal access is not possible
+- Fully open source — every gate, every order path, every handler is auditable
 
-## Risk Disclosure
-
-ShortCircuit automates execution. It does not automate judgment.
-
-**What it does:** Scans thousands of symbols, validates signals through 12 gates, executes with six safety layers, manages positions dynamically, and logs everything for continuous improvement.
-
-**What it does not do:** Guarantee profits, eliminate losses, replace human oversight, or provide investment advice.
-
-Markets are adversarial by nature. A 65% win rate means 35% of trades lose. A 20% drawdown is possible and planned for. The edge is statistical, not certain.
-
-**Trade with capital you can afford to lose. Monitor the system during market hours. Override when judgment demands it.**
-
-***
+---
 
 ## License
 
-Apache License 2.0 — Commercial use, modification, and distribution permitted. No warranty provided.
+Apache 2.0. Use, modify, distribute. No warranty.
 
-Trading equities involves substantial risk of capital loss. The software is provided as-is. The developer assumes no liability for trading losses, system failures, or consequential damages.
+Trading equities involves substantial risk of capital loss.
+The software is provided as-is. No liability for trading losses,
+system failures, or consequential damages.
 
-***
+---
 
-## Support
+*[@nabrahma](https://github.com/nabrahma)*
 
-- Bug reports: GitHub Issues
-- Security vulnerabilities: GitHub Security Advisories
-- Documentation: inline code docs + `ARCHITECTURE_COMPLETE.md`
-
-Commercial support, strategy consultation, and investment advice are not available.
-
-***
-
-*Created by [@nabrahma](https://github.com/nabrahma)*
-
-**ShortCircuit. Institutional infrastructure. Individual scale.** ⚡
+**ShortCircuit. Built to listen carefully.** ⚡
 
 ```bash
 git clone https://github.com/nabrahma/ShortCircuit.git
 ```
-
-*Star this repository if you believe retail traders deserve institutional-grade tools.* ⭐
