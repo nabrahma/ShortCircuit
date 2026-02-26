@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 class ReconciliationEngine:
     """
     Phase 42.3: HFT Reconciliation Engine — Zero-cost when flat, cache-driven when live.
-    
+
     Architecture:
     - FLAT STATE  → pure cache check, 0 REST calls, 0 DB queries. Sub-millisecond.
     - LIVE STATE  → cache-first broker read, DB read with dirty-flag guard.
@@ -28,6 +28,7 @@ class ReconciliationEngine:
         self._db_positions: dict = {}        # symbol → qty (last known DB state)
         self._db_dirty: bool = True          # True = re-fetch DB next cycle
         self._has_open_positions: bool = False  # master flat/live flag
+        self._shutdown_event: asyncio.Event = None  # Used for interruptible sleep
         # ─────────────────────────────────────────────────────────────
 
     # ── Called by TradeManager when trade opens or closes ─────────────
@@ -46,13 +47,27 @@ class ReconciliationEngine:
         asyncio.create_task(self.run())
 
     async def stop(self):
+        """Stop with hard timeout — never hangs more than 10s."""
         self.running = False
+        logger.info("[REC-ENGINE] Stop called. Hard timeout: 10s.")
+        # Nothing to await currently — stop is immediate once running=False
         logger.info("🛑 Reconciliation Engine Stopped.")
+
+    async def _interruptible_sleep(self, seconds: float):
+        """Sleep that wakes immediately when shutdown_event is set."""
+        if self._shutdown_event is None:
+            await asyncio.sleep(seconds)
+            return
+        try:
+            await asyncio.wait_for(self._shutdown_event.wait(), timeout=seconds)
+        except asyncio.TimeoutError:
+            pass  # Normal — sleep completed without shutdown
 
     async def run(self, shutdown_event: asyncio.Event = None):
         if self.running:
             return
         self.running = True
+        self._shutdown_event = shutdown_event
         logger.info("✅ Reconciliation Engine Started (WebSocket Mode).")
         while self.running and (shutdown_event is None or not shutdown_event.is_set()):
             start_time = asyncio.get_event_loop().time()
@@ -69,7 +84,7 @@ class ReconciliationEngine:
             elif elapsed_ms > 3000:
                 logger.warning(f"⚠️ Very Slow Reconciliation (off-hours): {elapsed_ms:.3f}ms")
 
-            await asyncio.sleep(interval)
+            await self._interruptible_sleep(interval)
 
     async def reconcile(self):
         """

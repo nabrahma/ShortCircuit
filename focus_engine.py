@@ -1,16 +1,10 @@
 import time
 import logging
 import threading
+import datetime
+
 from fyers_connect import FyersConnect
 import config
-import time
-import logging
-import threading
-from fyers_connect import FyersConnect
-import config
-import datetime
-from order_manager import OrderManager
-import datetime
 from order_manager import OrderManager
 from discretionary_engine import DiscretionaryEngine
 
@@ -251,15 +245,22 @@ class FocusEngine:
 
                     logger.info(f"✅ [VALIDATED] {symbol} broke {trigger_price} @ {ltp}. EXECUTING!")
                     
-                    # 1. Execute via OrderManager (Phase 41.3)
-                    if self.order_manager:
-                        pos = self.order_manager.enter_position(pending['data'])
-                        if pos:
-                            self.start_focus(symbol, pos)
-                    else:
-                        # Fallback (Legacy)
-                        logger.warning("Using Legacy TradeManager (OrderManager not initialized)")
-                        self.trade_manager.execute_logic(pending['data'])
+                    # Execute via OrderManager — MUST be initialized (P0 fix)
+                    if self.order_manager is None:
+                        logger.critical(
+                            "[FATAL] OrderManager is None at execution time for %s. "
+                            "This is a startup initialization failure.", symbol
+                        )
+                        if self.telegram_bot:
+                            self.telegram_bot.send_alert(
+                                f"🚨 CRITICAL: OrderManager not initialized. "
+                                f"Order for {symbol} BLOCKED. Check startup init chain."
+                            )
+                        raise RuntimeError(f"OrderManager not initialized for {symbol}")
+
+                    pos = self.order_manager.enter_position(pending['data'])
+                    if pos:
+                        self.start_focus(symbol, pos)
                     
                     del self.pending_signals[symbol]
                     return {'status': 'EXECUTED'} # Return result to Main

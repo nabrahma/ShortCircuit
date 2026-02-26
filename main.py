@@ -20,6 +20,7 @@ from capital_manager import CapitalManager
 from database import DatabaseManager
 from eod_analyzer import EODAnalyzer
 from eod_scheduler import eod_scheduler
+from eod_watchdog import eod_watchdog
 from focus_engine import FocusEngine
 from fyers_broker_interface import FyersBrokerInterface
 from fyers_connect import FyersConnect
@@ -147,6 +148,7 @@ class RuntimeContext:
     analyzer: FyersAnalyzer
     db_manager: DatabaseManager
     broker: FyersBrokerInterface
+    order_manager: Any  # OrderManager — constructed after broker
     reconciliation_engine: ReconciliationEngine
     startup_recovery: StartupRecovery
 
@@ -196,6 +198,23 @@ async def _initialize_runtime() -> RuntimeContext:
     )
     await broker.initialize()
 
+    # ── P0 FIX: Construct OrderManager with live broker ──────────────
+    from order_manager import OrderManager
+    order_manager = OrderManager(
+        broker=broker,
+        telegram_bot=bot,
+        db=db_manager,
+        capital_manager=capital_manager,
+    )
+
+    # Inject into FocusEngine (was None → caused NSESGL-EQ execution miss)
+    focus_engine.order_manager = order_manager
+    logger.info("[INIT] ✅ OrderManager constructed and injected into FocusEngine.")
+
+    # Also wire into bot for /positions, /pnl, order alerts
+    bot.order_manager = order_manager
+    # ────────────────────────────────────────────────────────────────────
+
     reconciliation_engine = ReconciliationEngine(
         broker=broker,
         db_manager=db_manager,
@@ -214,6 +233,7 @@ async def _initialize_runtime() -> RuntimeContext:
         analyzer=analyzer,
         db_manager=db_manager,
         broker=broker,
+        order_manager=order_manager,
         reconciliation_engine=reconciliation_engine,
         startup_recovery=startup_recovery,
     )
@@ -326,28 +346,67 @@ def _update_terminal_log() -> None:
 
 
 async def _cleanup_runtime(ctx: Optional[RuntimeContext]):
+    """Ordered shutdown with hard timeouts. Total max: ~25s."""
     if ctx is None:
         return
 
+    logger.info("[SHUTDOWN] Beginning cleanup sequence.")
+
+    # 1. RecEngine — 10s max
     try:
-        await ctx.reconciliation_engine.stop()
+        await asyncio.wait_for(ctx.reconciliation_engine.stop(), timeout=10.0)
+    except asyncio.TimeoutError:
+        logger.warning("[CLEANUP] RecEngine stop timed out after 10s. Forcing.")
     except Exception as exc:
         logger.error("[CLEANUP] Reconciliation stop failed: %s", exc)
 
+    # 2. Telegram — 5s max
     try:
-        await ctx.bot.stop()
+        await asyncio.wait_for(ctx.bot.stop(), timeout=5.0)
+    except asyncio.TimeoutError:
+        logger.warning("[CLEANUP] Telegram stop timed out after 5s. Forcing.")
     except Exception as exc:
         logger.error("[CLEANUP] Telegram stop failed: %s", exc)
 
+    # 3. DB Pool — 5s max
     try:
-        await ctx.db_manager.close()
+        await asyncio.wait_for(ctx.db_manager.close(), timeout=5.0)
+    except asyncio.TimeoutError:
+        logger.warning("[CLEANUP] DB close timed out after 5s. Forcing.")
     except Exception as exc:
         logger.error("[CLEANUP] DB close failed: %s", exc)
 
+    # 4. Broker — 5s max
     try:
-        await ctx.broker.disconnect()
+        await asyncio.wait_for(ctx.broker.disconnect(), timeout=5.0)
+    except asyncio.TimeoutError:
+        logger.warning("[CLEANUP] Broker disconnect timed out after 5s. Forcing.")
     except Exception as exc:
         logger.error("[CLEANUP] Broker disconnect failed: %s", exc)
+
+    logger.info("[SUPERVISOR] ✅ Cleanup complete.")
+
+
+def _validate_dependencies(ctx: RuntimeContext) -> None:
+    """Hard-fail if any critical dependency is None. Runs BEFORE trading loop."""
+    checks = {
+        "BrokerInterface": ctx.broker,
+        "OrderManager": ctx.order_manager,
+        "CapitalManager": ctx.capital_manager,
+        "FocusEngine": ctx.focus_engine,
+        "FocusEngine.order_manager": ctx.focus_engine.order_manager,
+        "TelegramBot": ctx.bot,
+    }
+    failed = [name for name, obj in checks.items() if obj is None]
+    if failed:
+        msg = f"[STARTUP FAIL] Critical dependencies not initialized: {failed}"
+        logger.critical(msg)
+        try:
+            ctx.bot.send_alert(f"🚨 STARTUP FAIL: {failed} are None. Bot cannot trade.")
+        except Exception:
+            pass
+        raise RuntimeError(msg)
+    logger.info("[STARTUP] ✅ All dependency checks passed. Safe to trade.")
 
 
 async def main() -> int:
@@ -362,6 +421,7 @@ async def main() -> int:
 
     try:
         ctx = await _initialize_runtime()
+        _validate_dependencies(ctx)
 
         async def _notify(message: str):
             try:
@@ -423,6 +483,11 @@ async def main() -> int:
                     bot_start_time=bot_start_time,
                 ),
                 name="eod_scheduler",
+            )
+            # Bug 2A: Standalone EOD watchdog — independent failsafe
+            tg.create_task(
+                eod_watchdog(shutdown_event),
+                name="eod_watchdog",
             )
     except* Exception as eg:
         logger.critical("[SUPERVISOR] TaskGroup failed: %s", eg)

@@ -78,6 +78,12 @@ async def eod_scheduler(
                 await notify(f"EOD Analysis FAILED: {exc}")
             analysis_done_today = True
 
+            # ── Bug 2A FIX: Fire graceful shutdown after EOD work is done ──
+            logger.info("[EOD_SCHEDULER] All EOD tasks complete. Firing shutdown.")
+            await notify("✅ EOD complete. Shutting down bot.")
+            shutdown_event.set()
+            return  # Exit scheduler — shutdown_event will stop all other tasks
+
         try:
             await asyncio.wait_for(shutdown_event.wait(), timeout=15)
         except asyncio.TimeoutError:
