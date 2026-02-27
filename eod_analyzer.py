@@ -2,7 +2,7 @@ import asyncio
 import inspect
 import logging
 import os
-from datetime import datetime
+from datetime import date, datetime
 
 import config
 from database import DatabaseManager
@@ -39,7 +39,15 @@ class EODAnalyzer:
                 "EODAnalyzer: DatabaseManager missing .query() method — check interface contract."
             )
 
-        target_date = date or datetime.now().strftime("%Y-%m-%d")
+        if isinstance(date, str):
+            import datetime as _dt
+            target_date = _dt.date.fromisoformat(date)
+        elif isinstance(date, datetime):
+            target_date = date.date()
+        elif date is not None:
+            target_date = date
+        else:
+            target_date = datetime.now().date()
         logger.info("Starting EOD analysis for %s", target_date)
 
         trades = await self._fetch_trades(target_date)
