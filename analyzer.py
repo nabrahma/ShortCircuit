@@ -178,69 +178,72 @@ class FyersAnalyzer:
             prev_candle = df.iloc[0] # Fallback
             is_sniper_zone = False
         
-        valid_signal = False
-        pattern_desc = ""
-        
-        # Check for Price Breakdown
-        current_ltp = df.iloc[-1]['close']
-        setup_low = prev_candle['low']
-        breakdown = current_ltp < setup_low
+        # ── PHASE 44.8.1: Gate 5 moved outside breakdown block ──────────
 
-        if breakdown:
-            vwap_sd = self.gm_analyst.calculate_vwap_bands(prev_df)
-            is_extended = vwap_sd > 2.0
-            
-            # ── PHASE 44.8: Gate 5 — Exhaustion at Stretch ──────────────────
-            signal_meta = {}
-            profile = None
-            try:
-                profile = self.profile_analyzer.calculate_tpo_profile(df)
-            except Exception as e:
-                logger.warning(f"Profile computation error: {e}")
-                
-            exhaustion = self.gm_analyst.is_exhaustion_at_stretch(
-                candles=df.to_dict('records'),
-                profile=profile,       # already computed for Gate 6/D
-                gain_pct=gain_pct      # already available from scanner payload
-            )
-            
-            if not exhaustion["fired"]:
-                logger.debug(
-                    f"[Gate5] {symbol} FAIL — {exhaustion['reject_reason']} "
-                    f"stretch={exhaustion['stretch_score']:.2f} "
-                    f"vol_fade={exhaustion['vol_fade_ratio']:.2f}"
-                )
-                return None
-            
+        # Profile computation — feeds Gate 5 Gate D (close > VAH)
+        signal_meta = {}
+        profile = None
+        try:
+            profile = self.profile_analyzer.calculate_tpo_profile(df)
+        except Exception as e:
+            logger.warning(f"Profile computation error: {e}")
+
+        # Gate 5 — Exhaustion at Stretch
+        # Runs BEFORE breakdown check — detects exhaustion at the high
+        # Gate 10 WebSocket is the sole breakdown confirmation
+        exhaustion = self.gm_analyst.is_exhaustion_at_stretch(
+            candles=df.to_dict('records'),
+            profile=profile,
+            gain_pct=gain_pct
+        )
+
+        if not exhaustion["fired"]:
             logger.debug(
-                f"[Gate5] {symbol} PASS — "
-                f"confidence={exhaustion['confidence']} "
-                f"vol_fade={exhaustion['vol_fade_ratio']:.2f} "
-                f"pattern_bonus={exhaustion['pattern_bonus']}"
+                f"[Gate5] {symbol} FAIL — {exhaustion['reject_reason']} "
+                f"stretch={exhaustion['stretch_score']:.2f} "
+                f"vol_fade={exhaustion['vol_fade_ratio']:.2f}"
             )
-            
-            # Store for signal logging
-            signal_meta.update({
-                "stretch_score":  exhaustion["stretch_score"],
-                "vol_fade_ratio": exhaustion["vol_fade_ratio"],
-                "confidence":     exhaustion["confidence"],
-                "pattern_bonus":  exhaustion["pattern_bonus"],
-            })
-            
-            valid_signal = True
-            pattern_desc = exhaustion['pattern_bonus'] if exhaustion['pattern_bonus'] != "None" else "EXHAUSTION_FADE"
+            return None
 
-            if valid_signal:
-                valid_signal, pro_conf_msgs = self._check_pro_confluence(
-                    symbol, df, prev_df, slope, is_extended, vwap_sd, pattern_desc, depth_data, ltp, oi, signal_meta
-                )
-                if pro_conf_msgs:
-                    pattern_desc += f" + {', '.join(pro_conf_msgs)}"
+        logger.debug(
+            f"[Gate5] {symbol} PASS — "
+            f"confidence={exhaustion['confidence']} "
+            f"vol_fade={exhaustion['vol_fade_ratio']:.2f} "
+            f"pattern_bonus={exhaustion['pattern_bonus']}"
+        )
 
-        if valid_signal:
-            return self._finalize_signal(symbol, ltp, df, pattern_desc, slope, "", signal_meta)
-            
-        return None
+        signal_meta.update({
+            "stretch_score":  exhaustion["stretch_score"],
+            "vol_fade_ratio": exhaustion["vol_fade_ratio"],
+            "confidence":     exhaustion["confidence"],
+            "pattern_bonus":  exhaustion["pattern_bonus"],
+        })
+
+        pattern_desc = (
+            exhaustion['pattern_bonus']
+            if exhaustion['pattern_bonus'] != "None"
+            else "EXHAUSTION_FADE"
+        )
+
+        # Pro Confluence — runs after Gate 5 passes
+        vwap_sd = self.gm_analyst.calculate_vwap_bands(prev_df)
+        is_extended = vwap_sd > 2.0
+
+        valid_signal, pro_conf_msgs = self._check_pro_confluence(
+            symbol, df, prev_df, slope, is_extended, vwap_sd,
+            pattern_desc, depth_data, ltp, oi, signal_meta
+        )
+        if pro_conf_msgs:
+            pattern_desc += f" + {', '.join(pro_conf_msgs)}"
+
+        if not valid_signal:
+            return None
+
+        # Gate 10 WebSocket handles the actual price breakdown
+        # signal_low set in _finalize_signal → focusengine watches LTP < signal_low
+        return self._finalize_signal(
+            symbol, ltp, df, pattern_desc, slope, "", signal_meta
+        )
 
     def _check_filters(self, symbol: str) -> bool:
         """Runs pre-analysis checks: Market Regime."""
