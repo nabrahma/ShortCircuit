@@ -315,8 +315,19 @@ class ShortCircuitBot:
         signal_id = signal.get('id', f"{symbol}_{datetime.now().strftime('%H%M%S')}")
         side_emoji = "🔴" if side == "SHORT" else "🟢"
         mode_tag = "🤖 AUTO" if self._auto_mode else "👁️ ALERT"
+        # Phase 44.8 — confidence + volume fade in alert
+        conf     = signal.get("confidence", "")
+        fade     = signal.get("vol_fade_ratio", 0)
+        pattern_bonus  = signal.get("pattern_bonus", "None")
+        oi_dir   = signal.get("oi_direction", "unknown")
+        
+        oi_emoji = {"falling": "✅", "rising": "⚠️", "flat": "➖", "unknown": "➖"}
+        
         text = (
-            f"{mode_tag} | <b>{_he(symbol)}</b> {side_emoji} <b>{_he(side)}</b>\n\n"
+            f"{mode_tag} | <b>{_he(symbol)}</b> {side_emoji} <b>{_he(side)}</b>\n"
+            f"\n📊 <b>Edge:</b> {conf} | Vol Fade: {fade:.0%}"
+            f"\n🕯 Pattern Bonus: {pattern_bonus}"
+            f"\n📈 Futures OI: {oi_emoji.get(oi_dir, '➖')} {oi_dir.upper()}\n\n"
             f"Entry:    ₹{entry:.2f}\n"
             f"SL:       ₹{sl:.2f}\n"
             f"Target:   ₹{target:.2f}\n"

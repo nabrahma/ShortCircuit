@@ -234,6 +234,107 @@ class GodModeAnalyst:
             
         return "NORMAL", z_score
 
+    # ─── Phase 44.8 ──────────────────────────────────────────────────
+    def is_exhaustion_at_stretch(
+        self,
+        candles: list[dict],
+        profile,          # ProfileAnalyzer result (dict)
+        gain_pct: float   # current % gain vs prev close
+    ) -> dict:
+        """
+        Phase 44.8 — Core edge detector.
+
+        Fires when a stock is:
+          1. Stretched 9–14.5% above prev close (validated sweet spot)
+          2. Making a new intraday high
+          3. On significantly dying volume (vol_fade_ratio < 0.65)
+          4. While price is above VAH (no acceptance at this level)
+
+        Candle pattern is a BONUS — upgrades confidence but never required.
+        """
+        result = {
+            "fired":         False,
+            "confidence":    "",
+            "vol_fade_ratio": 0.0,
+            "stretch_score": 0.0,
+            "pattern_bonus": "None",
+            "reject_reason": ""
+        }
+
+        if len(candles) < 10:
+            result["reject_reason"] = "insufficient_candles"
+            return result
+
+        # ── Gate A: Stretch sweet spot ──────────────────────────────
+        stretch_score = round((gain_pct - 6.18) / 6.18, 3)
+        result["stretch_score"] = stretch_score
+
+        if gain_pct < 9.0:
+            result["reject_reason"] = f"stretch_too_low:{gain_pct:.2f}%"
+            return result
+        if gain_pct > 14.5:
+            result["reject_reason"] = f"stretch_too_high:{gain_pct:.2f}%"
+            return result
+
+        # ── Gate B: New intraday high ────────────────────────────────
+        recent_high = max(c['high'] for c in candles[-10:])
+        is_new_high  = candles[-1]['high'] >= recent_high * 0.999
+        if not is_new_high:
+            result["reject_reason"] = "no_new_high"
+            return result
+
+        # ── Gate C: Volume fading on the new high ───────────────────
+        prior_vols = [c['volume'] for c in candles[-6:-1]]
+        avg_prior_vol = sum(prior_vols) / len(prior_vols) if prior_vols else 0
+        if avg_prior_vol == 0:
+            result["reject_reason"] = "zero_prior_volume"
+            return result
+
+        vol_fade_ratio = round(candles[-1]['volume'] / avg_prior_vol, 3)
+        result["vol_fade_ratio"] = vol_fade_ratio
+
+        if vol_fade_ratio > 0.65:
+            result["reject_reason"] = f"volume_not_faded:{vol_fade_ratio:.2f}"
+            return result
+
+        # ── Gate D: Price above VAH (no acceptance) ─────────────────
+        if profile is not None:
+            vah = profile.get('vah') if isinstance(profile, dict) else getattr(profile, 'vah', None)
+            if vah and candles[-1]['close'] <= vah:
+                result["reject_reason"] = f"price_below_vah:{candles[-1]['close']}"
+                return result
+
+        # ── All gates passed — base signal fires ────────────────────
+        result["fired"] = True
+
+        # ── Confidence tier from volume fade severity ────────────────
+        if vol_fade_ratio < 0.30:
+            result["confidence"] = "EXTREME"   # volume collapsed >70%
+        elif vol_fade_ratio < 0.50:
+            result["confidence"] = "HIGH"      # volume faded 50–70%
+        else:
+            result["confidence"] = "MEDIUM"    # volume faded 35–50%
+
+        # ── Bonus: existing bearish pattern upgrades confidence ──────
+        try:
+            # We need to construct a dataframe for detect_structure_advanced
+            # Since detect_structure_advanced accepts df, we can just pass the last 3 candles
+            import pandas as pd
+            df_slice = pd.DataFrame(candles[-3:])
+            pattern, _ = self.detect_structure_advanced(df_slice)
+            if pattern in ("BEARISH_ENGULFING", "SHOOTING_STAR",
+                           "EVENING_STAR", "VOLUME_TRAP", "ABSORPTION_DOJI"):
+                result["pattern_bonus"] = pattern
+                # Upgrade one tier
+                if result["confidence"] == "MEDIUM":
+                    result["confidence"] = "HIGH"
+                elif result["confidence"] == "HIGH":
+                    result["confidence"] = "EXTREME"
+        except Exception:
+            pass  # pattern bonus is optional — never crash here
+
+        return result
+
     # Phase 21: Statistical Extremes
     def calculate_vwap_bands(self, df):
         """

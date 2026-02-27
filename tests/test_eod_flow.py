@@ -37,10 +37,11 @@ class FakeDB:
 
     def query(self, query, params):
         date = params[0]
+        date_str = date.strftime("%Y-%m-%d") if hasattr(date, "strftime") else date
         if "FROM positions" in query:
-            return [t for t in self._trades.values() if t["date"] == date]
+            return [t for t in self._trades.values() if t["date"] == date_str]
         if "FROM soft_stop_events" in query:
-            return [e for e in self._soft_stop_events if e["date"] == date]
+            return [e for e in self._soft_stop_events if e["date"] == date_str]
         return []
 
 

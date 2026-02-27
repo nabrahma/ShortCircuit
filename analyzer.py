@@ -21,7 +21,10 @@ SIGNAL_LOG_FILE = "logs/signals.csv"
 
 def log_signal(symbol: str, ltp: float, pattern: str, stop_loss: float,
                meta: str = "", setup_high: float = 0.0,
-               tick_size: float = 0.05, atr: float = 0.0):
+               tick_size: float = 0.05, atr: float = 0.0,
+               stretch_score: float = 0.0, vol_fade_ratio: float = 0.0,
+               confidence: str = "", pattern_bonus: str = "None",
+               oi_direction: str = "unknown"):
     """
     Persists signal details to a CSV file for EOD analysis.
     Phase 41.2: Extended with setup_high, tick_size, atr for simulation.
@@ -33,7 +36,9 @@ def log_signal(symbol: str, ltp: float, pattern: str, stop_loss: float,
         writer = csv.writer(f)
         if not file_exists:
             writer.writerow(["timestamp", "symbol", "ltp", "pattern",
-                             "stop_loss", "meta", "setup_high", "tick_size", "atr"])
+                             "stop_loss", "meta", "setup_high", "tick_size", "atr",
+                             "stretch_score", "vol_fade_ratio", "confidence",
+                             "pattern_bonus", "oi_direction"])
         
         writer.writerow([
             datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -44,7 +49,12 @@ def log_signal(symbol: str, ltp: float, pattern: str, stop_loss: float,
             meta,
             setup_high,
             tick_size,
-            atr
+            atr,
+            stretch_score,
+            vol_fade_ratio,
+            confidence,
+            pattern_bonus,
+            oi_direction
         ])
 
 class FyersAnalyzer:
@@ -160,12 +170,7 @@ class FyersAnalyzer:
         if self._is_momentum_too_strong(df, slope, symbol):
              return None
 
-        # 7. Pattern Recognition
-        struct, z_score = self.gm_analyst.detect_structure_advanced(df)
-        
-        # Tape Analysis (Stall Detection only, Absorption disabled)
-        is_stalled, _ = self.tape_reader.detect_stall(df)
-        
+        # 7. Pre-Calculation step
         if len(df) > 1:
             prev_candle = df.iloc[-2]
             is_sniper_zone = self._check_sniper_zone(df)
@@ -185,31 +190,55 @@ class FyersAnalyzer:
             vwap_sd = self.gm_analyst.calculate_vwap_bands(prev_df)
             is_extended = vwap_sd > 2.0
             
-            # Structural Patterns
-            if struct in ["SHOOTING_STAR", "BEARISH_ENGULFING", "EVENING_STAR", "MOMENTUM_BREAKDOWN", "VOLUME_TRAP"]:
-                valid_signal = True
-                pattern_desc = struct
+            # ── PHASE 44.8: Gate 5 — Exhaustion at Stretch ──────────────────
+            signal_meta = {}
+            profile = None
+            try:
+                profile = self.profile_analyzer.calculate_tpo_profile(df)
+            except Exception as e:
+                logger.warning(f"Profile computation error: {e}")
+                
+            exhaustion = self.gm_analyst.is_exhaustion_at_stretch(
+                candles=df.to_dict('records'),
+                profile=profile,       # already computed for Gate 6/D
+                gain_pct=gain_pct      # already available from scanner payload
+            )
             
-            # Sniper Doji
-            elif struct == "ABSORPTION_DOJI" and is_sniper_zone:
-                valid_signal = True
-                pattern_desc = struct
-            # Tape Stall (Drift) - Requires Extension
-            elif is_stalled and is_extended:
-                valid_signal = True
-                pattern_desc = "TAPESTALL (Drift)"
+            if not exhaustion["fired"]:
+                logger.debug(
+                    f"[Gate5] {symbol} FAIL — {exhaustion['reject_reason']} "
+                    f"stretch={exhaustion['stretch_score']:.2f} "
+                    f"vol_fade={exhaustion['vol_fade_ratio']:.2f}"
+                )
+                return None
+            
+            logger.debug(
+                f"[Gate5] {symbol} PASS — "
+                f"confidence={exhaustion['confidence']} "
+                f"vol_fade={exhaustion['vol_fade_ratio']:.2f} "
+                f"pattern_bonus={exhaustion['pattern_bonus']}"
+            )
+            
+            # Store for signal logging
+            signal_meta.update({
+                "stretch_score":  exhaustion["stretch_score"],
+                "vol_fade_ratio": exhaustion["vol_fade_ratio"],
+                "confidence":     exhaustion["confidence"],
+                "pattern_bonus":  exhaustion["pattern_bonus"],
+            })
+            
+            valid_signal = True
+            pattern_desc = exhaustion['pattern_bonus'] if exhaustion['pattern_bonus'] != "None" else "EXHAUSTION_FADE"
 
             if valid_signal:
-                # SPECIAL CASE: Momentum/Trap patterns don't need "Pro Confluence" if Volume is already high
-                # But let's check basic confluence anyway
                 valid_signal, pro_conf_msgs = self._check_pro_confluence(
-                    symbol, df, prev_df, slope, is_extended, vwap_sd, pattern_desc, depth_data, ltp, oi
+                    symbol, df, prev_df, slope, is_extended, vwap_sd, pattern_desc, depth_data, ltp, oi, signal_meta
                 )
                 if pro_conf_msgs:
                     pattern_desc += f" + {', '.join(pro_conf_msgs)}"
 
         if valid_signal:
-            return self._finalize_signal(symbol, ltp, df, pattern_desc, slope, "")
+            return self._finalize_signal(symbol, ltp, df, pattern_desc, slope, "", signal_meta)
             
         return None
 
@@ -286,8 +315,9 @@ class FyersAnalyzer:
         range_pos = (prev_close - micro_low) / denom
         return range_pos > 0.70
 
-    def _check_pro_confluence(self, symbol, df, prev_df, slope, is_extended, vwap_sd, pattern_desc, depth_data=None, ltp=0, oi=0) -> Tuple[bool, list]:
+    def _check_pro_confluence(self, symbol, df, prev_df, slope, is_extended, vwap_sd, pattern_desc, depth_data=None, ltp=0, oi=0, signal_meta=None) -> Tuple[bool, list]:
         """Verifies secondary confirmation signals."""
+        if signal_meta is None: signal_meta = {}
         pro_conf = []
         
         # Profile Rejection
@@ -387,6 +417,34 @@ class FyersAnalyzer:
              if not pro_conf:
                  logger.info(f"Refused {symbol}: Valid Structure but No Pro Confirmation.")
                  return False, []
+        
+        # ── PHASE 44.8: Futures OI enrichment ───────────────────────────
+        # Fetch if available. Never blocks signal. Logs direction only.
+        oi_direction = "unknown"
+        try:
+            from symbols import get_front_month_futures
+            fut_sym = get_front_month_futures(symbol)
+            if fut_sym:
+                fut_resp = self.fyers.quotes({"symbols": fut_sym})
+                if (fut_resp
+                        and fut_resp.get('d')
+                        and fut_resp['d'][0].get('s') != 'error'
+                        and fut_resp['d'][0].get('v')):
+                    oi_chg = fut_resp['d'][0]['v'].get('ch', 0)
+                    if oi_chg < 0:
+                        oi_direction = "falling"   # short covering = confirms exhaustion
+                        logger.debug(f"[Gate6-OI] {symbol} OI falling ✅ short-covering rally")
+                    elif oi_chg > 0:
+                        oi_direction = "rising"    # new longs = flag, not block
+                        logger.debug(f"[Gate6-OI] {symbol} OI rising ⚠️ new longs entering")
+                    else:
+                        oi_direction = "flat"
+                else:
+                    logger.debug(f"[Gate6-OI] {symbol} no futures contract — skipped")
+        except Exception as e:
+            logger.debug(f"[Gate6-OI] {symbol} OI fetch error (non-fatal): {e}")
+
+        signal_meta["oi_direction"] = oi_direction
         
         return True, pro_conf
 
@@ -529,7 +587,7 @@ class FyersAnalyzer:
             return None
 
         # Gate 11-12: HTF + Finalize (adds ML logging, SL, etc.)
-        base_signal = self._finalize_signal(symbol, ltp, df, edge_desc, slope, "")
+        base_signal = self._finalize_signal(symbol, ltp, df, edge_desc, slope, "", {})
         if base_signal is None:
             return None
 
@@ -545,8 +603,10 @@ class FyersAnalyzer:
 
         return base_signal
 
-    def _finalize_signal(self, symbol, ltp, df, pattern_desc, slope, wall_msg):
+    def _finalize_signal(self, symbol, ltp, df, pattern_desc, slope, wall_msg, signal_meta: dict = None):
         """Final HTF checks and logging."""
+        if signal_meta is None: signal_meta = {}
+        
         # HTF Confluence Check
         htf_ok, htf_msg = self.htf_confluence.check_trend_exhaustion(symbol)
         if not htf_ok:
@@ -571,7 +631,12 @@ class FyersAnalyzer:
         
         meta_str = f"Slope:{slope:.1f}, {wall_msg}, ATR:{atr:.2f}, {htf_msg}, {level_msg}"
         log_signal(symbol, ltp, pattern_desc, sl_price, meta_str,
-                   setup_high=setup_high, tick_size=0.05, atr=atr)
+                   setup_high=setup_high, tick_size=0.05, atr=atr,
+                   stretch_score=signal_meta.get('stretch_score', 0.0),
+                   vol_fade_ratio=signal_meta.get('vol_fade_ratio', 0.0),
+                   confidence=signal_meta.get('confidence', ''),
+                   pattern_bonus=signal_meta.get('pattern_bonus', 'None'),
+                   oi_direction=signal_meta.get('oi_direction', 'unknown'))
         
         # ===== ML DATA LOGGING =====
         try:
@@ -625,7 +690,6 @@ class FyersAnalyzer:
             logger.warning(f"   [ML] Logging error: {e}")
         
         # Record & Return
-        # Record & Return
         signal_data = {
             'symbol': symbol,
             'ltp': ltp,
@@ -638,6 +702,13 @@ class FyersAnalyzer:
             'atr': atr,                       # Phase 41.2: For legacy simulation
             'meta': meta_str
         }
+        
+        # Phase 44.8 — new signal quality fields
+        signal_data["stretch_score"]  = signal_meta.get("stretch_score",  0.0)
+        signal_data["vol_fade_ratio"] = signal_meta.get("vol_fade_ratio", 0.0)
+        signal_data["confidence"]     = signal_meta.get("confidence",     "")
+        signal_data["pattern_bonus"]  = signal_meta.get("pattern_bonus",  "None")
+        signal_data["oi_direction"]   = signal_meta.get("oi_direction",   "unknown")
 
         can_signal, reason = self.signal_manager.can_signal(symbol)
         if not can_signal:

@@ -65,3 +65,51 @@ def format_stock_symbol(symbol: str) -> str:
     
     # Add NSE exchange and EQ type
     return f'NSE:{symbol}-EQ'
+
+
+# ─── Phase 44.8 ────────────────────────────────────────────────
+import calendar
+from datetime import datetime, timedelta
+
+def _last_thursday(year: int, month: int) -> datetime:
+    """Return the last Thursday of the given month."""
+    last_day = calendar.monthrange(year, month)[1]
+    d = datetime(year, month, last_day)
+    while d.weekday() != 3:  # 3 = Thursday
+        d -= timedelta(days=1)
+    return d
+
+def get_front_month_futures(eq_symbol: str) -> str | None:
+    """
+    NSE:RELIANCE-EQ  →  NSE:RELIANCE25MARFUT
+    NSE:IDEA-EQ      →  None  (will fail REST call gracefully)
+
+    Auto-rolls within 3 calendar days of expiry.
+    Returns None on malformed input — caller handles gracefully.
+    """
+    try:
+        import pytz
+        IST = pytz.timezone("Asia/Kolkata")
+        now = datetime.now(IST)
+
+        expiry = _last_thursday(now.year, now.month)
+        days_to_expiry = (expiry.date() - now.date()).days
+
+        # Within 3 days of expiry → roll to next month
+        if days_to_expiry <= 3:
+            if now.month == 12:
+                year, month = now.year + 1, 1
+            else:
+                year, month = now.year, now.month + 1
+            expiry = _last_thursday(year, month)
+
+        month_code = expiry.strftime("%b").upper()   # MAR, APR, MAY
+        year_code  = expiry.strftime("%y")           # 25, 26
+
+        base = eq_symbol.replace("NSE:", "").replace("-EQ", "")
+        if not base:
+            return None
+        return f"NSE:{base}{year_code}{month_code}FUT"
+
+    except Exception:
+        return None
