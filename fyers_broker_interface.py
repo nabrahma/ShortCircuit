@@ -168,6 +168,13 @@ class FyersBrokerInterface:
         self._order_cache: Dict[str, Dict] = {}      # order_id -> latest order message
         self._position_cache: Dict[str, Dict] = {}   # symbol -> latest position message
         
+        # Phase 44.7 — WS quote cache for scanner pre-filter
+        import threading
+        self._quote_cache: dict[str, dict] = {}
+        self._quote_cache_lock = threading.Lock()
+        self._ws_subscribed_symbols: list[str] = []
+        self._ws_subscribed_symbols_set: set[str] = set()
+        
         # Background tasks
         self.tasks = []
         
@@ -352,6 +359,27 @@ class FyersBrokerInterface:
         Handle market tick from WebSocket.
         """
         try:
+            # ── Phase 44.7: Update scanner quote cache ─────────────
+            import time
+            symbol = message.get('symbol') or message.get('n')
+            if symbol and hasattr(self, '_ws_subscribed_symbols_set') and symbol in self._ws_subscribed_symbols_set:
+                with self._quote_cache_lock:
+                    ltp = message.get('ltp', 0)
+                    prev_close = message.get('prev_close_price', message.get('pc', 0))
+                    ch_oc = message.get('ch_oc', 0)
+                    if ch_oc == 0 and prev_close > 0:
+                        ch_oc = ((ltp - prev_close) / prev_close) * 100
+
+                    self._quote_cache[symbol] = {
+                        'ltp':    ltp,
+                        'volume': message.get('vol_traded_today', message.get('v', 0)),
+                        'ch_oc':  ch_oc,
+                        'oi':     message.get('oi', 0),
+                        'bid':    message.get('bid', 0),
+                        'ask':    message.get('ask', 0),
+                        'ts':     time.time(),
+                    }
+
             # Fyers DataSocket returns dict structure
             tick = TickData(message)
             
@@ -541,6 +569,37 @@ class FyersBrokerInterface:
                         del self.order_status_cache[order_id]
             except Exception as e:
                 logger.error(f"Cache cleanup error: {e}")
+
+    def subscribe_scanner_universe(self, symbols: List[str]) -> None:
+        """
+        Subscribe all scanner symbols to dataws in symbolUpdate mode.
+        Called once at startup after dataws is connected.
+        Splits into batches of 50 — Fyers dataws limit per subscribe call.
+        """
+        self._ws_subscribed_symbols = symbols
+        self._ws_subscribed_symbols_set = set(symbols)
+        batch_size = 50
+        total = 0
+        for i in range(0, len(symbols), batch_size):
+            batch = symbols[i:i + batch_size]
+            try:
+                if self.data_ws:
+                    self.data_ws.subscribe(
+                        symbols=batch,
+                        data_type="symbolUpdate"
+                    )
+                total += len(batch)
+            except Exception as e:
+                logger.error(f"[WS Cache] Subscribe batch {i//batch_size} failed: {e}")
+        logger.info(f"[WS Cache] Subscribed {total}/{len(symbols)} symbols to dataws symbolUpdate")
+
+    def get_quote_cache_snapshot(self) -> dict[str, dict]:
+        """
+        Returns a shallow copy of the current quote cache.
+        Called by scanner.scan_market() — thread-safe.
+        """
+        with self._quote_cache_lock:
+            return dict(self._quote_cache)
 
     async def subscribe_symbols(self, symbols: List[str]):
         """Subscribe to real-time data for symbols."""

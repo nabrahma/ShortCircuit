@@ -182,7 +182,7 @@ async def _initialize_runtime() -> RuntimeContext:
     mh = morning_context["high"] if morning_context else None
     ml = morning_context["low"] if morning_context else None
 
-    scanner = FyersScanner(fyers_client)
+
     analyzer = FyersAnalyzer(fyers_client, morning_high=mh, morning_low=ml)
     bot.signal_manager = analyzer.signal_manager
     bot.market_session = market_session
@@ -197,6 +197,18 @@ async def _initialize_runtime() -> RuntimeContext:
         emergency_logger=None,
     )
     await broker.initialize()
+    
+    # ── Phase 44.7: Priming Scanner WS Quote Cache ───────────
+    scanner = FyersScanner(fyers_client, broker=broker)
+    await asyncio.sleep(2)  # Let dataws handshake complete
+    scanner_symbols = await asyncio.get_event_loop().run_in_executor(
+        None, scanner._fetch_nse_symbols_sync
+    )
+    if scanner_symbols:
+        broker.subscribe_scanner_universe(scanner_symbols)
+        logger.info(f"[Phase 44.7] WS cache primed for {len(scanner_symbols)} symbols")
+    else:
+        logger.warning("[Phase 44.7] Failed to load NSE symbols for WS cache priming")
 
     # ── P0 FIX: Construct OrderManager with live broker ──────────────
     from order_manager import OrderManager

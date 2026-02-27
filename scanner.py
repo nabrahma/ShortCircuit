@@ -6,9 +6,10 @@ import time
 logger = logging.getLogger(__name__)
 
 class FyersScanner:
-    def __init__(self, fyers):
+    def __init__(self, fyers, broker=None):
         self.fyers = fyers
-        self.symbols = [] # Cache for symbols
+        self.broker = broker
+        self.symbols = {} # Cache for symbols
         # NOTE: Do NOT use TYPO_PATCHES to suppress symbols.
         # Zero-volume symbols are handled by quality_reject_counts blacklist.
         # Both NSE:AKASH-EQ and NSE:AAKASH-EQ are separate listed entities.
@@ -61,6 +62,34 @@ class FyersScanner:
 
         except Exception as e:
             logger.error(f"Error fetching NSE symbols: {e}")
+            return []
+
+    def _fetch_nse_symbols_sync(self):
+        """
+        Synchronous version of fetch_nse_symbols for Phase 44.7 startup.
+        Uses requests to avoid asyncio loop locking in run_in_executor.
+        """
+        import requests
+        try:
+            url = "https://public.fyers.in/sym_details/NSE_CM.csv"
+            response = requests.get(url, timeout=10)
+            
+            candidates = []
+            if response.status_code == 200:
+                lines = response.text.splitlines()
+                for line in lines:
+                    cols = line.split(',')
+                    if len(cols) > 9:
+                        sym = cols[9].strip()
+                        if not sym.endswith('-EQ') and len(cols) > 13:
+                            sym = cols[13].strip()
+                        if sym.startswith('NSE:') and sym.endswith('-EQ'):
+                            candidates.append(sym)
+            
+            logger.info(f"Loaded {len(candidates)} NSE EQ symbols synchronously.")
+            return candidates
+        except Exception as e:
+            logger.error(f"Error fetching NSE symbols sync: {e}")
             return []
 
     def check_chart_quality(self, symbol):
@@ -167,56 +196,108 @@ class FyersScanner:
         # Batching (Symbols is now a Dict)
         symbol_list = list(self.symbols.keys()) # EXTRACT KEYS
         pre_candidates = []  # Pass gain/volume/price filter, pending quality
-        batch_size = 50
-        total_symbols = len(symbol_list)
         
-        logger.info(f"Scanning {total_symbols} symbols in batches...")
+        # ── Phase 44.7: WS Cache Path ─────────────────────────────
+        if self.broker and hasattr(self.broker, '_quote_cache') and self.broker._quote_cache:
+            snapshot = self.broker.get_quote_cache_snapshot()
+            cache_miss = []
 
-        # Phase A: Batch quote scan (serial — cheap API calls)
-        for i in range(0, total_symbols, batch_size):
-            batch = symbol_list[i:i+batch_size]
-            symbols_str = ",".join(batch)
-            
-            try:
-                data = {"symbols": symbols_str}
-                response = self.fyers.quotes(data=data)
-                
-                if "d" not in response:
+            for symbol in symbol_list:
+                quote = snapshot.get(symbol)
+                if quote is None:
+                    cache_miss.append(symbol)
                     continue
+                
+                ltp    = quote.get('ltp', 0)
+                volume = quote.get('volume', 0)
+                gain   = abs(quote.get('ch_oc', 0))
+                oi     = quote.get('oi', 0)
+                ts     = quote.get('ts', 0)
+                
+                import time
+                age_s  = time.time() - ts
+
+                # Stale data guard — skip if WS hasn't updated in 60s
+                if age_s > 60:
+                    cache_miss.append(symbol)
+                    continue
+
+                if gain >= 6.18 and volume >= 100_000 and ltp >= 5 and oi == 0:
                     
-                for stock in response["d"]:
-                    quote_data = stock.get('v')
-                    if not isinstance(quote_data, dict):
+                    # Fix #5: Blacklist Check
+                    if self.quality_reject_counts.get(symbol, 0) >= 3:
+                        logger.debug(f"BLACKLIST {symbol} — Quality rejected 3x today, skipping history fetch.")
                         continue
                         
-                    symbol = stock.get('n')
-                    ltp = quote_data.get('lp') 
-                    volume = quote_data.get('volume')
-                    change_p = quote_data.get('chp')
+                    tick_size = self.symbols.get(symbol, 0.05)
+                    pre_candidates.append({
+                        'symbol': symbol,
+                        'ltp': ltp,
+                        'volume': volume,
+                        'change': gain,
+                        'tick_size': tick_size,
+                        'oi': oi,
+                    })
+
+            if cache_miss:
+                logger.debug(f"[WS Cache] {len(cache_miss)} symbols not in cache — skipped this cycle")
+
+            logger.info(f"[WS Cache] Pre-filter: {len(pre_candidates)} candidates from {len(snapshot)} cached symbols")
+
+        else:
+            # ── Fallback: original REST batch path (unchanged) ────────
+            logger.warning("[WS Cache] Cache not ready or missing — falling back to REST batch")
+            
+            batch_size = 50
+            total_symbols = len(symbol_list)
+            
+            logger.info(f"Scanning {total_symbols} symbols in batches via REST...")
+
+            # Phase A: Batch quote scan (serial — cheap API calls)
+            for i in range(0, total_symbols, batch_size):
+                batch = symbol_list[i:i+batch_size]
+                symbols_str = ",".join(batch)
+                
+                try:
+                    data = {"symbols": symbols_str}
+                    response = self.fyers.quotes(data=data)
                     
-                    if ltp is None or volume is None or change_p is None:
+                    if "d" not in response:
                         continue
                         
-                    # Filter: Gain 6-18%, Vol > 100k, LTP > 5
-                    if 6.0 <= change_p <= 18.0 and volume > 100000 and ltp > 5:
-                        
-                        # Fix #5: Blacklist Check
-                        if self.quality_reject_counts.get(symbol, 0) >= 3:
-                            logger.debug(f"BLACKLIST {symbol} — Quality rejected 3x today, skipping history fetch.")
+                    for stock in response["d"]:
+                        quote_data = stock.get('v')
+                        if not isinstance(quote_data, dict):
                             continue
                             
-                        tick_size = self.symbols.get(symbol, 0.05)
-                        oi = quote_data.get('oi', 0)
-                        pre_candidates.append({
-                            'symbol': symbol,
-                            'ltp': ltp,
-                            'volume': volume,
-                            'change': change_p,
-                            'tick_size': tick_size,
-                            'oi': oi,
-                        })
-            except Exception as e:
-                logger.error(f"Batch Error: {e}")
+                        symbol = stock.get('n')
+                        ltp = quote_data.get('lp') 
+                        volume = quote_data.get('volume')
+                        change_p = quote_data.get('chp')
+                        
+                        if ltp is None or volume is None or change_p is None:
+                            continue
+                            
+                        # Filter: Gain 6-18%, Vol > 100k, LTP > 5
+                        if 6.0 <= change_p <= 18.0 and volume > 100000 and ltp > 5:
+                            
+                            # Fix #5: Blacklist Check
+                            if self.quality_reject_counts.get(symbol, 0) >= 3:
+                                logger.debug(f"BLACKLIST {symbol} — Quality rejected 3x today, skipping history fetch.")
+                                continue
+                                
+                            tick_size = self.symbols.get(symbol, 0.05)
+                            oi = quote_data.get('oi', 0)
+                            pre_candidates.append({
+                                'symbol': symbol,
+                                'ltp': ltp,
+                                'volume': volume,
+                                'change': change_p,
+                                'tick_size': tick_size,
+                                'oi': oi,
+                            })
+                except Exception as e:
+                    logger.error(f"Batch Error: {e}")
 
         if not pre_candidates:
             logger.info("No pre-candidates passed filter.")
