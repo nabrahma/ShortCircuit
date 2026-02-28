@@ -1,323 +1,294 @@
 # ShortCircuit Strategy Manual ⚡
 
-> **Last Updated:** Feb 15, 2026 | **Style:** Institutional Reversal Scalping  
-> **Status:** Production — 12-Gate Pipeline + Multi-Edge + Capital Management + Diagnostics
+> **Last Updated:** Feb 28, 2026 | **Style:** Institutional Exhaustion Scalping
+> **Status:** Production — Phase 44.8.1 | 12-Gate Pipeline | WS-First Scanner
 
 ***
 
-## 1. Core Philosophy: "The Sniper"
+## 1. The Core Idea — Why This Works
 
-We trade high-conviction reversals at extended levels. Short stocks that have run too far, too fast — then catch the mean reversion back to VWAP.
+Every day on NSE, hundreds of small and mid-cap stocks explode upward. A result drops. An operator pushes a stock. Retail traders pile in chasing the move. FOMO buys from people who woke up and saw a stock up 9% on their watchlist. The stock rips from ₹100 to ₹112 in two hours.
 
-- **Goal:** 1-2 surgical trades per day (shorting overextended stocks at day highs)
-- **Edge:** 12-gate validation + 5 institutional pattern detectors + orderflow confirmation
-- **Safety:** Capital preservation > signal count. Always.
+Then it stops.
+
+Not because sellers appeared. Because **buyers ran out.**
+
+The last buyer bought at ₹112. There is nobody left to push it higher. Volume starts dying on every new tick up. The stock makes a new high at ₹112.50 — but only 40% of the volume that drove the previous high. Price is in no-man's land, far above where the day's actual trading happened (the Value Area). There is no structural support up here. It's floating.
+
+This is the moment ShortCircuit was built to find and trade.
+
+> *The edge is not predicting direction. The edge is recognising when a move has already exhausted itself — and the market hasn't priced that in yet.*
+
+Mean reversion is not a theory. It is a mechanical reality. When a stock stretches too far from where the majority of today's volume traded, it will return. Not always. But often enough, fast enough, that a disciplined system trading it repeatedly will win.
 
 ***
 
-## 2. The 12-Gate Signal Pipeline
+## 2. The Hunt — What the Scanner Does
 
-Every signal must pass **12 sequential gates**. Failure at any gate = NO TRADE.
+ShortCircuit monitors all **2418 NSE EQ symbols** simultaneously, every 60 seconds.
+
+Since Phase 44.7, this happens at near-zero latency. The Fyers WebSocket streams live ticks for all 2418 symbols into an in-memory cache. When the scanner runs, it reads that cache — a sub-10ms operation — instead of making 50 separate REST API calls. REST is the fallback only if the cache is stale.
+
+The pre-filter is brutal by design:
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│  GATE 1: Signal Manager                                         │
-│  ├─ Max 5 signals/day (prevents overtrading)                    │
-│  ├─ 45-min per-symbol cooldown (prevents revenge trading)       │
-│  └─ 3-loss pause (circuit breaker for bad sessions)             │
-├─────────────────────────────────────────────────────────────────┤
-│  GATE 2: Market Regime                                          │
-│  ├─ Fetches Nifty 50 intraday data                              │
-│  ├─ Calculates morning range (9:15–10:15)                       │
-│  ├─ If Nifty TREND_UP → BLOCK all shorts                       │
-│  └─ RANGE or TREND_DOWN → proceed                               │
-├─────────────────────────────────────────────────────────────────┤
-│  GATE 3: Data Pipeline                                          │
-│  ├─ Fetches 1-min candle history via Fyers API                  │
-│  ├─ Requires ≥10 candles for meaningful analysis                │
-│  └─ Validates data quality (no gaps)                            │
-├─────────────────────────────────────────────────────────────────┤
-│  GATE 4: Technical Context                                      │
-│  ├─ Enriches DataFrame with VWAP (cumulative TP × Vol / Vol)    │
-│  ├─ Calculates day high, open, gain %                           │
-│  └─ Prepares prev_df for structural analysis                    │
-├─────────────────────────────────────────────────────────────────┤
-│  GATE 5: Hard Constraints ("The Ethos Check")                   │
-│  ├─ Trend Strength:                                             │
-│  │   ├─ Current gain ≥ 5% OR max day gain ≥ 7%                 │
-│  │   └─ Max gain > 15% → BLOCK (circuit risk)                  │
-│  ├─ Day High Proximity:                                         │
-│  │   ├─ Base: Within 4% of day high                             │
-│  │   └─ Turbo: Within 6% if max gain > 10% (deep pullback OK)  │
-│  └─ Purpose: Only trade stocks with strong trend + near highs   │
-├─────────────────────────────────────────────────────────────────┤
-│  GATE 6: Circuit Guard                                          │
-│  ├─ Fetches Level 2 depth data (upper/lower circuits)           │
-│  ├─ If LTP ≥ UC × 0.985 → BLOCK (within 1.5% of lock)         │
-│  ├─ If LTP ≤ LC × 1.005 → BLOCK (at lower circuit)            │
-│  └─ Shares depth data with Gate 10 (DOM analysis)               │
-├─────────────────────────────────────────────────────────────────┤
-│  GATE 7: Momentum Safeguard (Train Filter)                      │
-│  ├─ Calculates VWAP slope over last 30 candles                  │
-│  ├─ Calculates RVOL (current vol / 20-candle avg)               │
-│  ├─ If RVOL > 5.0 AND slope > 40 → BLOCK                      │
-│  └─ Purpose: Don't short a freight train                        │
-├─────────────────────────────────────────────────────────────────┤
-│  GATE 8: Pattern Recognition                                    │
-│  ├─ Standard Path (check_setup):                                │
-│  │   ├─ SHOOTING_STAR: Long upper wick (>2× body), bearish     │
-│  │   ├─ BEARISH_ENGULFING: Red candle engulfs previous green    │
-│  │   ├─ EVENING_STAR: Green → Doji → Red (3-candle reversal)   │
-│  │   ├─ MOMENTUM_BREAKDOWN: Strong selling into support         │
-│  │   ├─ VOLUME_TRAP: High volume without price progress         │
-│  │   ├─ ABSORPTION_DOJI: Tiny body + high vol (sniper zone)    │
-│  │   └─ TAPESTALL: Price stalls at highs (needs VWAP ext >2SD) │
-│  ├─ Multi-Edge Path (check_setup_with_edges):                   │
-│  │   ├─ 5 parallel detectors (Absorption, Bad High, Trapped,   │
-│  │   │   Failed Auction, Classic Patterns)                      │
-│  │   ├─ Weighted confidence scoring                             │
-│  │   └─ Skips Gate 8, uses edge_payload directly                │
-│  └─ Requires price BREAKDOWN below setup candle low             │
-├─────────────────────────────────────────────────────────────────┤
-│  GATE 9: Breakdown Confirmation                                 │
-│  ├─ Current LTP must be BELOW previous candle's low             │
-│  ├─ Not just a pattern — price must confirm the reversal        │
-│  └─ Gap = setup_low - current_ltp (must be positive)            │
-├─────────────────────────────────────────────────────────────────┤
-│  GATE 10: Pro Confluence (9 Confirmation Checks)                │
-│  ├─ Profile Rejection (POC/VAH via Market Profile)              │
-│  ├─ DOM Wall (Sell/Buy ratio > 2.5× via Level 2 depth)         │
-│  ├─ VWAP Flat (slope < 5 = momentum exhaustion)                │
-│  ├─ RSI Divergence (price up, RSI down)                         │
-│  ├─ Fibonacci Rejection (38.2%, 50%, 61.8% levels)              │
-│  ├─ RVOL Spike (> 2.0× = institutional activity)               │
-│  ├─ Vacuum/Exhaustion (low vol at extension)                    │
-│  ├─ OI Divergence (price UP + OI DOWN = fakeout)                │
-│  ├─ dPOC Divergence (value not migrating with price)            │
-│  ├─ Orderflow Checks:                                           │
-│  │   ├─ Round Number proximity (+Conf)                          │
-│  │   ├─ Large Wick > 60% (+Conf)                               │
-│  │   ├─ Bad High: heavy sellers at day high (+Conf)             │
-│  │   ├─ Bad Low: heavy buyers at low → **BLOCKS trade**        │
-│  │   ├─ Trapped Positions: failed breakout (+Conf)              │
-│  │   └─ Aggression without Progress (+Conf)                     │
-│  └─ Logic: If NOT extended (VWAP < 2SD), must have ≥1 confirm  │
-├─────────────────────────────────────────────────────────────────┤
-│  GATE 11: HTF Confluence (15-Minute Check)                      │
-│  ├─ Checks 15-min chart for trend exhaustion                    │
-│  ├─ Requires: Lower highs OR exhaustion on HTF                  │
-│  ├─ If 15m is strongly bullish → BLOCK                         │
-│  └─ Also checks key support/resistance levels (1% tolerance)    │
-├─────────────────────────────────────────────────────────────────┤
-│  GATE 12: Signal Finalization                                   │
-│  ├─ Calculates ATR (14-period)                                  │
-│  ├─ Stop Loss = setup_high + max(ATR × 0.5, 0.25)              │
-│  ├─ Logs 40+ features for ML training                           │
-│  ├─ Records signal in Signal Manager                            │
-│  └─ Returns complete signal dict for execution                  │
-└─────────────────────────────────────────────────────────────────┘
-                             ↓
-┌─────────────────────────────────────────────────────────────────┐
-│  CAPITAL MANAGER (Phase 42.1)                                   │
-│  ├─ Checks affordability (₹1,800 base × 5× leverage)           │
-│  ├─ Verifies no duplicate positions                             │
-│  ├─ If BLOCKED: logs signal as SKIPPED (not lost)               │
-│  └─ If OK: proceeds to order execution                          │
-├─────────────────────────────────────────────────────────────────┤
-│  TRADE MANAGER                                                  │
-│  ├─ Position verification (4-step safety check)                 │
-│  ├─ SELL order + SL-M order (with 3× retry)                    │
-│  ├─ If SL fails 3× → Emergency Market Close                    │
-│  └─ Activates Focus Engine for live monitoring                  │
-└─────────────────────────────────────────────────────────────────┘
+Gain today:   ≥ 6.18% from today's open
+Volume:       > 100,000 shares traded
+LTP:          > ₹5 (eliminates penny stocks)
 ```
+
+Out of 2418 symbols, maybe 15-40 pass on a normal day. These are the candidates. Everything else is noise. The scanner hands these candidates to the analyzer — the real judge.
 
 ***
 
-## 3. Gate Summary Table
+## 3. The Edge — What We're Actually Looking For
 
-| Gate | Name | Module | Failure Action |
-|------|------|--------|----------------|
-| 1 | Signal Manager | `signal_manager.py` | Block (daily cap / cooldown / pause) |
-| 2 | Market Regime | `market_context.py` | Block (Nifty TREND_UP) |
-| 3 | Data Pipeline | `analyzer.py` | Skip (insufficient data) |
-| 4 | Technical Context | `analyzer.py` | Skip (no VWAP) |
-| 5 | Hard Constraints | `god_mode_logic.py` | Skip (weak trend / too far from high) |
-| 6 | Circuit Guard | `analyzer.py` | Block (too close to UC/LC) |
-| 7 | Momentum Safeguard | `analyzer.py` | Block (freight train) |
-| 8 | Pattern Recognition | `god_mode_logic.py` | Skip (no valid pattern) |
-| 9 | Breakdown Confirmation | `analyzer.py` | Skip (no price confirmation) |
-| 10 | Pro Confluence | `analyzer.py` + `tape_reader.py` | Refuse (no confirmation + not extended) |
-| 11 | HTF Confluence | `htf_confluence.py` | Block (15m bullish) |
-| 12 | Signal Finalization | `analyzer.py` | Pass (ATR/SL calculation) |
+Before Phase 44.8, the system required a specific candle shape (Shooting Star, Bearish Engulfing etc.) to fire. This was wrong. A candle shape is a **visual symptom** of exhaustion. It is not the exhaustion itself.
+
+The actual edge has four components. All four must be true simultaneously:
+
+### Component 1 — The Sweet Spot (9–14.5% stretched)
+
+Below 9%: the move hasn't stretched far enough. Mean reversion distance to VWAP is small. Risk/reward is poor.
+
+Above 14.5%: the stock is approaching circuit territory. Liquidity dries up. Unpredictable.
+
+Between 9–14.5% from today's open: the stock has moved enough that retail longs are underwater if it reverses, but not so much that circuits make execution dangerous. This is the zone.
+
+### Component 2 — New High on Dying Volume
+
+The stock must be making a **new intraday high** on the signal candle. Not bouncing, not consolidating — new high. This is important because it means buyers are still trying. But the critical tell is what's happening to volume while they try.
+
+```
+vol_fade_ratio = signal_candle_volume / avg_volume_of_prior_5_candles
+```
+
+If `vol_fade_ratio < 0.65` — volume has faded more than 35% on the new high — buyers are losing conviction. The rally is running on fumes. Less than 0.30 is extreme exhaustion. Less than 0.50 is high conviction. 0.50–0.65 is medium. All three fire.
+
+This is the single most important number in the system. Your friend who trades this manually is looking at this exact thing — he just calls it "volume dying on the high" rather than computing a ratio.
+
+### Component 3 — Price Above Value Area High (VAH)
+
+The Market Profile tells you where the majority of today's volume actually traded — the Value Area. The Value Area High (VAH) is the upper boundary of accepted value.
+
+Price above VAH = price is in **unaccepted territory**. Nobody has been trading here. There is no structural reason for price to stay here. Gravity pulls it back toward where value was established — the POC (Point of Control), which is typically 3-6% below current price by the time Gate 5 fires.
+
+### Component 4 — Pattern Bonus (optional upgrade)
+
+If the signal candle also happens to be a Shooting Star, Bearish Engulfing, or Evening Star — that's a bonus. It upgrades the confidence tier from MEDIUM → HIGH or HIGH → EXTREME. But it is **not required**. The exhaustion can exist without a textbook candle shape.
+
+This is the philosophical shift of Phase 44.8: **we trade the physics, not the picture.**
 
 ***
 
-## 4. Multi-Edge Detection System
+## 4. The 12 Gates — The Full Validation Flow
 
-When `MULTI_EDGE_ENABLED = True`, five pattern detectors run in parallel:
+Every candidate that passes the scanner enters the 12-gate pipeline. Think of it as 12 independent questions. Every single one must be answered correctly, or the trade doesn't happen.
 
-| Detector | What It Finds | Weight |
-|----------|--------------|--------|
-| **Absorption** | High volume, no price progress (hidden limit orders) | Varies |
-| **Bad High** | Heavy sell DOM at day highs (supply wall) | Varies |
-| **Trapped Positions** | Failed breakout with trapped longs | Varies |
-| **Failed Auction** | Exhaustion after extended range expansion | Varies |
-| **Classic Reversal** | Shooting Star, Engulfing, Evening Star | Varies |
+### Gate 1 — Signal Manager
+*"Are we allowed to trade right now?"*
 
-**Confidence scoring:** Weighted sum of edge scores. Single strong edge OR multiple weak edges can qualify. Uses `check_setup_with_edges()` which skips Gate 8 (edges already identified) but runs Gates 1-7 and 9-12.
+Maximum 5 signals per day. 45-minute cooldown per symbol. 3 consecutive losses triggers a full session pause. This gate exists entirely for capital preservation — not signal quality. The best signal in the world, on the 6th trade of the day, does not get taken.
+
+### Gate 2 — Market Regime
+*"Is the macro environment hostile?"*
+
+NIFTY is the tide. Shorting individual stocks when NIFTY is in TREND_UP mode is fighting the tide. Gate 2 fetches NIFTY intraday data, computes the morning range (9:15–10:15), and classifies the regime. TREND_UP = all shorts blocked. RANGE or TREND_DOWN = proceed.
+
+Exception: if a setup is so strong (Evening Star, Bearish Engulfing confirmed) that the stock is clearly distributing against the market, the regime gate can be bypassed. The market does not move all 2418 stocks identically.
+
+### Gate 3 — Data Quality
+*"Do we have enough history to make a decision?"*
+
+At least 20 candles required (RVOL validity gate — ensures 20 minutes of market activity before any RVOL reading is trusted). Fewer candles = unreliable averages = false signals.
+
+### Gate 4 — Technical Context
+*"Set up the calculations."*
+
+VWAP is computed (cumulative `(TP × Volume) / Volume`). Day high, today's open, current gain% are established. This gate never fails — it's the setup for everything downstream.
+
+### Gate 5 — Exhaustion at Stretch *(The Core Edge)*
+*"Is this stock genuinely exhausted at the top?"*
+
+This is the heart of the system. Four sub-checks — all must pass:
+
+```
+A. gain_pct between 9.0% and 14.5%          (the sweet spot)
+B. New intraday high in last 10 candles     (still pushing up)
+C. vol_fade_ratio < 0.65                    (buyers running out)
+D. close > VAH                              (in unaccepted territory)
+```
+
+Outputs: `fired=True/False`, `confidence=EXTREME/HIGH/MEDIUM`, `vol_fade_ratio`, `stretch_score`, `pattern_bonus`.
+
+Gate 5 runs **at the top of the stretch** — not after the stock has already started breaking down. Finding exhaustion at the high and waiting for the first breakdown is the correct sequence. Phase 44.8.1 fixed a critical timing bug where Gate 5 was accidentally running after the first breakdown had already occurred on the candle, creating a double-breakdown requirement and late entries.
+
+### Gate 6 — Circuit Guard
+*"Are we about to walk into a trap?"*
+
+Fetches Level 2 depth data. If LTP is within 1.5% of the Upper Circuit limit, the trade is blocked — circuit locks are instant and irreversible. Same for Lower Circuit. This gate has saved accounts.
+
+Also: if the stock has a futures contract, Gate 6 fetches futures OI direction as enrichment data. Falling OI = short covering rally = stronger exhaustion signal. Rising OI = new longs entering = flag for caution. This never blocks the signal — it's information that shows up in the Telegram alert and `signals.csv` for analysis.
+
+### Gate 7 — Momentum Safeguard (Train Filter)
+*"Is this a freight train we're standing in front of?"*
+
+```
+RVOL > 5.0 AND VWAP slope > 40 → BLOCKED
+```
+
+If volume is 5× average AND momentum is steep AND still accelerating, the move is not exhausted — it's in full force. Shorting this is not mean reversion. It's getting run over. This gate blocks those trades entirely.
+
+### Gate 8 — Pro Confluence
+*"Do multiple independent indicators agree?"*
+
+Nine confirmation checks run in parallel:
+
+- **Profile Rejection** — POC is far below current price (value not migrating)
+- **DOM Wall** — Sell side in Level 2 depth is 2.5× buy side
+- **VWAP Flat** — Momentum is dying (slope < 5)
+- **RSI Divergence** — Price making higher highs, RSI making lower highs
+- **Fibonacci Rejection** — Price at 38.2%, 50%, or 61.8% retracement level
+- **RVOL Spike** — Institutional volume signature (> 2.0×)
+- **Vacuum/Exhaustion** — Low volume at extension (nobody buying up here)
+- **OI Divergence** — Cash equity OI falling while price rises (fakeout)
+- **dPOC Divergence** — Developing POC stuck low, price floating above it
+
+Plus orderflow checks from the tape:
+- **Round Number** — Price at ₹100, ₹200, ₹500 etc. (liquidity magnet)
+- **Large Wick** — Previous candle's wick suggests partial fill zone
+- **Bad High** — Heavy sell-side DOM at day high (supply wall)
+- **Bad Low** — Heavy buy-side DOM at day low → **BLOCKS trade** (structural support exists, reversal may fail)
+- **Trapped Positions** — Failed breakout with buyers stuck above entry
+- **Aggression Without Progress** — Large buy orders not moving price (absorption)
+
+Logic: if the stock is already > 2 standard deviations above VWAP (clearly extended), one confluence check is enough. If it's less extended, at least one confirmation is required. A setup with zero confluence gets refused.
+
+### Gate 9 — HTF Confluence
+*"Does the 15-minute chart agree?"*
+
+The 1-minute chart shows the setup. The 15-minute chart shows the context. Gate 9 fetches 15m candle history and checks for trend exhaustion or Lower Highs on the higher timeframe. If the 15m chart is in strong uptrend with no signs of reversal, the trade is blocked — we don't fight a higher-timeframe trend without HTF confirmation.
+
+### Gate 10 — WebSocket Price Trigger
+*"Has the actual breakdown started?"*
+
+This gate does not run in the analyzer. It runs in `focusengine.py`, watching a real-time WebSocket tick feed. After Gates 1-9 pass, the signal is registered with `signal_low = previous_candle_low`. The focus engine then monitors live LTP every 2 seconds. The moment `LTP < signal_low`, the signal is validated and execution begins. 15-minute timeout — if the breakdown doesn't happen in 15 minutes, the setup is cancelled.
+
+### Gate 11 — Capital Check
+*"Can we actually afford this trade?"*
+
+₹1,800 base capital × 5× leverage = ₹9,000 buying power. Gate 11 checks if sufficient capital is available, verifies no duplicate position in this symbol, and calculates quantity. If capital is insufficient, the signal is logged as SKIPPED (not lost — it shows up in EOD analysis).
+
+### Gate 12 — Order Execution
+*"Execute with precision."*
+
+SELL order placed at market. SL-M (Stop Loss Market) order placed at `setup_high + max(ATR × 0.5, ₹0.25)`. If SL order fails, 3 retries. If all retries fail, immediate emergency market close — never hold a position without a stop loss.
+
+40+ ML features logged at signal time for future model training.
 
 ***
 
-## 5. Capital Management (Phase 42.1)
+## 5. After Entry — How the Trade Is Managed
 
+Once in a position, the focus engine runs a 2-second monitoring loop:
+
+### Stop Loss
+Structural: `setup_high + ATR buffer`. This is above where the setup candle topped — if price reclaims that level, the thesis is wrong. Exit.
+
+### Take Profit Levels
 ```
-Base Capital:    ₹1,800
-Leverage:        5× (NSE intraday standard)
-Buying Power:    ₹9,000
-Per-Trade Risk:  0.8-1.2%
+TP1 = entry - (ATR × 1.5)   → Exit 50% of position
+TP2 = entry - (ATR × 2.5)   → Exit 25% more  
+TP3 = entry - (ATR × 3.5)   → Exit remainder
+Ultimate target = VWAP (mean reversion complete)
 ```
 
-**Pre-order checks:**
-1. `can_afford()` — Sufficient capital available?
-2. Duplicate check — Already holding this symbol?
-3. Quantity check — Can afford ≥1 share?
+Phase 44.9 will anchor TP2 to the prior session's nPoC (naked Point of Control) — a price level where nobody traded, which acts as a magnet for price to visit.
 
-**All signals logged** — Executed AND skipped. End-of-day analysis shows missed P&L.
+### Dynamic SL States
+```
+INITIAL    → Setup high + ATR buffer
+BREAKEVEN  → Moved to entry price once 1× risk in profit
+TRAILING   → Trails price by 0.2 ATR after TP1 hit
+TIGHTENING → Tight trail as TP3 approaches
+```
+
+### Soft Stops
+The Discretionary Engine evaluates market regime and orderflow continuously. If the macro environment reverses (NIFTY flips bullish mid-trade) or orderflow deteriorates (DOM shows heavy buying entering), a soft stop fires before the hard SL is hit.
 
 ***
 
-## 6. Execution & Safety
+## 6. The Confidence Tier System
 
-### Entry Calculation
-```
-Entry    = Setup Candle Low (breakdown point)
-SL       = Setup Candle High + max(ATR × 0.5, 0.25)
-Target 1 = Entry - (Risk × 1.5)  [scale out 50%]
-Target 2 = VWAP (mean reversion target)
-```
+Every signal now carries a confidence tier based on `vol_fade_ratio`:
 
-### Position Safety (6 Layers)
-1. **Pre-order verification** — Capital + position state + direction check
-2. **3× retry logic** — If SL order fails, retry 3 times
-3. **Emergency exit** — If all retries fail, market-close immediately
-4. **Broker sync** — Real-time position polling every 2 seconds
-5. **Double-verification** — 4-step protocol on stop exits
-6. **Orphan detection** — Startup reconciliation + 30-min audits
+| Tier | Vol Fade Ratio | What It Means |
+|---|---|---|
+| `EXTREME` | < 0.30 | Volume collapsed > 70% on the new high. Almost nobody buying. |
+| `HIGH` | 0.30–0.50 | Volume faded 50–70%. Buyers clearly losing conviction. |
+| `MEDIUM` | 0.50–0.65 | Volume faded 35–50%. Setup valid, less dramatic. |
 
-### Dynamic Trailing Stops
-```
-Phase 1: Initial SL (setup_high + ATR buffer)
-Phase 2: Breakeven (after 1× risk profit — trade is risk-free)
-Phase 3: Trailing (after 2× risk profit — locks in gains)
-Phase 4: Tightening (as target approaches)
-```
+Pattern bonus upgrades one tier. A MEDIUM setup with a Shooting Star becomes HIGH. A HIGH setup with a Bearish Engulfing becomes EXTREME.
+
+The Telegram alert shows this tier immediately, before the operator presses GO or SKIP. EXTREME signals get priority when multiple signals are queued.
 
 ***
 
-## 7. Diagnostic Analyzer (Phase 42.2)
+## 7. The Telegram Interface — The Operator's Cockpit
 
-When the bot misses a trade you expected it to catch:
-
-```bash
-# CLI
-python eod_why.py RELIANCE 14:25
-
-# Telegram
-/why RELIANCE 14:25
-```
-
-**What it does:**
-- Re-runs ALL 12 gates (diagnostic mode — never short-circuits)
-- Reports detailed pass/fail per gate with raw values
-- Provides actionable suggestions ("Increase allowed pullback to 6%")
-- Checks what happened 30 min later (profitability simulation)
-- Logs results to `logs/diagnostic_analysis.csv` for pattern analysis
-
-***
-
-## 8. Orderflow Principles
-
-| Principle | Implementation | Effect |
-|-----------|---------------|--------|
-| Too much buying at low = bad low | `detect_bad_low()` | **BLOCKS trade** |
-| Too much selling at high = bad high | `detect_bad_high()` | Adds confirmation |
-| Large wicks get partially filled | `detect_large_wick()` | Adds confirmation |
-| Trapped positions fuel reversals | `detect_trapped_positions()` | Adds confirmation |
-| Round numbers attract liquidity | `check_round_number()` | Adds confirmation |
-| Aggression without progression | `detect_aggression_no_progress()` | Adds confirmation |
-
-***
-
-## 9. Module Reference
-
-| Module | Role |
-|--------|------|
-| `main.py` | Entry point, orchestrates scan → analyze → trade loop |
-| `scanner.py` | Pre-filters: price > ₹50, volume > 100K, gain 6-18% |
-| `analyzer.py` | Gates 1-12: Full signal validation pipeline |
-| `god_mode_logic.py` | VWAP slope, constraints, ATR, patterns, Fib, RSI |
-| `multi_edge_detector.py` | 5 parallel pattern detectors with confidence scoring |
-| `tape_reader.py` | DOM analysis, stall detection, orderflow checks |
-| `htf_confluence.py` | 15-minute chart structural alignment |
-| `market_profile.py` | POC, VAH/VAL, dPOC calculations |
-| `market_context.py` | Nifty regime detection (TREND_UP / RANGE / TREND_DOWN) |
-| `signal_manager.py` | Daily caps (5), cooldowns (45 min), loss pause (3) |
-| `trade_manager.py` | Order execution, position safety, SL management |
-| `focus_engine.py` | Live trade monitoring, dynamic trailing, broker sync |
-| `capital_manager.py` | Capital tracking, affordability checks, leverage |
-| `telegram_bot.py` | Alerts, dashboard, /status, /why, /auto commands |
-| `diagnostic_analyzer.py` | Missed opportunity analysis (12-gate diagnostic) |
-| `eod_analysis.py` | End-of-day signal review + skipped signal analysis |
-| `ml_logger.py` | 40+ feature extraction for ML training pipeline |
-
-***
-
-## 10. Pattern Quick Reference
-
-| Pattern | Description | Best Context |
-|---------|-------------|--------------|
-| SHOOTING_STAR | Long upper wick (>2× body), close near low | At day high, VAH |
-| BEARISH_ENGULFING | Red candle fully covers previous green | After strong rally |
-| EVENING_STAR | Green → Doji → Red sequence | At resistance |
-| MOMENTUM_BREAKDOWN | Strong selling pressure breaks support | Extended levels |
-| VOLUME_TRAP | High volume with no price progress | At day high |
-| ABSORPTION_DOJI | Tiny body, high volume, at range top | Sniper zone only |
-| TAPESTALL | Price flat at highs, momentum dies | Requires VWAP > 2SD |
-
-***
-
-## 11. Active Filters
+The operator never touches a web UI. Everything flows through one Telegram chat:
 
 ```
-✅ Market Regime (Nifty trend)
-✅ Signal Cap (5/day max)  
-✅ 45-min Cooldown
-✅ HTF Confluence (15m)
-✅ Circuit Guard (UC proximity)
-✅ Orderflow Bad Low Block
-✅ OI Divergence
-✅ dPOC Divergence
-✅ Capital Management (pre-order check)
-✅ Train Filter (RVOL × slope)
-✅ Multi-Edge Detector (when enabled)
-✅ Diagnostic Analyzer (/why command)
-❌ Time Filter (REMOVED — stocks can hover then move)
+📉 SHORT SIGNAL — NSE:IDEACELLU-EQ
+💰 LTP: ₹13.45 | SL: ₹14.12
+📊 Edge: EXTREME | Vol Fade: 28%
+🕯 Pattern Bonus: ShootingStar
+📈 Futures OI: ➖ unknown
+✅ Profile Rejection + Bad High + VWAP 2.8SD [EXT]
+🎯 HTF: 15m Lower High confirmed
+
+[GO] [SKIP]
 ```
+
+Commands available:
+- `/auto on` — enables fully automated execution (no GO required)
+- `/status` — capital, positions, signals remaining today
+- `/positions` — live P&L on open trades
+- `/why SYMBOL HH:MM` — re-runs all 12 gates diagnostically, explains exactly what failed
+- `/skip SYMBOL` — cancels a pending signal without executing
 
 ***
 
-## 12. Risk Parameters
+## 8. The Signals Log — Your Learning Engine
 
-| Parameter | Value | Rationale |
-|-----------|-------|-----------|
-| Max signals/day | 5 | Prevents overtrading |
-| Cooldown | 45 min | Prevents revenge trading |
-| Loss pause | 3 consecutive | Circuit breaker |
-| Capital per trade | ₹1,800 | Fixed base amount |
-| Leverage | 5× | NSE intraday standard |
-| Max gain filter | 6-15% | Sweet spot for reversals |
-| Max distance from high | 4-6% | Must be near day high |
-| Initial SL | Setup high + ATR buffer | Structural stop |
-| RVOL train threshold | > 5.0 | Don't short momentum trains |
-| VWAP extension threshold | > 2.0 SD | Required for non-extended patterns |
+Every signal that fires — executed or skipped — is written to `logs/signals.csv`. After Phase 44.8, five new fields are captured per signal:
+
+| Field | What It Tells You |
+|---|---|
+| `stretch_score` | How far into the 9-14.5% band the stock was |
+| `vol_fade_ratio` | Exact volume collapse ratio on the signal candle |
+| `confidence` | EXTREME / HIGH / MEDIUM |
+| `pattern_bonus` | Which candle pattern was present, if any |
+| `oi_direction` | Futures OI falling/rising/unknown at signal time |
+
+After 2 weeks of live data, this file answers questions like:
+- *"Do EXTREME confidence signals win more than HIGH?"*
+- *"What vol_fade_ratio threshold produces the highest win rate?"*
+- *"Does pattern_bonus actually improve outcomes or is it noise?"*
+- *"When OI was falling, did win rate improve?"*
+
+This is how you tune the system — not by guessing, but by reading what your own bot's data is telling you.
+
+***
+
+## 9. What This System Is Not
+
+It is not a prediction engine. It does not know where the stock is going.
+
+It is a **probability stacker**. Every gate is an independent filter that raises the probability that this specific setup, at this specific moment, in this specific market context, will mean-revert within the next 15-30 minutes.
+
+No single gate is reliable alone. Gates 1-9 together are significantly reliable. Add live WebSocket confirmation (Gate 10), HTF agreement (Gate 9), and structural stop placement — and you have a system that is difficult to blow up and has a positive expected value when run with discipline over hundreds of trades.
+
+The edge is real. Two years of backtesting. A live trader running the same logic manually and making consistent profit every month. Phase 44.8 aligned the bot's code to exactly what the manual trader does — find volume exhaustion at the stretch, wait for the first crack, enter.
+
+The bot's advantage over the human: it watches all 2418 stocks simultaneously, executes in 500ms, has no emotion, never misses an entry because it was on the phone, and logs every decision for systematic improvement.
