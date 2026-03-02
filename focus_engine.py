@@ -2,11 +2,13 @@ import time
 import logging
 import threading
 import datetime
+import asyncio
 
 from fyers_connect import FyersConnect
 import config
 from order_manager import OrderManager
 from discretionary_engine import DiscretionaryEngine
+from gate_result_logger import get_gate_result_logger
 
 # Setup Logger
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -208,6 +210,14 @@ class FocusEngine:
                 # A. CHECK TRIGGER (VALIDATION CONFIRMED)
                 # For Short: LTP < Trigger (Signal Low)
                 if ltp < trigger_price:
+                    # ── PRD-008: G10-G12 Recording (SIGNAL FIRED path) ───────
+                    _gr = pending.get('data', {}).get('_gate_result')
+                    if _gr is not None:
+                        _gr.g10_pass  = True   # G10 Cooldown: passed (signal was queued successfully)
+                        _gr.g11_pass  = True   # G11 Capital: assumed available (enter_position will catch)
+                        _gr.g12_pass  = True   # G12 Conviction: LTP broke trigger
+                        _gr.g12_value = round(trigger_price - ltp, 4)  # distance below trigger
+
                     _queue_validation_update(
                         outcome='VALIDATED',
                         details={
@@ -225,7 +235,12 @@ class FocusEngine:
                         auto_enabled = self.telegram_bot.is_auto_mode()
                     
                     if not auto_enabled:
-                         # Alert-only mode: send signal to Telegram, don't trade
+                         # PRD-008: log as SUPPRESSED (auto mode off)
+                         if _gr is not None:
+                             _gr.verdict = "SUPPRESSED"
+                             _gr.rejection_reason = "Auto mode OFF — signal alerted manually"
+                             get_gate_result_logger().record(_gr)
+
                          logger.info(f"📊 SIGNAL (ALERT ONLY): {symbol} BROKE TRIGGER @ {ltp} | Auto mode OFF")
                          
                          if self.telegram_bot:
@@ -239,7 +254,6 @@ class FocusEngine:
                              )
                              asyncio.create_task(self.telegram_bot.send_alert(msg))
                              
-                         # Remove from pending (consumed)
                          del self.pending_signals[symbol]
                          return None
 
@@ -247,6 +261,10 @@ class FocusEngine:
                     
                     # Execute via OrderManager — MUST be initialized (P0 fix)
                     if self.order_manager is None:
+                        if _gr is not None:
+                            _gr.verdict = "DATA_ERROR"
+                            _gr.rejection_reason = "OrderManager not initialized at execution time"
+                            get_gate_result_logger().record(_gr)
                         logger.critical(
                             "[FATAL] OrderManager is None at execution time for %s. "
                             "This is a startup initialization failure.", symbol
@@ -260,10 +278,30 @@ class FocusEngine:
 
                     pos = self.order_manager.enter_position(pending['data'])
                     if pos:
+                        # Bug 2 fix: record_signal() happens HERE — at the moment an order
+                        # is placed, not earlier. Daily signal slot only burns on real execution.
+                        try:
+                            signal_data = pending.get('data', {})
+                            analyzer = getattr(self, 'analyzer', None)
+                            if analyzer and hasattr(analyzer, 'signal_manager'):
+                                sl = signal_data.get('stop_loss', 0.0)
+                                pattern = signal_data.get('pattern', '')
+                                analyzer.signal_manager.record_signal(symbol, ltp, sl, pattern)
+                                remaining = analyzer.signal_manager.get_remaining_signals()
+                                logger.info(f"[SignalManager] Slot burned for {symbol}. Remaining today: {remaining}")
+                        except Exception as _sm_err:
+                            logger.warning(f"[SignalManager] record_signal failed (non-fatal): {_sm_err}")
+
+                        # PRD-008: SIGNAL_FIRED — record final outcome
+                        if _gr is not None:
+                            _gr.verdict = "SIGNAL_FIRED"
+                            _gr.entry_price = pos.get('entry_price') or pos.get('entry')
+                            _gr.qty = pos.get('qty')
+                            get_gate_result_logger().record(_gr)
                         self.start_focus(symbol, pos)
                     
                     del self.pending_signals[symbol]
-                    return {'status': 'EXECUTED'} # Return result to Main
+                    return {'status': 'EXECUTED'}  # Return result to Main
                     
                 # B. CHECK INVALIDATION (STOP HIT BEFORE ENTRY)
                 elif ltp > inval_price:
@@ -276,11 +314,29 @@ class FocusEngine:
                             'ltp': ltp,
                         }
                     )
+                    # PRD-008: G12 FAIL — invalidated before entry
+                    _gr_inv = pending.get('data', {}).get('_gate_result')
+                    if _gr_inv is not None:
+                        _gr_inv.g12_pass  = False
+                        _gr_inv.g12_value = round(ltp - inval_price, 4)
+                        _gr_inv.verdict   = "REJECTED"
+                        _gr_inv.first_fail_gate   = "G12_INVALIDATED_PRE_ENTRY"
+                        _gr_inv.rejection_reason  = f"LTP {ltp} > invalidation {inval_price} before entry"
+                        get_gate_result_logger().record(_gr_inv)
                     logger.info(f"🚫 [INVALIDATED] {symbol} hit {inval_price} before entry. Removed.")
                     del self.pending_signals[symbol]
                     
                 # C. TIMEOUT (configurable, default 15 mins — Phase 41.1)
                 elif (time.time() - timestamp) > (config.VALIDATION_TIMEOUT_MINUTES * 60):
+                    # PRD-008: G12 FAIL — timed out waiting for trigger
+                    _gr_to = pending.get('data', {}).get('_gate_result')
+                    if _gr_to is not None:
+                        _gr_to.g12_pass  = False
+                        _gr_to.g12_value = round(time.time() - timestamp, 1)
+                        _gr_to.verdict   = "REJECTED"
+                        _gr_to.first_fail_gate   = "G12_TIMEOUT"
+                        _gr_to.rejection_reason  = f"Pending > {config.VALIDATION_TIMEOUT_MINUTES}m without trigger. LTP={ltp}"
+                        get_gate_result_logger().record(_gr_to)
                     _queue_validation_update(
                         outcome='TIMEOUT',
                         details={

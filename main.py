@@ -190,6 +190,18 @@ async def _initialize_runtime() -> RuntimeContext:
     db_manager = DatabaseManager()
     await db_manager.initialize()
 
+    # PRD-008: Enable periodic gate result flush — set DSN once after DB pool is ready
+    from gate_result_logger import get_gate_result_logger
+    from database import DB_CONFIG as _db_cfg
+    import os as _os
+    _db_dsn = (
+        f"postgresql://{_os.getenv('DB_USER', _db_cfg['user'])}"
+        f":{_os.getenv('DB_PASSWORD', _db_cfg['password'])}"
+        f"@{_os.getenv('DB_HOST', _db_cfg['host'])}"
+        f":{_db_cfg['port']}/{_db_cfg['database']}"
+    )
+    get_gate_result_logger().set_dsn(_db_dsn)
+
     broker = FyersBrokerInterface(
         access_token=access_token,
         client_id=os.getenv("FYERS_CLIENT_ID"),
@@ -197,18 +209,48 @@ async def _initialize_runtime() -> RuntimeContext:
         emergency_logger=None,
     )
     await broker.initialize()
-    
-    # ── Phase 44.7: Priming Scanner WS Quote Cache ───────────
+
+    # ── PRD-007: Phase 44.7 + Startup Gate ───────────────────────────
+    # 1. Create scanner with broker reference
     scanner = FyersScanner(fyers_client, broker=broker)
-    await asyncio.sleep(2)  # Let dataws handshake complete
+
+    # 2. Fetch NSE symbol universe synchronously (blocks executor, not event loop)
     scanner_symbols = await asyncio.get_event_loop().run_in_executor(
         None, scanner._fetch_nse_symbols_sync
     )
     if scanner_symbols:
+        # 3. Subscribe to WS — sets state=PRIMING, starts health monitor thread
         broker.subscribe_scanner_universe(scanner_symbols)
-        logger.info(f"[Phase 44.7] WS cache primed for {len(scanner_symbols)} symbols")
+        logger.info(f"[Phase 44.7] WS subscription dispatched for {len(scanner_symbols)} symbols")
     else:
         logger.warning("[Phase 44.7] Failed to load NSE symbols for WS cache priming")
+
+    # 4. Startup Gate: block until READY (ticks arrive) or timeout
+    CACHE_READY_TIMEOUT = getattr(config, 'WS_CACHE_READY_TIMEOUT_SEC', 45)
+    logger.info(f"[STARTUP GATE] Waiting up to {CACHE_READY_TIMEOUT}s for WS cache readiness...")
+    cache_ready = await asyncio.to_thread(broker.wait_for_cache_ready, float(CACHE_READY_TIMEOUT))
+
+    if cache_ready:
+        snap = broker.cache_health_snapshot()
+        logger.info(
+            f"[STARTUP GATE] Cache READY: {snap['fresh']}/{snap['total']} symbols fresh. Proceeding to scan."
+        )
+    else:
+        snap = broker.cache_health_snapshot()
+        logger.critical(
+            f"[STARTUP GATE] Cache NOT ready after {CACHE_READY_TIMEOUT}s. "
+            f"Fresh: {snap['fresh']}/{snap['total']}. "
+            f"Proceeding with REST fallback. INVESTIGATE WS CONNECTION."
+        )
+        try:
+            await bot.send_alert(
+                f"🚨 WS CACHE STARTUP FAILURE\n"
+                f"Cache not ready after {CACHE_READY_TIMEOUT}s\n"
+                f"Fresh: {snap['fresh']}/{snap['total']}\n"
+                f"Scanning on REST — signals degraded."
+            )
+        except Exception as _e:
+            logger.warning(f"[STARTUP GATE] Could not send Telegram alert: {_e}")
 
     # ── P0 FIX: Construct OrderManager with live broker ──────────────
     from order_manager import OrderManager
@@ -221,6 +263,8 @@ async def _initialize_runtime() -> RuntimeContext:
 
     # Inject into FocusEngine (was None → caused NSESGL-EQ execution miss)
     focus_engine.order_manager = order_manager
+    # PRD-008 Bug 2 fix: inject analyzer so focus_engine can call record_signal() at order placement
+    focus_engine.analyzer = analyzer
     logger.info("[INIT] ✅ OrderManager constructed and injected into FocusEngine.")
 
     # Also wire into bot for /positions, /pnl, order alerts
@@ -276,6 +320,10 @@ async def _trading_loop(shutdown_event: asyncio.Event, ctx: RuntimeContext):
             logger.info("[SCAN] Scanning market...")
             candidates = await asyncio.to_thread(ctx.scanner.scan_market)
 
+            # PRD-008: Pull scan_id and data_tier from scanner for gate audit correlation
+            _scan_id   = getattr(ctx.scanner, '_scan_counter', 0)
+            _data_tier = getattr(ctx.scanner, '_last_data_tier', 'UNKNOWN')
+
             ctx.bot._scan_metadata = {
                 "last_scan_time": datetime.now(),
                 "candidate_count": len(candidates) if candidates else 0,
@@ -292,6 +340,8 @@ async def _trading_loop(shutdown_event: asyncio.Event, ctx: RuntimeContext):
                     cand["ltp"],
                     cand.get("oi", 0),
                     cand.get("history_df"),
+                    _scan_id,
+                    _data_tier,
                 )
                 if not signal:
                     continue
@@ -449,6 +499,20 @@ async def main() -> int:
             analyzer = EODAnalyzer(fyers_client=ctx.broker.rest_client, db=ctx.db_manager)
             report = await analyzer.run_daily_analysis()
             await _notify(f"EOD Analysis Complete.\n\n{str(report)[:3000]}")
+
+            # PRD-008: Gate result EOD flush
+            try:
+                from gate_result_logger import get_gate_result_logger
+                grl = get_gate_result_logger()
+                summary_path = grl.write_eod_summary()
+                flushed = await grl.flush_to_db(ctx.db_manager)
+                logger.info(f"[PRD-008] EOD flush: {flushed} gate records written to DB. Summary: {summary_path}")
+                await _notify(
+                    f"📋 Gate Audit Trail: {flushed} records → DB\n"
+                    f"Rejection summary: {summary_path}"
+                )
+            except Exception as _e:
+                logger.error(f"[PRD-008] EOD flush failed: {_e}")
 
         async def _get_open_positions():
             return await ctx.broker.get_all_positions()

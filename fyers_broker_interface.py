@@ -24,6 +24,7 @@ from pathlib import Path
 from collections import deque, defaultdict
 from datetime import datetime
 from typing import Optional, Dict, List, Any, Callable, Set
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -168,12 +169,21 @@ class FyersBrokerInterface:
         self._order_cache: Dict[str, Dict] = {}      # order_id -> latest order message
         self._position_cache: Dict[str, Dict] = {}   # symbol -> latest position message
         
-        # Phase 44.7 — WS quote cache for scanner pre-filter
+        # Phase 44.7 / PRD-007 — WS quote cache for scanner pre-filter
         import threading
         self._quote_cache: dict[str, dict] = {}
         self._quote_cache_lock = threading.Lock()
         self._ws_subscribed_symbols: list[str] = []
         self._ws_subscribed_symbols_set: set[str] = set()
+
+        # PRD-007: Cache reliability state machine
+        self._cache_state: str = "UNINITIALIZED"  # UNINITIALIZED | PRIMING | READY | DEGRADED
+        self._cache_ready_event = threading.Event()  # Set when readiness threshold first crossed
+        self._subscribed_count: int = 0
+        self._prime_start_ts: float = 0.0
+        self._health_monitor_thread: threading.Thread | None = None
+        self._health_monitor_running: bool = False
+        self._reprime_requested: bool = False
         
         # Background tasks
         self.tasks = []
@@ -360,7 +370,6 @@ class FyersBrokerInterface:
         """
         try:
             # ── Phase 44.7: Update scanner quote cache ─────────────
-            import time
             symbol = message.get('symbol') or message.get('n')
             if symbol and hasattr(self, '_ws_subscribed_symbols_set') and symbol in self._ws_subscribed_symbols_set:
                 with self._quote_cache_lock:
@@ -379,6 +388,8 @@ class FyersBrokerInterface:
                         'ask':    message.get('ask', 0),
                         'ts':     time.time(),
                     }
+                    # PRD-007: Advance PRIMING → READY state machine on each tick
+                    self._check_cache_readiness_internal()
 
             # Fyers DataSocket returns dict structure
             tick = TickData(message)
@@ -575,9 +586,16 @@ class FyersBrokerInterface:
         Subscribe all scanner symbols to dataws in symbolUpdate mode.
         Called once at startup after dataws is connected.
         Splits into batches of 50 — Fyers dataws limit per subscribe call.
+        Resets the cache state machine to PRIMING and starts the health monitor.
         """
         self._ws_subscribed_symbols = symbols
         self._ws_subscribed_symbols_set = set(symbols)
+        self._subscribed_count = len(symbols)
+        self._cache_state = "PRIMING"
+        self._cache_ready_event.clear()
+        self._prime_start_ts = time.time()
+        self._reprime_requested = False
+
         batch_size = 50
         total = 0
         for i in range(0, len(symbols), batch_size):
@@ -591,7 +609,22 @@ class FyersBrokerInterface:
                 total += len(batch)
             except Exception as e:
                 logger.error(f"[WS Cache] Subscribe batch {i//batch_size} failed: {e}")
-        logger.info(f"[WS Cache] Subscribed {total}/{len(symbols)} symbols to dataws symbolUpdate")
+        logger.info(f"[WS Cache] Subscribed {total}/{len(symbols)} symbols to dataws symbolUpdate — state=PRIMING")
+
+        # Start health monitor thread — check actual liveness, not just the flag
+        thread_dead = (
+            self._health_monitor_thread is not None
+            and not self._health_monitor_thread.is_alive()
+        )
+        if not self._health_monitor_running or thread_dead:
+            self._health_monitor_running = True
+            self._health_monitor_thread = threading.Thread(
+                target=self._run_cache_health_monitor,
+                name="WSCacheHealthMonitor",
+                daemon=True
+            )
+            self._health_monitor_thread.start()
+            logger.info("[WS Cache] Health monitor thread started")
 
     def get_quote_cache_snapshot(self) -> dict[str, dict]:
         """
@@ -600,6 +633,140 @@ class FyersBrokerInterface:
         """
         with self._quote_cache_lock:
             return dict(self._quote_cache)
+
+    # ================================================================
+    # PRD-007: Cache Readiness & Health
+    # ================================================================
+
+    def _get_readiness_threshold(self) -> float:
+        """Returns readiness threshold based on market session timing."""
+        try:
+            import config
+            mins_open = config.minutes_since_market_open()
+            if mins_open < 30:
+                return 0.85   # Opening: 85% (strict)
+            else:
+                return 0.80   # Mid-market/late: 80%
+        except Exception:
+            return 0.85
+
+    def _check_cache_readiness_internal(self):
+        """
+        Called on every tick during PRIMING. Sets the readiness event
+        and transitions state to READY once threshold is crossed.
+        Must be called under _quote_cache_lock.
+        """
+        if self._cache_state != "PRIMING" or self._subscribed_count == 0:
+            return
+
+        freshness_ttl = 60.0
+        now = time.time()
+        fresh_count = sum(
+            1 for t in self._quote_cache.values()
+            if (now - t.get('ts', 0)) < freshness_ttl
+        )
+        pct = fresh_count / self._subscribed_count
+        threshold = self._get_readiness_threshold()
+
+        if pct >= threshold:
+            self._cache_state = "READY"
+            self._cache_ready_event.set()
+            elapsed = now - self._prime_start_ts
+            logger.info(
+                f"[WS Cache] CACHE READY: {fresh_count}/{self._subscribed_count} symbols fresh "
+                f"({pct:.1%} >= {threshold:.0%}) after {elapsed:.1f}s"
+            )
+
+    def is_cache_ready(self) -> bool:
+        """Returns True if cache is in READY state (crossed readiness threshold)."""
+        return self._cache_state == "READY"
+
+    def wait_for_cache_ready(self, timeout_sec: float = 45.0) -> bool:
+        """
+        Blocks caller until cache is READY or timeout expires.
+        Returns True if ready, False on timeout.
+        Used by startup gate in main.py via asyncio.to_thread().
+        """
+        return self._cache_ready_event.wait(timeout=timeout_sec)
+
+    def cache_health_snapshot(self) -> dict:
+        """Returns current cache health metrics dict."""
+        freshness_ttl = 60.0
+        with self._quote_cache_lock:
+            now = time.time()
+            ages = [(now - t.get('ts', now)) for t in self._quote_cache.values()]
+            fresh = sum(1 for a in ages if a < freshness_ttl)
+            populated = len(self._quote_cache)
+            total = self._subscribed_count
+            sorted_ages = sorted(ages) if ages else [0]
+
+        return {
+            'total':     total,
+            'populated': populated,
+            'fresh':     fresh,
+            'stale':     populated - fresh,
+            'missing':   max(0, total - populated),
+            'age_p50':   sorted_ages[len(sorted_ages) // 2],
+            'age_p95':   sorted_ages[int(len(sorted_ages) * 0.95)],
+            'age_p99':   sorted_ages[int(len(sorted_ages) * 0.99)] if len(sorted_ages) >= 100 else sorted_ages[-1],
+            'state':     self._cache_state,
+        }
+
+    def _trigger_reprime(self):
+        """Re-subscribe all stale symbols to dataws."""
+        if self._reprime_requested:
+            return
+        self._reprime_requested = True
+        self._cache_state = "PRIMING"
+        self._cache_ready_event.clear()
+        logger.warning("[WS Cache] Re-prime triggered — re-subscribing all symbols")
+        try:
+            if self._ws_subscribed_symbols:
+                self.subscribe_scanner_universe(self._ws_subscribed_symbols)
+        except Exception as e:
+            logger.error(f"[WS Cache] Re-prime failed: {e}")
+        finally:
+            self._reprime_requested = False
+
+    def _run_cache_health_monitor(self):
+        """
+        Background daemon thread. Runs every 30s.
+        Logs health metrics. Escalates CRITICAL and triggers re-prime if needed.
+        """
+        consecutive_critical = 0
+        while self._health_monitor_running:
+            time.sleep(30)
+            try:
+                snap = self.cache_health_snapshot()
+                total = max(snap['total'], 1)
+                fresh_pct = snap['fresh'] / total
+
+                if fresh_pct >= 0.85:
+                    status = "HEALTHY"
+                    consecutive_critical = 0
+                elif fresh_pct >= 0.50:
+                    status = "DEGRADED"
+                    consecutive_critical = 0
+                else:
+                    status = "CRITICAL"
+                    consecutive_critical += 1
+
+                logger.info(
+                    f"[WS Cache] CACHE HEALTH | Fresh: {snap['fresh']}/{snap['total']} ({fresh_pct:.1%}) "
+                    f"| Stale: {snap['stale']} | Missing: {snap['missing']} "
+                    f"| Age P50: {snap['age_p50']:.1f}s P95: {snap['age_p95']:.1f}s "
+                    f"| State: {snap['state']} | Status: {status}"
+                )
+
+                if status == "CRITICAL" and consecutive_critical >= 2:
+                    logger.critical(
+                        f"[WS Cache] CACHE CRITICAL FOR 60s — Fresh only {fresh_pct:.1%}. Triggering re-prime."
+                    )
+                    self._trigger_reprime()
+                    consecutive_critical = 0
+
+            except Exception as e:
+                logger.error(f"[WS Cache] Health monitor error: {e}")
 
     async def subscribe_symbols(self, symbols: List[str]):
         """Subscribe to real-time data for symbols."""

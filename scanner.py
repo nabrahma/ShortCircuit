@@ -197,107 +197,182 @@ class FyersScanner:
         symbol_list = list(self.symbols.keys()) # EXTRACT KEYS
         pre_candidates = []  # Pass gain/volume/price filter, pending quality
         
-        # ── Phase 44.7: WS Cache Path ─────────────────────────────
-        if self.broker and hasattr(self.broker, '_quote_cache') and self.broker._quote_cache:
+        # ── PRD-007: Tiered Data Provider ─────────────────────────
+        import time as _time
+        scan_start_ms = _time.monotonic() * 1000
+
+        # Increment scan counter (module-level for log correlation)
+        if not hasattr(self, '_scan_counter'):
+            self._scan_counter = 0
+        self._scan_counter += 1
+        scan_id = self._scan_counter
+
+        data_tier = "REST_EMERGENCY"   # Will be overridden below
+
+        if self.broker and hasattr(self.broker, 'is_cache_ready') and self.broker.is_cache_ready():
+            # ── Tier 1: Full WS Cache ────────────────────────────────
             snapshot = self.broker.get_quote_cache_snapshot()
-            cache_miss = []
+            fresh = {}
+            stale_symbols = []
 
             for symbol in symbol_list:
                 quote = snapshot.get(symbol)
                 if quote is None:
-                    cache_miss.append(symbol)
+                    stale_symbols.append(symbol)
                     continue
-                
-                ltp    = quote.get('ltp', 0)
-                volume = quote.get('volume', 0)
-                gain   = abs(quote.get('ch_oc', 0))
-                oi     = quote.get('oi', 0)
-                ts     = quote.get('ts', 0)
-                
-                import time
-                age_s  = time.time() - ts
-
-                # Stale data guard — skip if WS hasn't updated in 60s
+                age_s = _time.time() - quote.get('ts', 0)
                 if age_s > 60:
-                    cache_miss.append(symbol)
-                    continue
+                    stale_symbols.append(symbol)
+                else:
+                    fresh[symbol] = quote
 
-                if gain >= 6.18 and volume >= 100_000 and ltp >= 5 and oi == 0:
-                    
-                    # Fix #5: Blacklist Check
-                    if self.quality_reject_counts.get(symbol, 0) >= 3:
-                        logger.debug(f"BLACKLIST {symbol} — Quality rejected 3x today, skipping history fetch.")
-                        continue
-                        
-                    tick_size = self.symbols.get(symbol, 0.05)
-                    pre_candidates.append({
-                        'symbol': symbol,
-                        'ltp': ltp,
-                        'volume': volume,
-                        'change': gain,
-                        'tick_size': tick_size,
-                        'oi': oi,
-                    })
+            fresh_pct = len(fresh) / max(len(symbol_list), 1)
 
-            if cache_miss:
-                logger.debug(f"[WS Cache] {len(cache_miss)} symbols not in cache — skipped this cycle")
+            if fresh_pct >= 0.85:
+                # Pure Tier 1
+                data_tier = "WS_CACHE"
+                all_quotes = fresh
 
-            logger.info(f"[WS Cache] Pre-filter: {len(pre_candidates)} candidates from {len(snapshot)} cached symbols")
+            elif fresh_pct >= 0.50:
+                # Tier 2: HYBRID — supplement only stale/missing symbols via REST
+                data_tier = "HYBRID"
+                logger.warning(
+                    f"[WS Cache] Tier 2 HYBRID: {len(stale_symbols)} symbols stale/missing "
+                    f"(WS fresh: {len(fresh)}/{len(symbol_list)}). Supplementing via REST."
+                )
+                all_quotes = dict(fresh)
+                # REST supplement for stale symbols only
+                batch_size = 50
+                for i in range(0, len(stale_symbols), batch_size):
+                    batch = stale_symbols[i:i + batch_size]
+                    try:
+                        data = {"symbols": ",".join(batch)}
+                        response = self.fyers.quotes(data=data)
+                        if "d" in response:
+                            for stock in response["d"]:
+                                quote_data = stock.get('v')
+                                if not isinstance(quote_data, dict):
+                                    continue
+                                sym = stock.get('n')
+                                ltp = quote_data.get('lp', 0)
+                                volume = quote_data.get('volume', 0)
+                                chp = quote_data.get('chp', 0)
+                                if sym:
+                                    all_quotes[sym] = {
+                                        'ltp': ltp, 'volume': volume,
+                                        'ch_oc': chp, 'oi': quote_data.get('oi', 0),
+                                        'ts': _time.time(),
+                                    }
+                    except Exception as e:
+                        logger.error(f"[Tier 2] REST supplement batch error: {e}")
 
-        else:
-            # ── Fallback: original REST batch path (unchanged) ────────
-            logger.warning("[WS Cache] Cache not ready or missing — falling back to REST batch")
-            
+            else:
+                # Tier 3: REST EMERGENCY — cache too degraded
+                data_tier = "REST_EMERGENCY"
+                snap = self.broker.cache_health_snapshot()
+                logger.critical(
+                    f"[WS Cache] TIER 3 REST EMERGENCY: WS cache only {fresh_pct:.1%} fresh "
+                    f"({snap.get('fresh')}/{snap.get('total')}). Full REST fallback. INVESTIGATE IMMEDIATELY."
+                )
+                if hasattr(self, '_bot_alert_fn') and self._bot_alert_fn:
+                    try:
+                        self._bot_alert_fn(
+                            f"⚠️ WS CACHE FAILURE\nFresh: {snap.get('fresh')}/{snap.get('total')} ({fresh_pct:.1%})\n"
+                            "Falling back to full REST. Signals degraded."
+                        )
+                    except Exception:
+                        pass
+                all_quotes = {}  # Will REST-fill below
+
+            # Build pre_candidates from all_quotes (Tier 1 and 2)
+            if data_tier in ("WS_CACHE", "HYBRID"):
+                for symbol, quote in all_quotes.items():
+                    ltp    = quote.get('ltp', 0)
+                    volume = quote.get('volume', 0)
+                    gain   = abs(quote.get('ch_oc', 0))
+                    oi     = quote.get('oi', 0)
+
+                    if gain >= 6.0 and gain <= 18.0 and volume >= 100_000 and ltp >= 5:
+                        if self.quality_reject_counts.get(symbol, 0) >= 3:
+                            logger.debug(f"BLACKLIST {symbol} — Quality rejected 3x today, skipping.")
+                            continue
+                        tick_size = self.symbols.get(symbol, 0.05)
+                        pre_candidates.append({
+                            'symbol': symbol, 'ltp': ltp,
+                            'volume': volume, 'change': gain,
+                            'tick_size': tick_size, 'oi': oi,
+                        })
+
+            # Elapsed for tier 1/2
+            if data_tier in ("WS_CACHE", "HYBRID"):
+                tier_ms = int((_time.monotonic() * 1000) - scan_start_ms)
+                logger.info(
+                    f"SCAN #{scan_id} | Tier: {data_tier} | "
+                    f"Cache: {len(fresh)}/{len(symbol_list)} fresh | "
+                    f"Scan_ms: {tier_ms} | Pre-candidates: {len(pre_candidates)}"
+                )
+
+        if data_tier == "REST_EMERGENCY" or not (self.broker and hasattr(self.broker, 'is_cache_ready')):
+            # ── Tier 3 / No-broker fallback: original REST batch path ────
+            if self.broker:
+                # Already logged CRITICAL above; just do the REST scan
+                pass
+            else:
+                logger.warning("[WS Cache] No broker configured — using REST batch scan")
+            data_tier = "REST_EMERGENCY"
+
             batch_size = 50
             total_symbols = len(symbol_list)
-            
             logger.info(f"Scanning {total_symbols} symbols in batches via REST...")
 
-            # Phase A: Batch quote scan (serial — cheap API calls)
             for i in range(0, total_symbols, batch_size):
                 batch = symbol_list[i:i+batch_size]
                 symbols_str = ",".join(batch)
-                
+
                 try:
                     data = {"symbols": symbols_str}
                     response = self.fyers.quotes(data=data)
-                    
+
                     if "d" not in response:
                         continue
-                        
+
                     for stock in response["d"]:
                         quote_data = stock.get('v')
                         if not isinstance(quote_data, dict):
                             continue
-                            
+
                         symbol = stock.get('n')
-                        ltp = quote_data.get('lp') 
+                        ltp = quote_data.get('lp')
                         volume = quote_data.get('volume')
                         change_p = quote_data.get('chp')
-                        
+
                         if ltp is None or volume is None or change_p is None:
                             continue
-                            
-                        # Filter: Gain 6-18%, Vol > 100k, LTP > 5
+
                         if 6.0 <= change_p <= 18.0 and volume > 100000 and ltp > 5:
-                            
-                            # Fix #5: Blacklist Check
+
                             if self.quality_reject_counts.get(symbol, 0) >= 3:
                                 logger.debug(f"BLACKLIST {symbol} — Quality rejected 3x today, skipping history fetch.")
                                 continue
-                                
+
                             tick_size = self.symbols.get(symbol, 0.05)
                             oi = quote_data.get('oi', 0)
                             pre_candidates.append({
-                                'symbol': symbol,
-                                'ltp': ltp,
-                                'volume': volume,
-                                'change': change_p,
-                                'tick_size': tick_size,
-                                'oi': oi,
+                                'symbol': symbol, 'ltp': ltp,
+                                'volume': volume, 'change': change_p,
+                                'tick_size': tick_size, 'oi': oi,
                             })
                 except Exception as e:
                     logger.error(f"Batch Error: {e}")
+
+            tier_ms = int((_time.monotonic() * 1000) - scan_start_ms)
+            logger.info(
+                f"SCAN #{scan_id} | Tier: REST_EMERGENCY | Cache: FAILED | "
+                f"Scan_ms: {tier_ms} | Pre-candidates: {len(pre_candidates)}"
+            )
+
+        # PRD-008: Store tier for main.py gate audit trail correlation
+        self._last_data_tier = data_tier
 
         if not pre_candidates:
             logger.info("No pre-candidates passed filter.")

@@ -14,6 +14,7 @@ from god_mode_logic import GodModeAnalyst
 from tape_reader import TapeReader
 from market_profile import ProfileAnalyzer
 from ml_logger import get_ml_logger
+from gate_result_logger import GateResult, get_gate_result_logger
 
 logger = logging.getLogger(__name__)
 
@@ -101,35 +102,52 @@ class FyersAnalyzer:
             logger.error(f"Error fetching history for {symbol}: {e}")
             return None
 
-    def check_setup(self, symbol: str, ltp: float, oi: float = 0, pre_fetched_df: Optional[pd.DataFrame] = None) -> Optional[Dict[str, Any]]:
+    def check_setup(self, symbol: str, ltp: float, oi: float = 0, pre_fetched_df: Optional[pd.DataFrame] = None,
+                    scan_id: int = 0, data_tier: str = "UNKNOWN") -> Optional[Dict[str, Any]]:
         """
         Validates a trading candidate using the God Mode strategy.
         Optimized to use pre-fetched History DF and Shared Depth Data.
         """
+        grl = get_gate_result_logger()
+        gr = GateResult(symbol=symbol, scan_id=scan_id, data_tier=data_tier)
 
-        
-        # 1. Pre-analysis Filters
-        if not self._check_filters(symbol):
-
+        # ── G7: Pre-analysis Filters (Market Regime) ─────────────────
+        allow_short, regime_reason = self._check_filters_detailed(symbol)
+        gr.g7_pass = allow_short
+        gr.g7_value = regime_reason
+        if not allow_short:
+            gr.verdict = "REJECTED"
+            gr.first_fail_gate = "G7_REGIME"
+            gr.rejection_reason = f"Market regime blocked: {regime_reason}"
+            grl.record(gr)
             return None
-            
-        # 2. Data Fetching
+
+        # ── G1: Data Fetching & RVOL validity ──────────────────────────────
         if pre_fetched_df is not None:
+
              df = pre_fetched_df
-             # Ensure we're working with a copy to avoid side effects
              df = df.copy()
         else:
              df = self.get_history(symbol)
              
         if df is None or df.empty:
-
+            gr.verdict = "DATA_ERROR"
+            gr.rejection_reason = "No history data available"
+            grl.record(gr)
             return None
             
-        # Hard guard (Change 3): if df has fewer than RVOL_MIN_CANDLES rows, RVOL is unreliable.
-        # This fixes a confirmed false-positive bug where avg_vol=0 -> rvol=0, falsely passing as exhaustion vacuum.
+        # Hard guard: if df has fewer than RVOL_MIN_CANDLES rows, RVOL is unreliable.
         if config.RVOL_VALIDITY_GATE_ENABLED and len(df) < config.RVOL_MIN_CANDLES:
+            gr.g2_pass = False
+            gr.g2_value = float(len(df))
+            gr.verdict = "REJECTED"
+            gr.first_fail_gate = "G2_RVOL_VALIDITY"
+            gr.rejection_reason = f"Only {len(df)} candles — need {config.RVOL_MIN_CANDLES} for valid RVOL"
             logger.warning(f"SKIP {symbol} — RVOL_VALIDITY_GATE: Only {len(df)} candles — need {config.RVOL_MIN_CANDLES}")
+            grl.record(gr)
             return None
+        gr.g2_pass = True
+        gr.g2_value = float(len(df))
             
         # Define prev_df (used for structural analysis components that need history context)
         # Note: df includes the current candle 'i'. prev_df is history up to 'i-1'.
@@ -142,33 +160,49 @@ class FyersAnalyzer:
         open_price = df.iloc[0]['open']
         gain_pct = ((ltp - open_price) / open_price) * 100
         
-        # 4. Hard Constraints (The "Ethos" Check)
-        # LOGIC FIX (Phase 38): Pass open_price to valid Max Day Gain
+        # ── G1: Gain range / hard constraints ───────────────────────
         ok, msg = self.gm_analyst.check_constraints(ltp, day_high, gain_pct, open_price)
-        
+        gr.g1_pass = ok
+        gr.g1_value = round(gain_pct, 2)
         if not ok:
+            gr.verdict = "REJECTED"
+            gr.first_fail_gate = "G1_GAIN_CONSTRAINTS"
+            gr.rejection_reason = msg
+            grl.record(gr)
             return None
         
 
 
-        # 5. Circuit Guard (Requires Depth)
-        # We fetch Depth ONCE here and share it with Circuit Guard and Tape Reader
+        # ── G3: Circuit Guard ────────────────────────────────────────
         depth_data = None
         try:
             full_depth = self.fyers.depth(data={"symbol": symbol, "ohlcv_flag":"1"})
-            # Validate response
             if 'd' in full_depth and symbol in full_depth['d']:
                 depth_data = full_depth['d'][symbol]
         except:
             pass
             
-        if self._check_circuit_guard(symbol, ltp, depth_data):
+        circuit_blocked = self._check_circuit_guard(symbol, ltp, depth_data)
+        gr.g3_pass = not circuit_blocked
+        gr.g3_value = round(ltp, 2)
+        if circuit_blocked:
+            gr.verdict = "REJECTED"
+            gr.first_fail_gate = "G3_CIRCUIT_GUARD"
+            gr.rejection_reason = f"LTP {ltp} too close to upper circuit"
+            grl.record(gr)
             return None
 
-        # 6. Momentum Safeguard (Train Filter)
+        # ── G4: Momentum safeguard ───────────────────────────────────
         slope, _ = self.gm_analyst.calculate_vwap_slope(df.iloc[-30:])
-        if self._is_momentum_too_strong(df, slope, symbol):
-             return None
+        momentum_blocked = self._is_momentum_too_strong(df, slope, symbol)
+        gr.g4_pass = not momentum_blocked
+        gr.g4_value = round(slope, 3)
+        if momentum_blocked:
+            gr.verdict = "REJECTED"
+            gr.first_fail_gate = "G4_MOMENTUM"
+            gr.rejection_reason = f"Momentum too strong (slope={slope:.2f})"
+            grl.record(gr)
+            return None
 
         # 7. Pre-Calculation step
         if len(df) > 1:
@@ -188,7 +222,7 @@ class FyersAnalyzer:
         except Exception as e:
             logger.warning(f"Profile computation error: {e}")
 
-        # Gate 5 — Exhaustion at Stretch
+        # ── G5: Gate 5 — Exhaustion at Stretch ──────────────────────
         # Runs BEFORE breakdown check — detects exhaustion at the high
         # Gate 10 WebSocket is the sole breakdown confirmation
         exhaustion = self.gm_analyst.is_exhaustion_at_stretch(
@@ -196,8 +230,14 @@ class FyersAnalyzer:
             profile=profile,
             gain_pct=gain_pct
         )
+        gr.g5_pass = exhaustion["fired"]
+        gr.g5_value = round(exhaustion.get("stretch_score", 0), 3)
 
         if not exhaustion["fired"]:
+            gr.verdict = "REJECTED"
+            gr.first_fail_gate = "G5_EXHAUSTION"
+            gr.rejection_reason = exhaustion.get('reject_reason', 'Exhaustion conditions not met')
+            grl.record(gr)
             logger.debug(
                 f"[Gate5] {symbol} FAIL — {exhaustion['reject_reason']} "
                 f"stretch={exhaustion['stretch_score']:.2f} "
@@ -225,7 +265,7 @@ class FyersAnalyzer:
             else "EXHAUSTION_FADE"
         )
 
-        # Pro Confluence — runs after Gate 5 passes
+        # ── G6: Pro Confluence / POC divergence ─────────────────────
         vwap_sd = self.gm_analyst.calculate_vwap_bands(prev_df)
         is_extended = vwap_sd > 2.0
 
@@ -233,28 +273,66 @@ class FyersAnalyzer:
             symbol, df, prev_df, slope, is_extended, vwap_sd,
             pattern_desc, depth_data, ltp, oi, signal_meta
         )
+        gr.g6_pass = valid_signal
+        gr.g6_value = f"+{len(pro_conf_msgs)}conf"
         if pro_conf_msgs:
             pattern_desc += f" + {', '.join(pro_conf_msgs)}"
 
         if not valid_signal:
+            gr.verdict = "REJECTED"
+            gr.first_fail_gate = "G6_PRO_CONFLUENCE"
+            gr.rejection_reason = "No pro confluence: structure valid but no secondary confirmation"
+            grl.record(gr)
             return None
 
-        # Gate 10 WebSocket handles the actual price breakdown
-        # signal_low set in _finalize_signal → focusengine watches LTP < signal_low
-        return self._finalize_signal(
+        # ── G8: Signal Manager gate (daily limit / cooldown / pause) ─
+        sm = self.signal_manager
+        can_signal, sm_reason = sm.can_signal(symbol) if hasattr(sm, 'can_signal') else (True, "")
+        gr.g8_pass = can_signal
+        gr.g8_value = None
+        if not can_signal:
+            gr.verdict = "REJECTED"
+            gr.first_fail_gate = "G8_SIGNAL_MANAGER"
+            gr.rejection_reason = sm_reason
+            grl.record(gr)
+            return None
+
+        # ── G9: HTF Confluence ────────────────────────────────────
+        # Runs in analyzer, NOT focus_engine. Moved out of _finalize_signal()
+        # so the gate result is recorded if it fails. (Bug 1 fix)
+        htf_ok, htf_msg = self.htf_confluence.check_trend_exhaustion(symbol)
+        gr.g9_pass  = htf_ok
+        gr.g9_value = htf_msg
+        if not htf_ok:
+            gr.verdict = "REJECTED"
+            gr.first_fail_gate = "G9_HTF_CONFLUENCE"
+            gr.rejection_reason = f"HTF blocked: {htf_msg}"
+            grl.record(gr)
+            logger.info(f"BLOCKED by HTF Confluence: {symbol} - {htf_msg}")
+            return None
+
+        # All analyzer gates passed — attach gate result to signal for focus_engine
+        gr.verdict = "ANALYZER_PASS"   # Partial — focus_engine will finalize
+        finalized = self._finalize_signal(
             symbol, ltp, df, pattern_desc, slope, "", signal_meta
         )
+        if finalized:
+            finalized['_gate_result'] = gr   # Pass GateResult object to focus_engine
+        return finalized
 
     def _check_filters(self, symbol: str) -> bool:
-        """Runs pre-analysis checks: Market Regime."""
-        # 1. Market Regime
+        """Runs pre-analysis checks: Market Regime. (Legacy — delegates to detailed version)"""
+        allowed, _ = self._check_filters_detailed(symbol)
+        return allowed
+
+    def _check_filters_detailed(self, symbol: str):
+        """Returns (allowed: bool, reason: str) for G7 gate recording."""
         allow_short, reason = self.market_context.should_allow_short()
         if not allow_short:
             logger.info(f"BLOCKED by Market Regime: {symbol} - {reason}")
-            return False
-        
-        # Time filter REMOVED per user request (stocks may hover, then move later)
-        return True
+            return False, reason
+        return True, "ok"
+
 
     def _enrich_dataframe(self, df: pd.DataFrame):
         """Calculates VWAP and other indicators in-place."""
@@ -512,45 +590,72 @@ class FyersAnalyzer:
     # ------------------------------------------------------------------
     def check_setup_with_edges(
         self, symbol: str, ltp: float, oi: float,
-        pre_fetched_df, edge_payload: dict
+        pre_fetched_df, edge_payload: dict,
+        scan_id: int = 0, data_tier: str = "UNKNOWN"
     ):
         """
         Called when MULTI_EDGE_ENABLED is True.
-        Runs Gates 1-7 and 9-12 (skips Gate 8 pattern detection since
-        edges are already identified by MultiEdgeDetector).
+        Runs Gates G1-G9 (same as check_setup) then validates the edge-specific
+        entry trigger. All exit paths are recorded in the gate audit trail.
         """
-        # Gate 1-2: Pre-analysis filters (Signal Manager + Market Regime)
-        if not self._check_filters(symbol):
+        grl = get_gate_result_logger()
+        gr = GateResult(symbol=symbol, scan_id=scan_id, data_tier=data_tier)
+
+        # ── G7: Market Regime ──────────────────────────────────────────
+        allow_short, regime_reason = self._check_filters_detailed(symbol)
+        gr.g7_pass  = allow_short
+        gr.g7_value = regime_reason
+        if not allow_short:
+            gr.verdict = "REJECTED"
+            gr.first_fail_gate = "G7_REGIME"
+            gr.rejection_reason = f"Market regime blocked: {regime_reason}"
+            grl.record(gr)
             return None
 
-        # Gate 3: Data
+        # ── G1+G2: Data + RVOL Validity ───────────────────────────────
         if pre_fetched_df is not None:
             df = pre_fetched_df.copy()
         else:
             df = self.get_history(symbol)
+
         if df is None or df.empty:
+            gr.verdict = "DATA_ERROR"
+            gr.rejection_reason = "No history data available"
+            grl.record(gr)
             return None
 
-        # Hard guard (Change 3): if df has fewer than RVOL_MIN_CANDLES rows, RVOL is unreliable.
-        # This fixes a confirmed false-positive bug where avg_vol=0 -> rvol=0, falsely passing as exhaustion vacuum.
         if config.RVOL_VALIDITY_GATE_ENABLED and len(df) < config.RVOL_MIN_CANDLES:
-            logger.warning(f"SKIP {symbol} — RVOL_VALIDITY_GATE: Only {len(df)} candles — need {config.RVOL_MIN_CANDLES}")
+            gr.g2_pass  = False
+            gr.g2_value = float(len(df))
+            gr.verdict  = "REJECTED"
+            gr.first_fail_gate  = "G2_RVOL_VALIDITY"
+            gr.rejection_reason = f"Only {len(df)} candles — need {config.RVOL_MIN_CANDLES}"
+            logger.warning(f"SKIP {symbol} — RVOL_VALIDITY_GATE: Only {len(df)} candles")
+            grl.record(gr)
             return None
+        gr.g2_pass  = True
+        gr.g2_value = float(len(df))
 
         prev_df = df.iloc[:-1]
 
-        # Gate 4: Context enrichment
+        # ── Enrichment ─────────────────────────────────────────────────
         self._enrich_dataframe(df)
-        day_high = df['high'].max()
+        day_high   = df['high'].max()
         open_price = df.iloc[0]['open']
-        gain_pct = ((ltp - open_price) / open_price) * 100
+        gain_pct   = ((ltp - open_price) / open_price) * 100
 
-        # Gate 5: Hard constraints
+        # ── G1: Gain constraints ───────────────────────────────────────
         ok, msg = self.gm_analyst.check_constraints(ltp, day_high, gain_pct, open_price)
+        gr.g1_pass  = ok
+        gr.g1_value = round(gain_pct, 2)
         if not ok:
+            gr.verdict = "REJECTED"
+            gr.first_fail_gate  = "G1_GAIN_CONSTRAINTS"
+            gr.rejection_reason = msg
+            grl.record(gr)
             return None
 
-        # Gate 6: Circuit Guard
+        # ── G3: Circuit Guard ──────────────────────────────────────────
         depth_data = None
         try:
             full_depth = self.fyers.depth(data={"symbol": symbol, "ohlcv_flag": "1"})
@@ -559,64 +664,101 @@ class FyersAnalyzer:
         except Exception:
             pass
 
-        if self._check_circuit_guard(symbol, ltp, depth_data):
+        circuit_blocked = self._check_circuit_guard(symbol, ltp, depth_data)
+        gr.g3_pass  = not circuit_blocked
+        gr.g3_value = round(ltp, 2)
+        if circuit_blocked:
+            gr.verdict = "REJECTED"
+            gr.first_fail_gate  = "G3_CIRCUIT_GUARD"
+            gr.rejection_reason = f"LTP {ltp} too close to upper circuit"
+            grl.record(gr)
             return None
 
-        # Gate 7: Momentum Safeguard
+        # ── G4: Momentum Safeguard ─────────────────────────────────────
         slope, _ = self.gm_analyst.calculate_vwap_slope(df.iloc[-30:])
-        if self._is_momentum_too_strong(df, slope, symbol):
+        momentum_blocked = self._is_momentum_too_strong(df, slope, symbol)
+        gr.g4_pass  = not momentum_blocked
+        gr.g4_value = round(slope, 3)
+        if momentum_blocked:
+            gr.verdict = "REJECTED"
+            gr.first_fail_gate  = "G4_MOMENTUM"
+            gr.rejection_reason = f"Momentum too strong (slope={slope:.2f})"
+            grl.record(gr)
             return None
 
-        # SKIP Gate 8 — edges already detected by MultiEdgeDetector
+        # G5 (exhaustion pattern) SKIP — edges already detected by MultiEdgeDetector
 
-        # Gate 9: Breakdown confirmation (edge-specific entry trigger)
+        # ── Edge-specific entry trigger check (replaces G5/G12 in this path) ─
         current_ltp = df.iloc[-1]['close']
         if current_ltp >= edge_payload['entry_trigger']:
-            return None  # Not yet broken down
+            gr.g5_pass  = False
+            gr.g5_value = round(current_ltp - edge_payload['entry_trigger'], 4)
+            gr.verdict  = "REJECTED"
+            gr.first_fail_gate  = "G5_EDGE_TRIGGER_NOT_BROKEN"
+            gr.rejection_reason = f"LTP {current_ltp} >= entry_trigger {edge_payload['entry_trigger']}"
+            grl.record(gr)
+            return None
+        gr.g5_pass = True
 
-        # Gate 10: Pro Confluence (same logic)
-        vwap_sd = self.gm_analyst.calculate_vwap_bands(prev_df)
+        # ── G6: Pro Confluence ─────────────────────────────────────────
+        vwap_sd     = self.gm_analyst.calculate_vwap_bands(prev_df)
         is_extended = vwap_sd > 2.0
-        edge_desc = " + ".join(e['trigger'] for e in edge_payload['edges'])
+        edge_desc   = " + ".join(e['trigger'] for e in edge_payload['edges'])
 
         valid_signal, pro_conf_msgs = self._check_pro_confluence(
             symbol, df, prev_df, slope, is_extended, vwap_sd,
             edge_desc, depth_data, ltp, oi
         )
+        gr.g6_pass  = valid_signal
+        gr.g6_value = f"+{len(pro_conf_msgs)}conf"
         if pro_conf_msgs:
             edge_desc += f" + {', '.join(pro_conf_msgs)}"
 
         if not valid_signal:
+            gr.verdict = "REJECTED"
+            gr.first_fail_gate  = "G6_PRO_CONFLUENCE"
+            gr.rejection_reason = "No pro confluence for multi-edge candidate"
+            grl.record(gr)
             return None
 
-        # Gate 11-12: HTF + Finalize (adds ML logging, SL, etc.)
+        # ── G9: HTF Confluence ─────────────────────────────────────────
+        htf_ok, htf_msg = self.htf_confluence.check_trend_exhaustion(symbol)
+        gr.g9_pass  = htf_ok
+        gr.g9_value = htf_msg
+        if not htf_ok:
+            gr.verdict = "REJECTED"
+            gr.first_fail_gate  = "G9_HTF_CONFLUENCE"
+            gr.rejection_reason = f"HTF blocked: {htf_msg}"
+            grl.record(gr)
+            logger.info(f"BLOCKED by HTF Confluence (edge): {symbol} - {htf_msg}")
+            return None
+
+        # ── Finalize ───────────────────────────────────────────────────
+        gr.verdict = "ANALYZER_PASS"
         base_signal = self._finalize_signal(symbol, ltp, df, edge_desc, slope, "", {})
         if base_signal is None:
+            # _finalize_signal only fails on exceptions now — but guard anyway
+            gr.verdict = "DATA_ERROR"
+            gr.rejection_reason = "_finalize_signal returned None unexpectedly"
+            grl.record(gr)
             return None
 
-        # Merge edge metadata into signal for Telegram + logging
+        # Merge edge metadata
         base_signal['edges_detected'] = [e['trigger'] for e in edge_payload['edges']]
-        base_signal['confidence'] = edge_payload['confidence']
-        base_signal['edge_count'] = edge_payload['edge_count']
-        base_signal['primary_edge'] = edge_payload['primary_trigger']
+        base_signal['confidence']     = edge_payload['confidence']
+        base_signal['edge_count']     = edge_payload['edge_count']
+        base_signal['primary_edge']   = edge_payload['primary_trigger']
+        base_signal['_gate_result']   = gr   # Pass to focus_engine
 
-        # Override SL if multi-edge recommends a tighter one
         if edge_payload.get('recommended_sl') and edge_payload['recommended_sl'] < base_signal['stop_loss']:
             base_signal['stop_loss'] = edge_payload['recommended_sl']
 
         return base_signal
 
-    def _finalize_signal(self, symbol, ltp, df, pattern_desc, slope, wall_msg, signal_meta: dict = None):
-        """Final HTF checks and logging."""
-        if signal_meta is None: signal_meta = {}
-        
-        # HTF Confluence Check
-        htf_ok, htf_msg = self.htf_confluence.check_trend_exhaustion(symbol)
-        if not htf_ok:
-            logger.info(f"BLOCKED by HTF Confluence: {symbol} - {htf_msg}")
-            return None
 
-        # Key Level Check
+    def _finalize_signal(self, symbol, ltp, df, pattern_desc, slope, wall_msg, signal_meta: dict = None):
+        """Calculates SL, builds signal dict, logs to signal log and ML. Pure — no gate checks."""
+        if signal_meta is None: signal_meta = {}
         at_level, level_name, level_price = self.htf_confluence.is_at_key_level(symbol, ltp, tolerance_pct=1.0)
         level_msg = f"At {level_name} ({level_price:.2f})" if at_level else ""
         if level_msg:
@@ -630,9 +772,9 @@ class FyersAnalyzer:
 
         # Logging
         logger.info(f"[OK] GOD MODE SIGNAL: {symbol} | {pattern_desc}")
-        logger.info(f"   HTF: {htf_msg}")
+        logger.info(f"   HTF: checked upstream (G9)")
         
-        meta_str = f"Slope:{slope:.1f}, {wall_msg}, ATR:{atr:.2f}, {htf_msg}, {level_msg}"
+        meta_str = f"Slope:{slope:.1f}, {wall_msg}, ATR:{atr:.2f}, {level_msg}"
         log_signal(symbol, ltp, pattern_desc, sl_price, meta_str,
                    setup_high=setup_high, tick_size=0.05, atr=atr,
                    stretch_score=signal_meta.get('stretch_score', 0.0),
@@ -713,19 +855,9 @@ class FyersAnalyzer:
         signal_data["pattern_bonus"]  = signal_meta.get("pattern_bonus",  "None")
         signal_data["oi_direction"]   = signal_meta.get("oi_direction",   "unknown")
 
-        can_signal, reason = self.signal_manager.can_signal(symbol)
-        if not can_signal:
-            if "Cooldown" in reason:
-                logger.info(f"   [PENDING] {symbol} blocked by cooldown.")
-                signal_data['cooldown_blocked'] = True
-                signal_data['cooldown_reason'] = reason
-                return signal_data
-            else:
-                logger.info(f"   [BLOCKED] by Signal Manager: {symbol} - {reason}")
-                return None
-        
-        self.signal_manager.record_signal(symbol, ltp, sl_price, pattern_desc)
-        remaining = self.signal_manager.get_remaining_signals()
-        logger.info(f"   Signals remaining today: {remaining}")
-        
+        # ── Bug 2 fix: record_signal() REMOVED from here. ───────────────────
+        # Previously this burned a daily signal slot before focus_engine
+        # validated that the signal actually resulted in an order.
+        # Signal counting now happens in focus_engine.py at order placement.
+        # can_signal() check is already done at G8 in check_setup().
         return signal_data
