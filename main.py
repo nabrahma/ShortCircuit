@@ -219,6 +219,20 @@ async def _initialize_runtime() -> RuntimeContext:
         None, scanner._fetch_nse_symbols_sync
     )
     if scanner_symbols:
+        # 3. Seed WS cache with REST snapshot to prevent false-missing inflation on late starts
+        seeded = await asyncio.to_thread(broker.seed_from_rest, scanner_symbols)
+        logger.info(
+            "[STARTUP] WS cache REST seed: %s/%s symbols",
+            seeded,
+            len(scanner_symbols),
+        )
+        if seeded < int(len(scanner_symbols) * 0.90):
+            logger.warning(
+                "[STARTUP] REST seed coverage low: %s/%s symbols. Quotes API may be throttled.",
+                seeded,
+                len(scanner_symbols),
+            )
+
         # 3. Subscribe to WS — sets state=PRIMING, starts health monitor thread
         broker.subscribe_scanner_universe(scanner_symbols)
         logger.info(f"[Phase 44.7] WS subscription dispatched for {len(scanner_symbols)} symbols")
@@ -236,12 +250,32 @@ async def _initialize_runtime() -> RuntimeContext:
             f"[STARTUP GATE] Cache READY: {snap['fresh']}/{snap['total']} symbols fresh. Proceeding to scan."
         )
     else:
+        # BUG-02 sub-fix 2c: attempt one full reconnect before accepting REST fallback
         snap = broker.cache_health_snapshot()
         logger.critical(
             f"[STARTUP GATE] Cache NOT ready after {CACHE_READY_TIMEOUT}s. "
-            f"Fresh: {snap['fresh']}/{snap['total']}. "
-            f"Proceeding with REST fallback. INVESTIGATE WS CONNECTION."
+            f"Fresh: {snap['fresh']}/{snap['total']}. Attempting full WS reconnect..."
         )
+        try:
+            await asyncio.to_thread(broker._do_full_ws_reconnect)
+            logger.info("[STARTUP GATE] Full reconnect done — waiting for cache (attempt 2)...")
+            cache_ready = await asyncio.to_thread(broker.wait_for_cache_ready, float(CACHE_READY_TIMEOUT))
+        except Exception as reconnect_err:
+            logger.error(f"[STARTUP GATE] Reconnect failed: {reconnect_err}")
+            cache_ready = False
+
+        if cache_ready:
+            snap = broker.cache_health_snapshot()
+            logger.info(
+                f"[STARTUP GATE] ✅ Cache READY after reconnect: {snap['fresh']}/{snap['total']} symbols fresh."
+            )
+        else:
+            snap = broker.cache_health_snapshot()
+            logger.critical(
+                f"[STARTUP GATE] Cache STILL not ready after reconnect. "
+                f"Fresh: {snap['fresh']}/{snap['total']}. "
+                f"Proceeding with REST fallback. INVESTIGATE WS CONNECTION."
+            )
         try:
             await bot.send_alert(
                 f"🚨 WS CACHE STARTUP FAILURE\n"
@@ -296,6 +330,21 @@ async def _initialize_runtime() -> RuntimeContext:
 
 
 async def _trading_loop(shutdown_event: asyncio.Event, ctx: RuntimeContext):
+    if getattr(ctx.bot, '_auto_on_queued', False):
+        ctx.bot._auto_mode = True
+        ctx.bot._auto_on_queued = False
+        logger.info("[AUTO] Queued Auto ON activated — market ready")
+        await ctx.bot.send_message(
+            "✅ *Auto Mode activated* — market is open, scanning live",
+            parse_mode="Markdown",
+        )
+
+    await ctx.bot._send_morning_briefing(
+        ws_cache=ctx.broker,
+        market_ctx=ctx.analyzer.market_context if ctx.analyzer else None,
+        startup_validation_passed=True,
+    )
+
     logger.info("[TRADING] Trading loop started.")
     scan_interval = 60
     consecutive_errors = 0
@@ -471,6 +520,62 @@ def _validate_dependencies(ctx: RuntimeContext) -> None:
     logger.info("[STARTUP] ✅ All dependency checks passed. Safe to trade.")
 
 
+async def _run_startup_validation(ctx: RuntimeContext) -> None:
+    """
+    Pre-trade validation gate. Candle failure = HALT. WS low = WARN only.
+    Called once before trading loop starts.
+    """
+    logger.info("[STARTUP VALIDATION] Running pre-trade checks...")
+    import datetime as _dt
+
+    # 1. Candle API smoke test — HARD HALT on failure
+    today = _dt.date.today()
+    five_back = today - _dt.timedelta(days=5)
+    test_data = {
+        "symbol": "NSE:NIFTY50-INDEX",
+        "resolution": "1",
+        "date_format": "1",
+        "range_from": five_back.strftime("%Y-%m-%d"),
+        "range_to": today.strftime("%Y-%m-%d"),
+        "cont_flag": "1",
+    }
+    try:
+        response = await asyncio.to_thread(ctx.fyers_client.history, data=test_data)
+        candle_count = len(response.get("candles", []))
+        if candle_count > 0:
+            logger.info(f"[STARTUP VALIDATION] ✅ Candle API: {candle_count} bars for NIFTY50")
+        else:
+            logger.critical(
+                f"[STARTUP VALIDATION] ❌ HALT: Candle API returned 0 bars | "
+                f"status={response.get('s')} | msg={response.get('message', '')} | params={test_data}"
+            )
+            raise SystemExit(1)
+    except SystemExit:
+        raise
+    except Exception as e:
+        logger.critical(f"[STARTUP VALIDATION] ❌ HALT: Candle API exception: {e}")
+        raise SystemExit(1)
+
+    # 2. WS tick count — SOFT WARN (REST fallback is acceptable)
+    snap = ctx.broker.cache_health_snapshot()
+    fresh = snap.get("fresh", 0)
+    total = snap.get("total", 0)
+    if fresh >= 100:
+        logger.info(f"[STARTUP VALIDATION] ✅ WS Cache: {fresh}/{total} symbols live")
+    else:
+        logger.warning(
+            f"[STARTUP VALIDATION] ⚠️ WS only {fresh}/{total} fresh — using REST fallback, continuing"
+        )
+
+    # 3. DB pool alive
+    if ctx.db_manager is None:
+        logger.critical("[STARTUP VALIDATION] ❌ HALT: DB pool not initialized")
+        raise SystemExit(1)
+    logger.info("[STARTUP VALIDATION] ✅ DB pool alive")
+
+    logger.info("[STARTUP VALIDATION] ✅ All checks passed — safe to trade")
+
+
 async def main() -> int:
     _configure_logging()
     shutdown_event = asyncio.Event()
@@ -484,6 +589,7 @@ async def main() -> int:
     try:
         ctx = await _initialize_runtime()
         _validate_dependencies(ctx)
+        await _run_startup_validation(ctx)
 
         async def _notify(message: str):
             try:
@@ -567,6 +673,13 @@ async def main() -> int:
             )
     except* Exception as eg:
         logger.critical("[SUPERVISOR] TaskGroup failed: %s", eg)
+        for i, exc in enumerate(eg.exceptions):
+            logger.critical(
+                "[SUPERVISOR] Sub-exception [%d/%d]: %s: %s",
+                i + 1, len(eg.exceptions),
+                type(exc).__name__, exc,
+                exc_info=exc,
+            )
         exit_code = 1
     finally:
         shutdown_event.set()

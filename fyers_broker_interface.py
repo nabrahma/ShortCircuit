@@ -22,9 +22,12 @@ import asyncio
 import logging
 from pathlib import Path
 from collections import deque, defaultdict
+from dataclasses import dataclass
 from datetime import datetime
+from enum import Enum
 from typing import Optional, Dict, List, Any, Callable, Set
 import time
+import threading
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +92,24 @@ class TickData:
         self.prev_close = data.get('prev_close_price', 0)
         self.timestamp = datetime.utcnow()
         self.raw_data = data
+
+
+class CacheEntrySource(Enum):
+    WS_TICK = "ws"
+    REST_SEED = "rest"
+
+
+@dataclass
+class CacheEntry:
+    last_price: float
+    volume: float
+    ch_oc: float
+    oi: float
+    bid: float
+    ask: float
+    last_time: float
+    source: CacheEntrySource
+    tick_count: int = 0
 
 
 class FyersBrokerInterface:
@@ -170,8 +191,8 @@ class FyersBrokerInterface:
         self._position_cache: Dict[str, Dict] = {}   # symbol -> latest position message
         
         # Phase 44.7 / PRD-007 — WS quote cache for scanner pre-filter
-        import threading
-        self._quote_cache: dict[str, dict] = {}
+        # (threading imported at module level L28)
+        self._quote_cache: dict[str, CacheEntry] = {}
         self._quote_cache_lock = threading.Lock()
         self._ws_subscribed_symbols: list[str] = []
         self._ws_subscribed_symbols_set: set[str] = set()
@@ -184,6 +205,9 @@ class FyersBrokerInterface:
         self._health_monitor_thread: threading.Thread | None = None
         self._health_monitor_running: bool = False
         self._reprime_requested: bool = False
+        self._last_reprime_time: float = 0.0
+        self._consecutive_reprime_failures: int = 0
+        self._sub_ack = threading.Event()  # BUG-02: blocks until Fyers confirms subscription
         
         # Background tasks
         self.tasks = []
@@ -312,7 +336,7 @@ class FyersBrokerInterface:
         if self.subscribed_symbols:
             symbols = list(self.subscribed_symbols)
             # FyersDataSocket subscribe take symbols argument
-            self.data_ws.subscribe(symbols=symbols, data_type="symbolData")
+            self.data_ws.subscribe(symbols=symbols, data_type="SymbolUpdate")
             logger.info(f"Subscribed to {len(symbols)} symbols")
 
     def _on_order_ws_connect(self):
@@ -370,6 +394,18 @@ class FyersBrokerInterface:
         """
         try:
             # ── Phase 44.7: Update scanner quote cache ─────────────
+            # BUG-02: Detect subscription ACK from Fyers
+            msg_type = message.get('type')
+            if msg_type == 'sub' and message.get('code') == 200:
+                self._sub_ack.set()
+                logger.info("[WS Cache] ✅ Subscription ACK received from Fyers server")
+                return
+
+            # Permanent first-tick diagnostic log
+            if not hasattr(self, '_first_tick_logged'):
+                if msg_type not in ('cn', 'ful', 'op', 'sf', 'os'):
+                    logger.info(f"[WS Cache] ✅ FIRST DATA TICK: {str(message)[:200]}")
+                    self._first_tick_logged = True
             symbol = message.get('symbol') or message.get('n')
             if symbol and hasattr(self, '_ws_subscribed_symbols_set') and symbol in self._ws_subscribed_symbols_set:
                 with self._quote_cache_lock:
@@ -379,15 +415,22 @@ class FyersBrokerInterface:
                     if ch_oc == 0 and prev_close > 0:
                         ch_oc = ((ltp - prev_close) / prev_close) * 100
 
-                    self._quote_cache[symbol] = {
-                        'ltp':    ltp,
-                        'volume': message.get('vol_traded_today', message.get('v', 0)),
-                        'ch_oc':  ch_oc,
-                        'oi':     message.get('oi', 0),
-                        'bid':    message.get('bid', 0),
-                        'ask':    message.get('ask', 0),
-                        'ts':     time.time(),
-                    }
+                    tick_count = 1
+                    prev_entry = self._quote_cache.get(symbol)
+                    if prev_entry and prev_entry.source == CacheEntrySource.WS_TICK:
+                        tick_count = prev_entry.tick_count + 1
+
+                    self._quote_cache[symbol] = CacheEntry(
+                        last_price=ltp,
+                        volume=message.get('vol_traded_today', message.get('v', 0)),
+                        ch_oc=ch_oc,
+                        oi=message.get('oi', 0),
+                        bid=message.get('bid', 0),
+                        ask=message.get('ask', 0),
+                        last_time=time.time(),
+                        source=CacheEntrySource.WS_TICK,
+                        tick_count=tick_count,
+                    )
                     # PRD-007: Advance PRIMING → READY state machine on each tick
                     self._check_cache_readiness_internal()
 
@@ -595,6 +638,11 @@ class FyersBrokerInterface:
         self._cache_ready_event.clear()
         self._prime_start_ts = time.time()
         self._reprime_requested = False
+        self._sub_ack.clear()  # BUG-02: reset ACK before subscribing
+
+        # BUG-02: 3s post-connect delay — Fyers needs auth handshake to complete server-side
+        logger.info("[WS Cache] Waiting 3s post-connect before subscribing...")
+        time.sleep(3)
 
         batch_size = 50
         total = 0
@@ -604,12 +652,25 @@ class FyersBrokerInterface:
                 if self.data_ws:
                     self.data_ws.subscribe(
                         symbols=batch,
-                        data_type="symbolUpdate"
+                        data_type="SymbolUpdate"
                     )
                 total += len(batch)
             except Exception as e:
                 logger.error(f"[WS Cache] Subscribe batch {i//batch_size} failed: {e}")
-        logger.info(f"[WS Cache] Subscribed {total}/{len(symbols)} symbols to dataws symbolUpdate — state=PRIMING")
+        logger.info(f"[WS Cache] Subscribed {total}/{len(symbols)} symbols to dataws SymbolUpdate — state=PRIMING")
+
+        # BUG-02: Wait for subscription ACK (10s timeout)
+        if not self._sub_ack.wait(timeout=10.0):
+            logger.critical(
+                "[WS Cache] ❌ No subscription ACK from Fyers after 10s — "
+                "connection may be dead or data_type wrong"
+            )
+        else:
+            logger.info("[WS Cache] ✅ Subscription confirmed by Fyers server")
+
+        # Evaluate readiness immediately (supports REST-seeded startup path).
+        with self._quote_cache_lock:
+            self._check_cache_readiness_internal()
 
         # Start health monitor thread — check actual liveness, not just the flag
         thread_dead = (
@@ -632,7 +693,93 @@ class FyersBrokerInterface:
         Called by scanner.scan_market() — thread-safe.
         """
         with self._quote_cache_lock:
-            return dict(self._quote_cache)
+            return {
+                symbol: {
+                    'ltp': entry.last_price,
+                    'volume': entry.volume,
+                    'ch_oc': entry.ch_oc,
+                    'oi': entry.oi,
+                    'bid': entry.bid,
+                    'ask': entry.ask,
+                    'ts': entry.last_time,
+                    'source': entry.source.value,
+                    'tick_count': entry.tick_count,
+                }
+                for symbol, entry in self._quote_cache.items()
+            }
+
+    def seed_from_rest(self, symbols: List[str]) -> int:
+        """
+        Seed quote cache from REST snapshot at startup.
+        Seeded entries are "known" but not "fresh" for WS readiness.
+        """
+        if not symbols:
+            return 0
+
+        seeded = 0
+        batch_size = 50
+        now_ts = time.time()
+        logger.info("[WS Cache] Seeding %s symbols from REST snapshot...", len(symbols))
+
+        with self._quote_cache_lock:
+            if self._subscribed_count == 0:
+                self._subscribed_count = len(symbols)
+
+        for i in range(0, len(symbols), batch_size):
+            batch = symbols[i:i + batch_size]
+            try:
+                response = self.rest_client.quotes(data={"symbols": ",".join(batch)})
+            except Exception as e:
+                logger.warning("[WS Cache] REST seed batch %s failed: %s", i // batch_size, e)
+                continue
+
+            if response.get("s") != "ok":
+                continue
+
+            for quote in response.get("d", []):
+                symbol = quote.get("n")
+                qv = quote.get("v", {})
+                ltp = qv.get("lp", 0)
+                if not symbol or not ltp:
+                    continue
+
+                with self._quote_cache_lock:
+                    existing = self._quote_cache.get(symbol)
+                    # Never override live WS ticks with REST seed.
+                    if existing and existing.source == CacheEntrySource.WS_TICK:
+                        continue
+                    self._quote_cache[symbol] = CacheEntry(
+                        last_price=ltp,
+                        volume=qv.get("volume", 0),
+                        ch_oc=qv.get("chp", qv.get("ch_oc", 0)),
+                        oi=qv.get("oi", 0),
+                        bid=qv.get("bid", 0),
+                        ask=qv.get("ask", 0),
+                        last_time=now_ts,
+                        source=CacheEntrySource.REST_SEED,
+                        tick_count=0,
+                    )
+                seeded += 1
+
+        logger.info("[WS Cache] ✅ REST seed complete: %s/%s symbols seeded", seeded, len(symbols))
+        return seeded
+
+    def _is_fresh_entry(self, entry: CacheEntry, freshness_ttl: float, now_ts: float) -> bool:
+        return entry.source == CacheEntrySource.WS_TICK and (now_ts - entry.last_time) < freshness_ttl
+
+    def is_fresh(self, symbol: str, freshness_ttl: float) -> bool:
+        with self._quote_cache_lock:
+            entry = self._quote_cache.get(symbol)
+            if not entry:
+                return False
+            return self._is_fresh_entry(entry, freshness_ttl, time.time())
+
+    def is_known(self, symbol: str) -> bool:
+        with self._quote_cache_lock:
+            return symbol in self._quote_cache
+
+    def is_truly_missing(self, symbol: str) -> bool:
+        return not self.is_known(symbol)
 
     # ================================================================
     # PRD-007: Cache Readiness & Health
@@ -659,22 +806,32 @@ class FyersBrokerInterface:
         if self._cache_state != "PRIMING" or self._subscribed_count == 0:
             return
 
-        freshness_ttl = 60.0
+        import config as _cfg
+        freshness_ttl = _cfg.WS_TICK_FRESHNESS_TTL_SECONDS
         now = time.time()
         fresh_count = sum(
-            1 for t in self._quote_cache.values()
-            if (now - t.get('ts', 0)) < freshness_ttl
+            1
+            for entry in self._quote_cache.values()
+            if self._is_fresh_entry(entry, freshness_ttl, now)
         )
-        pct = fresh_count / self._subscribed_count
+        known_count = len(self._quote_cache)
+        fresh_pct = fresh_count / self._subscribed_count
+        known_pct = known_count / self._subscribed_count
         threshold = self._get_readiness_threshold()
 
-        if pct >= threshold:
+        if fresh_pct >= threshold or known_pct >= 0.90:
             self._cache_state = "READY"
             self._cache_ready_event.set()
             elapsed = now - self._prime_start_ts
+            reason = (
+                f"fresh {fresh_pct:.1%} >= {threshold:.0%}"
+                if fresh_pct >= threshold
+                else f"known {known_pct:.1%} >= 90%"
+            )
             logger.info(
                 f"[WS Cache] CACHE READY: {fresh_count}/{self._subscribed_count} symbols fresh "
-                f"({pct:.1%} >= {threshold:.0%}) after {elapsed:.1f}s"
+                f"| known={known_count}/{self._subscribed_count} ({known_pct:.1%}) "
+                f"| reason={reason} after {elapsed:.1f}s"
             )
 
     def is_cache_ready(self) -> bool:
@@ -691,11 +848,17 @@ class FyersBrokerInterface:
 
     def cache_health_snapshot(self) -> dict:
         """Returns current cache health metrics dict."""
-        freshness_ttl = 60.0
+        import config as _cfg
+        freshness_ttl = _cfg.WS_TICK_FRESHNESS_TTL_SECONDS
         with self._quote_cache_lock:
             now = time.time()
-            ages = [(now - t.get('ts', now)) for t in self._quote_cache.values()]
-            fresh = sum(1 for a in ages if a < freshness_ttl)
+            ages = [(now - entry.last_time) for entry in self._quote_cache.values()]
+            fresh = sum(
+                1
+                for entry in self._quote_cache.values()
+                if self._is_fresh_entry(entry, freshness_ttl, now)
+            )
+            seeded = sum(1 for entry in self._quote_cache.values() if entry.source == CacheEntrySource.REST_SEED)
             populated = len(self._quote_cache)
             total = self._subscribed_count
             sorted_ages = sorted(ages) if ages else [0]
@@ -704,7 +867,8 @@ class FyersBrokerInterface:
             'total':     total,
             'populated': populated,
             'fresh':     fresh,
-            'stale':     populated - fresh,
+            'stale':     max(0, populated - fresh - seeded),
+            'seeded':    seeded,
             'missing':   max(0, total - populated),
             'age_p50':   sorted_ages[len(sorted_ages) // 2],
             'age_p95':   sorted_ages[int(len(sorted_ages) * 0.95)],
@@ -713,20 +877,94 @@ class FyersBrokerInterface:
         }
 
     def _trigger_reprime(self):
-        """Re-subscribe all stale symbols to dataws."""
+        """Unsubscribe all, wait, then re-subscribe. Escalates to full reconnect after 3 failures."""
         if self._reprime_requested:
+            logger.warning("[WS Cache] Re-prime already in progress — skipping")
             return
+
+        # 90s throttle between re-primes
+        now = time.time()
+        if now - self._last_reprime_time < 90:
+            logger.warning("[WS Cache] Re-prime throttled — too soon since last attempt")
+            return
+
         self._reprime_requested = True
+        self._last_reprime_time = now
+        self._consecutive_reprime_failures += 1
         self._cache_state = "PRIMING"
         self._cache_ready_event.clear()
-        logger.warning("[WS Cache] Re-prime triggered — re-subscribing all symbols")
+
+        logger.warning(
+            f"[WS Cache] Re-prime #{self._consecutive_reprime_failures} triggered"
+        )
+
+        # Escalate to full reconnect after 3 consecutive failures
+        if self._consecutive_reprime_failures >= 3:
+            logger.critical(
+                "[WS Cache] 3 consecutive re-prime failures — escalating to FULL RECONNECT"
+            )
+            self._consecutive_reprime_failures = 0
+            try:
+                self._do_full_ws_reconnect()
+            except Exception as e:
+                logger.critical(f"[WS Cache] Full reconnect failed: {e}")
+            finally:
+                self._reprime_requested = False
+            return
+
         try:
+            # Step 1: Unsubscribe all
+            if self._ws_subscribed_symbols and self.data_ws:
+                try:
+                    self.data_ws.unsubscribe(
+                        symbols=self._ws_subscribed_symbols,
+                        data_type="SymbolUpdate"
+                    )
+                    logger.info(f"[WS Cache] Unsubscribed {len(self._ws_subscribed_symbols)} symbols")
+                except Exception as unsub_e:
+                    logger.warning(f"[WS Cache] Unsubscribe failed (non-fatal): {unsub_e}")
+
+            # Step 2: Wait for server to process unsubscribe
+            time.sleep(5)
+
+            # Step 3: Re-subscribe
             if self._ws_subscribed_symbols:
                 self.subscribe_scanner_universe(self._ws_subscribed_symbols)
         except Exception as e:
             logger.error(f"[WS Cache] Re-prime failed: {e}")
         finally:
             self._reprime_requested = False
+
+    def _do_full_ws_reconnect(self):
+        """Nuclear option — full socket teardown + rebuild from scratch."""
+        logger.critical("[WS Cache] ⚡ FULL RECONNECT — tearing down socket")
+        try:
+            if self._ws_subscribed_symbols and self.data_ws:
+                self.data_ws.unsubscribe(
+                    symbols=self._ws_subscribed_symbols,
+                    data_type="SymbolUpdate"
+                )
+            time.sleep(2)
+            if self.data_ws:
+                self.data_ws.disconnect()
+                logger.info("[WS Cache] Socket disconnected")
+        except Exception as e:
+            logger.error(f"[WS Cache] Disconnect error (continuing): {e}")
+
+        time.sleep(5)  # Let Fyers server fully release the connection
+
+        logger.critical("[WS Cache] ⚡ FULL RECONNECT — rebuilding socket")
+        try:
+            if self.data_ws:
+                self.data_ws.connect()
+                time.sleep(2)
+            if self._ws_subscribed_symbols:
+                self.subscribe_scanner_universe(self._ws_subscribed_symbols)
+                logger.info("[WS Cache] ✅ Full reconnect succeeded")
+            else:
+                logger.critical("[WS Cache] ❌ No symbols to re-subscribe after reconnect")
+        except Exception as e:
+            logger.critical(f"[WS Cache] Full reconnect exception: {e}")
 
     def _run_cache_health_monitor(self):
         """
@@ -740,11 +978,12 @@ class FyersBrokerInterface:
                 snap = self.cache_health_snapshot()
                 total = max(snap['total'], 1)
                 fresh_pct = snap['fresh'] / total
+                known_pct = (snap['fresh'] + snap['stale'] + snap.get('seeded', 0)) / total
 
                 if fresh_pct >= 0.85:
                     status = "HEALTHY"
                     consecutive_critical = 0
-                elif fresh_pct >= 0.50:
+                elif known_pct >= 0.90 or fresh_pct >= 0.50:
                     status = "DEGRADED"
                     consecutive_critical = 0
                 else:
@@ -753,9 +992,9 @@ class FyersBrokerInterface:
 
                 logger.info(
                     f"[WS Cache] CACHE HEALTH | Fresh: {snap['fresh']}/{snap['total']} ({fresh_pct:.1%}) "
-                    f"| Stale: {snap['stale']} | Missing: {snap['missing']} "
+                    f"| Stale: {snap['stale']} | Seeded: {snap.get('seeded', 0)} | Missing: {snap['missing']} "
                     f"| Age P50: {snap['age_p50']:.1f}s P95: {snap['age_p95']:.1f}s "
-                    f"| State: {snap['state']} | Status: {status}"
+                    f"| Known: {known_pct:.1%} | State: {snap['state']} | Status: {status}"
                 )
 
                 if status == "CRITICAL" and consecutive_critical >= 2:
@@ -764,6 +1003,11 @@ class FyersBrokerInterface:
                     )
                     self._trigger_reprime()
                     consecutive_critical = 0
+
+                # Reset failure counter on recovery
+                if status == "HEALTHY" and self._consecutive_reprime_failures > 0:
+                    logger.info("[WS Cache] ✅ Cache recovered — resetting re-prime failure counter")
+                    self._consecutive_reprime_failures = 0
 
             except Exception as e:
                 logger.error(f"[WS Cache] Health monitor error: {e}")
@@ -778,7 +1022,7 @@ class FyersBrokerInterface:
                 # But SDK documentation usually suggests straight call.
                 # However, since data_ws.connect is running in a thread, we calling methods on it is tricky.
                 # The SDK methods `subscribe` usually send a message to the socket.
-                self.data_ws.subscribe(symbols=new_symbols, data_type="symbolData")
+                self.data_ws.subscribe(symbols=new_symbols, data_type="SymbolUpdate")
                 self.subscribed_symbols.update(new_symbols)
                 logger.info(f"Subscribed to {len(new_symbols)} symbols via WebSocket")
             except Exception as e:

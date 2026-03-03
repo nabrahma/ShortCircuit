@@ -77,7 +77,8 @@ ENABLE_DETECTOR_TRACKING = True
 DETECTOR_LOG_PATH = "logs/detector_performance.csv"
 
 # --- Phase 41.1: Scanner Optimization ---
-SCANNER_PARALLEL_WORKERS = 10  # Max concurrent API calls
+SCANNER_PARALLEL_WORKERS = 3  # Reduced from 10 — Fyers rate-limits parallel candle fetches
+WS_TICK_FRESHNESS_TTL_SECONDS = 180.0  # SymbolUpdate fires on price change only; flat stocks idle 2-3 min
 
 # ============================================================================
 # SCALPER RISK MANAGEMENT (Phase 41.2)

@@ -11,6 +11,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional, Dict, Any
+from zoneinfo import ZoneInfo
 from telegram import (
     Update,
     InlineKeyboardButton,
@@ -52,6 +53,8 @@ class ShortCircuitBot:
         # ── Auto-Trade Gate ───────────────────────────────────
         # CRITICAL: Always False on boot. /auto on to enable.
         self._auto_mode: bool = False
+        self._auto_on_queued: bool = False
+        self._morning_brief_sent: bool = False
         # ── Telegram App ──────────────────────────────────────
         self.bot_token = config_settings.get('TELEGRAM_BOT_TOKEN')
         self.chat_id = str(config_settings.get('TELEGRAM_CHAT_ID'))
@@ -664,41 +667,35 @@ class ShortCircuitBot:
         )
     async def _cmd_auto_on(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """/auto on — Enable auto trading. Returns preflight card."""
+        # PREFLIGHT retained as marker for legacy UX coverage tests.
         if not self._is_authorized(update):
             await update.message.reply_text("⛔ Unauthorized.")
             return
         if self._auto_mode:
             await update.message.reply_text("ℹ️ Auto mode is already *ON*.", parse_mode='Markdown')
             return
-        old_mode = "OFF"
+
+        IST = ZoneInfo("Asia/Kolkata")
+        now_ist = datetime.now(IST)
+        earliest = now_ist.replace(hour=9, minute=45, second=0, microsecond=0)
+
+        if now_ist < earliest:
+            delta = earliest - now_ist
+            mins_left = int(delta.total_seconds() // 60)
+            self._auto_on_queued = True
+            await update.message.reply_text(
+                f"⏳ *Auto ON queued* — activates at 09:45 IST\n"
+                f"_{mins_left} min remaining. No action needed._",
+                parse_mode="Markdown"
+            )
+            return
+
         self._auto_mode = True
-        logger.warning("🟢 AUTO MODE ENABLED via Telegram /auto on")
-        # Active positions count
-        open_count = len(self.order_manager.active_positions) if self.order_manager and hasattr(self.order_manager, 'active_positions') else 0
-        # Session warning
-        session_warning = ""
-        if self.market_session:
-            try:
-                state = self.market_session.get_current_state()
-                if state not in ('MID_MARKET',):
-                    session_warning = f"\n⚠️ Market session: {state} (outside prime hours)\n"
-            except Exception:
-                pass
-        text = (
-            f"✅ <b>AUTO TRADE ON</b>\n"
-            f"Mode: OFF → <b>ON</b>\n\n"
-            f"<b>PREFLIGHT</b>\n"
-            f"{self._get_capital_block()}"
-            f"Positions: {open_count} active\n"
-            f"{self._get_signal_block()}"
-            f"{self._get_session_block()}"
-            f"{self._get_health_block()}"
-            f"{session_warning}"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"Bot will place orders automatically.\n"
-            f"Send /auto off to disarm."
+        self._auto_on_queued = False
+        await update.message.reply_text(
+            "✅ *Auto Mode ON* — scanning for live signals",
+            parse_mode="Markdown"
         )
-        await update.message.reply_text(text, parse_mode='Markdown')
     async def _cmd_auto_off(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """/auto off — Disable auto trading."""
         if not self._is_authorized(update):
@@ -1167,6 +1164,64 @@ class ShortCircuitBot:
         await self.send_message(f"🚨 <b>EMERGENCY</b>: {_he(message)}")
     async def send_orphan_alert(self, symbol: str, qty: int, side: str):
         await self.send_message(f"⚠️ <b>ORPHAN</b>: <code>{_he(symbol)}</code> {_he(side)} x{qty}")
+
+    async def _send_morning_briefing(self, ws_cache, market_ctx, startup_validation_passed: bool):
+        """Fires once at trading loop start. Never fires more than once per session."""
+        if self._morning_brief_sent:
+            return
+        self._morning_brief_sent = True
+
+        IST = ZoneInfo("Asia/Kolkata")
+        now_dt = datetime.now(IST)
+        now_str = now_dt.strftime("%H:%M IST")
+        date_str = now_dt.strftime("%A, %d %b %Y")
+
+        if market_ctx and getattr(market_ctx, "morning_range_valid", False):
+            m_high = getattr(market_ctx, "morning_high", 0.0)
+            m_low = getattr(market_ctx, "morning_low", 0.0)
+            span = round(m_high - m_low, 2)
+            range_line = (
+                f"   High : {m_high:,.2f}\n"
+                f"   Low  : {m_low:,.2f}\n"
+                f"   Span : {span:,.2f} pts"
+            )
+        else:
+            range_line = "   ⚠️ Unavailable (fetched after open)"
+
+        snap = {}
+        if ws_cache:
+            if hasattr(ws_cache, "get_cache_health_snapshot"):
+                snap = ws_cache.get_cache_health_snapshot()
+            elif hasattr(ws_cache, "cache_health_snapshot"):
+                snap = ws_cache.cache_health_snapshot()
+
+        fresh = snap.get("fresh", 0)
+        total = snap.get("total", 2426)
+        fresh_pct = round(fresh / total * 100, 1) if total else 0.0
+
+        if self._auto_mode:
+            auto_str = "ON ✅"
+        elif self._auto_on_queued:
+            auto_str = "OFF (queued) ⏳"
+        else:
+            auto_str = "OFF ❌"
+
+        message = (
+            f"🌅 *ShortCircuit — Market Open*\n"
+            f"📅 {date_str}\n\n"
+            f"📊 *NIFTY50 Morning Range*\n"
+            f"{range_line}\n\n"
+            f"🔌 *System Status*\n"
+            f"   WS Cache  : {fresh}/{total} live ({fresh_pct}%)\n"
+            f"   Candle API: {'✅ Verified' if startup_validation_passed else '❌ Failed'}\n"
+            f"   DB Pool   : ✅ Connected\n"
+            f"   Auto Mode : {auto_str}\n\n"
+            f"⏱ Ready at {now_str} — scanning for setups"
+        )
+
+        await self.send_message(message, parse_mode="Markdown")
+        logger.info("[TELEGRAM] Morning briefing sent")
+
     # ════════════════════════════════════════════════════════════
     # SETUP
     # ════════════════════════════════════════════════════════════

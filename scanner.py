@@ -101,21 +101,30 @@ class FyersScanner:
         - PASSES if insufficient data (don't reject liquid stocks due to API lag).
         """
         try:
-            # Get 1min history - Last 30 minutes (not 60) to avoid stale consolidation
-            import datetime
-            to_date = int(time.time())
-            from_date = to_date - (30 * 60)  # Last 30 Minutes (changed from 60)
-            
+            # Get 1min history — 5-day window ensures early morning has enough bars
+            import datetime as _dt
+            today     = _dt.date.today()
+            five_back = today - _dt.timedelta(days=5)
+
             data = {
                 "symbol": symbol,
                 "resolution": "1",
-                "date_format": "0",
-                "range_from": str(from_date),
-                "range_to": str(to_date),
-               "cont_flag": "1"
+                "date_format": "1",                              # "1" = YYYY-MM-DD (Fyers v3 requirement)
+                "range_from": five_back.strftime("%Y-%m-%d"),    # 5 days back for early-morning coverage
+                "range_to":   today.strftime("%Y-%m-%d"),
+                "cont_flag": "1"
             }
-            
+
             response = self.fyers.history(data=data)
+
+            # BUG-03 debug — one-shot per session, remove after first successful trading day
+            if not hasattr(self, '_candle_debug_done'):
+                candle_n = len(response.get('candles', []))
+                logger.info(
+                    f"[CANDLE DEBUG] {symbol} → status={response.get('s')} | "
+                    f"bars={candle_n} | params={data}"
+                )
+                self._candle_debug_done = True
             
             # Check Time: If < 10:00 AM, we won't have many candles (Market opens 09:15)
             import datetime
@@ -221,24 +230,31 @@ class FyersScanner:
                     stale_symbols.append(symbol)
                     continue
                 age_s = _time.time() - quote.get('ts', 0)
-                if age_s > 60:
+                source = quote.get('source')
+                if source != 'ws' or age_s > config.WS_TICK_FRESHNESS_TTL_SECONDS:
                     stale_symbols.append(symbol)
                 else:
                     fresh[symbol] = quote
 
-            fresh_pct = len(fresh) / max(len(symbol_list), 1)
+            snap = self.broker.cache_health_snapshot()
+            total = max(snap.get('total') or len(symbol_list), 1)
+            fresh_pct = snap.get('fresh', 0) / total
+            known_pct = (
+                snap.get('fresh', 0) + snap.get('stale', 0) + snap.get('seeded', 0)
+            ) / total
 
             if fresh_pct >= 0.85:
                 # Pure Tier 1
                 data_tier = "WS_CACHE"
                 all_quotes = fresh
 
-            elif fresh_pct >= 0.50:
+            elif known_pct >= 0.90:
                 # Tier 2: HYBRID — supplement only stale/missing symbols via REST
                 data_tier = "HYBRID"
                 logger.warning(
                     f"[WS Cache] Tier 2 HYBRID: {len(stale_symbols)} symbols stale/missing "
-                    f"(WS fresh: {len(fresh)}/{len(symbol_list)}). Supplementing via REST."
+                    f"(WS fresh: {snap.get('fresh')}/{snap.get('total')}, known: {known_pct:.1%}). "
+                    f"Supplementing via REST."
                 )
                 all_quotes = dict(fresh)
                 # REST supplement for stale symbols only
@@ -269,15 +285,16 @@ class FyersScanner:
             else:
                 # Tier 3: REST EMERGENCY — cache too degraded
                 data_tier = "REST_EMERGENCY"
-                snap = self.broker.cache_health_snapshot()
                 logger.critical(
-                    f"[WS Cache] TIER 3 REST EMERGENCY: WS cache only {fresh_pct:.1%} fresh "
-                    f"({snap.get('fresh')}/{snap.get('total')}). Full REST fallback. INVESTIGATE IMMEDIATELY."
+                    f"[WS Cache] TIER 3 REST EMERGENCY: fresh={fresh_pct:.1%} "
+                    f"known={known_pct:.1%} ({snap.get('fresh')}/{snap.get('total')} fresh, "
+                    f"{snap.get('seeded', 0)} seeded). Full REST fallback. INVESTIGATE IMMEDIATELY."
                 )
                 if hasattr(self, '_bot_alert_fn') and self._bot_alert_fn:
                     try:
                         self._bot_alert_fn(
                             f"⚠️ WS CACHE FAILURE\nFresh: {snap.get('fresh')}/{snap.get('total')} ({fresh_pct:.1%})\n"
+                            f"Known: {known_pct:.1%} | Seeded: {snap.get('seeded', 0)}\n"
                             "Falling back to full REST. Signals degraded."
                         )
                     except Exception:
@@ -406,7 +423,7 @@ class FyersScanner:
 
         # Phase B: Parallel history + quality check
         filtered_candidates = []
-        max_workers = getattr(config, 'SCANNER_PARALLEL_WORKERS', 10)
+        max_workers = getattr(config, 'SCANNER_PARALLEL_WORKERS', 3)
 
         def fetch_quality(candidate):
             """Fetch history + quality for a single candidate."""

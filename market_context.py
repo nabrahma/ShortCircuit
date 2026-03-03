@@ -4,11 +4,14 @@ Determines market regime (Trend Day vs Range Day) using Nifty/BankNifty.
 Based on Murphy's principle: "Trade with the trend, not against it."
 """
 import logging
-from datetime import datetime, time
+import time as _time
+from datetime import datetime, time, timedelta, timezone
+from zoneinfo import ZoneInfo
 from symbols import NIFTY_50, validate_symbol
 import config
 
 logger = logging.getLogger(__name__)
+IST = ZoneInfo("Asia/Kolkata")
 
 class MarketContext:
     """
@@ -36,6 +39,9 @@ class MarketContext:
         self._morning_low = morning_low
         self._morning_range = (morning_high - morning_low) if (morning_high and morning_low) else None
         self._cache_date = None
+        self.morning_range_valid = bool(
+            self._morning_high and self._morning_low and self._morning_range and self._morning_range > 0
+        )
         
         # Phase 41.3: Dynamic Regime State
         self.last_regime = 'UNKNOWN'
@@ -45,6 +51,121 @@ class MarketContext:
         if self._morning_high:
             logger.info(f"✅ Market Context Initialized with Morning Range: {self._morning_low} - {self._morning_high}")
             logger.info(f"   Index: {self.nifty_symbol}")
+
+    @property
+    def morning_high(self) -> float:
+        return float(self._morning_high or 0.0)
+
+    @property
+    def morning_low(self) -> float:
+        return float(self._morning_low or 0.0)
+
+    def _fetch_morning_range_from_rest(self):
+        """
+        Fetch NIFTY morning range (09:15–09:45 IST) from REST 1-minute candles.
+        Returns tuple(high, low). On failure, returns (0.0, 0.0).
+        """
+        now_ist = datetime.now(IST)
+        today = now_ist.date()
+        five_days_ago = today - timedelta(days=5)
+
+        data = {
+            "symbol": self.nifty_symbol,
+            "resolution": "1",
+            "date_format": "1",
+            "range_from": five_days_ago.strftime("%Y-%m-%d"),
+            "range_to": today.strftime("%Y-%m-%d"),
+            "cont_flag": "1",
+        }
+
+        try:
+            response = self.fyers.history(data=data)
+        except Exception as e:
+            logger.critical(f"[MarketContext] Morning range REST fetch exception: {e}")
+            return 0.0, 0.0
+
+        candles = response.get("candles") if isinstance(response, dict) else None
+        if response.get("s") != "ok" or not candles:
+            logger.critical(
+                "[MarketContext] Morning range REST fetch failed: status=%s code=%s",
+                response.get("s"),
+                response.get("code"),
+            )
+            return 0.0, 0.0
+
+        morning_start = time(9, 15)
+        morning_end = time(9, 45)
+        _IST = ZoneInfo("Asia/Kolkata")
+        market_open = int(datetime(today.year, today.month, today.day, 9, 15, tzinfo=_IST).timestamp())
+        warmup_end = int(datetime(today.year, today.month, today.day, 9, 45, tzinfo=_IST).timestamp())
+
+        morning_candles = []
+        for c in candles:
+            ts_ist = datetime.fromtimestamp(c[0], tz=timezone.utc).astimezone(IST)
+            if ts_ist.date() == today and market_open <= c[0] <= warmup_end:
+                morning_candles.append(c)
+
+        if not morning_candles:
+            logger.warning(
+                "[MarketContext] No 09:15–09:45 candles found; falling back to all today's intraday candles."
+            )
+            all_today = []
+            for c in candles:
+                ts_ist = datetime.fromtimestamp(c[0], tz=timezone.utc).astimezone(IST)
+                if ts_ist.date() == today and ts_ist.time() >= morning_start:
+                    all_today.append(c)
+            if not all_today:
+                return 0.0, 0.0
+            morning_candles = all_today
+
+        morning_high = max(c[2] for c in morning_candles)
+        morning_low = min(c[3] for c in morning_candles)
+        logger.info(
+            "[MarketContext] ✅ Morning range fetched via REST: High=%s Low=%s (%s candles)",
+            round(morning_high, 2),
+            round(morning_low, 2),
+            len(morning_candles),
+        )
+        return morning_high, morning_low
+
+    def _refresh_morning_range_if_needed(self):
+        """
+        Daily morning range initialization.
+        Always uses REST to avoid startup dependence on WS cache state.
+        """
+        now = _time.time()
+        if not hasattr(self, '_last_range_fetch_time'):
+            self._last_range_fetch_time = 0.0
+        if now - self._last_range_fetch_time < 300:
+            return
+        self._last_range_fetch_time = now
+
+        today = datetime.now(IST).date()
+        if self._cache_date == today and self.morning_range_valid:
+            return
+
+        high, low = self._fetch_morning_range_from_rest()
+        self._cache_date = today
+
+        if high > 0 and low > 0 and high > low:
+            self._morning_high = high
+            self._morning_low = low
+            self._morning_range = high - low
+            self.morning_range_valid = True
+            logger.info(
+                "[MarketContext] ✅ Initialized | Range: %s - %s",
+                round(self._morning_low, 2),
+                round(self._morning_high, 2),
+            )
+            return
+
+        self._morning_high = 0.0
+        self._morning_low = 0.0
+        self._morning_range = 0.0
+        self.morning_range_valid = False
+        logger.critical(
+            "[MarketContext] ⚠️ Morning range unavailable — range-dependent checks are bypassed."
+        )
 
     
     def _get_index_data(self, symbol=None):
@@ -74,17 +195,17 @@ class MarketContext:
     
     def _calculate_morning_range(self, candles):
         """
-        Calculate the first hour's range (9:15 - 10:15).
+        Calculate morning range (09:15 - 09:45 IST) from provided candles.
         This establishes the reference for trend detection.
         """
         if not candles:
             return None, None, None
         
-        # Filter candles from first hour
+        # Filter candles from 09:15 to 09:45 IST.
         morning_candles = []
         for c in candles:
-            ts = datetime.fromtimestamp(c[0])
-            if ts.time() <= time(10, 15):
+            ts = datetime.fromtimestamp(c[0], tz=timezone.utc).astimezone(IST)
+            if time(9, 15) <= ts.time() <= time(9, 45):
                 morning_candles.append(c)
         
         if not morning_candles:
@@ -111,15 +232,10 @@ class MarketContext:
             logger.warning("Could not fetch Nifty data, assuming RANGE")
             return "RANGE", "No index data available"
         
-        # Calculate morning range (cache it for the day)
-        today = datetime.now().date()
-        if self._cache_date != today:
-            self._morning_high, self._morning_low, self._morning_range = \
-                self._calculate_morning_range(candles)
-            self._cache_date = today
-        
-        if self._morning_range is None or self._morning_range == 0:
-            return "RANGE", "Morning range not established yet"
+        # Ensure morning range for this session is sourced from REST.
+        self._refresh_morning_range_if_needed()
+        if not self.morning_range_valid:
+            return "RANGE", "Morning range unavailable (range-dependent gates bypassed)"
         
         # Get current price
         current_close = candles[-1][4]  # c[4] = close
