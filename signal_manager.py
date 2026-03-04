@@ -4,6 +4,7 @@ Handles daily signal caps, per-symbol cooldowns, and consecutive loss tracking.
 Based on Volman's principle: "Quality over quantity - 80% of profits from 20% of trades."
 """
 import logging
+import threading
 from datetime import datetime, timedelta
 from collections import defaultdict
 
@@ -32,6 +33,7 @@ class SignalManager:
         
         # Stats
         self.stats = defaultdict(int)
+        self._lock = threading.Lock()  # FIX #4: protect list/dict from concurrent thread access
     
     def _reset_if_new_day(self):
         """Reset counters at the start of a new trading day."""
@@ -56,28 +58,29 @@ class SignalManager:
         Returns:
             tuple: (allowed, reason)
         """
-        self._reset_if_new_day()
-        now = datetime.now()
-        
-        # Check 1: Daily limit
-        if len(self.signals_today) >= self.max_signals_per_day:
-            self.stats['blocked_daily_limit'] += 1
-            return False, f"Daily limit reached ({self.max_signals_per_day} signals)"
-        
-        # Check 2: Paused due to consecutive losses
-        if self.is_paused:
-            self.stats['blocked_paused'] += 1
-            return False, f"Trading paused after {self.max_consecutive_losses} consecutive losses"
-        
-        # Check 3: Per-symbol cooldown
-        if symbol in self.last_signal_time:
-            time_diff = (now - self.last_signal_time[symbol]).total_seconds() / 60
-            if time_diff < self.cooldown_minutes:
-                remaining = self.cooldown_minutes - time_diff
-                self.stats['blocked_cooldown'] += 1
-                return False, f"Cooldown: {symbol} signaled {time_diff:.0f}m ago (wait {remaining:.0f}m)"
-        
-        return True, "OK"
+        with self._lock:
+            self._reset_if_new_day()
+            now = datetime.now()
+            
+            # Check 1: Daily limit
+            if len(self.signals_today) >= self.max_signals_per_day:
+                self.stats['blocked_daily_limit'] += 1
+                return False, f"Daily limit reached ({self.max_signals_per_day} signals)"
+            
+            # Check 2: Paused due to consecutive losses
+            if self.is_paused:
+                self.stats['blocked_paused'] += 1
+                return False, f"Trading paused after {self.max_consecutive_losses} consecutive losses"
+            
+            # Check 3: Per-symbol cooldown
+            if symbol in self.last_signal_time:
+                time_diff = (now - self.last_signal_time[symbol]).total_seconds() / 60
+                if time_diff < self.cooldown_minutes:
+                    remaining = self.cooldown_minutes - time_diff
+                    self.stats['blocked_cooldown'] += 1
+                    return False, f"Cooldown: {symbol} signaled {time_diff:.0f}m ago (wait {remaining:.0f}m)"
+            
+            return True, "OK"
     
     def record_signal(self, symbol, entry_price, stop_loss, pattern):
         """
@@ -89,23 +92,24 @@ class SignalManager:
             stop_loss: Stop loss price
             pattern: Pattern name
         """
-        self._reset_if_new_day()
-        now = datetime.now()
-        
-        signal_record = {
-            'symbol': symbol,
-            'time': now,
-            'entry': entry_price,
-            'stop': stop_loss,
-            'pattern': pattern,
-            'status': 'OPEN'  # Will be updated when we track outcome
-        }
-        
-        self.signals_today.append(signal_record)
-        self.last_signal_time[symbol] = now
-        self.stats['signals_sent'] += 1
-        
-        logger.info(f"Signal recorded: {symbol} @ {entry_price} (#{len(self.signals_today)} today)")
+        with self._lock:
+            self._reset_if_new_day()
+            now = datetime.now()
+            
+            signal_record = {
+                'symbol': symbol,
+                'time': now,
+                'entry': entry_price,
+                'stop': stop_loss,
+                'pattern': pattern,
+                'status': 'OPEN'  # Will be updated when we track outcome
+            }
+            
+            self.signals_today.append(signal_record)
+            self.last_signal_time[symbol] = now
+            self.stats['signals_sent'] += 1
+            
+            logger.info(f"Signal recorded: {symbol} @ {entry_price} (#{len(self.signals_today)} today)")
     
     def record_outcome(self, symbol, is_win):
         """

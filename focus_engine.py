@@ -82,6 +82,7 @@ class FocusEngine:
             'trigger': entry_trigger,
             'invalidate': invalidation_trigger,
             'timestamp': time.time(),
+            'queued_at': datetime.datetime.now(),  # FIX #5: for stale signal flush at 9:45
             'correlation_id': signal_data.get('correlation_id'),
         }
         logger.info(f"[GATE] Added {symbol} to Validation Gate. Trigger: < {entry_trigger}")
@@ -90,9 +91,22 @@ class FocusEngine:
         if not self.monitoring_active:
             self.start_pending_monitor()
 
-        # Start Background Monitor if not running
-        if not self.monitoring_active:
-            self.start_pending_monitor()
+    def flush_stale_pending_signals(self, max_age_minutes: int = 20):
+        """
+        FIX #5: Called at 9:45 session boundary.
+        Drops any pending signal older than max_age_minutes to prevent stale-price execution.
+        """
+        now = datetime.datetime.now()
+        stale_keys = []
+        for symbol, pending in self.pending_signals.items():
+            queued_at = pending.get('queued_at')
+            if queued_at:
+                age_min = (now - queued_at).total_seconds() / 60
+                if age_min > max_age_minutes:
+                    stale_keys.append(symbol)
+                    logger.info(f"[GATE] FLUSHED stale pending signal {symbol} — age {age_min:.1f}min")
+        for k in stale_keys:
+            self.pending_signals.pop(k, None)
 
     def queue_cooldown_signal(self, signal_data, unlock_at):
         """Phase 43.4: Queues a signal that passed gates but hit cooldown."""
@@ -140,40 +154,71 @@ class FocusEngine:
                 del self.cooldown_signals[symbol]
 
     def start_pending_monitor(self):
-        """Starts the background thread for validation checks."""
+        """Starts the async background task for validation checks."""
+        if self.monitoring_active:
+            return
         self.monitoring_active = True
-        self.monitor_thread = threading.Thread(target=self.monitor_pending_loop, daemon=True)
-        self.monitor_thread.start()
+        # BUG R2 FIX: explicitly pass loop to fallback thread to fix Python 3.12 RuntimeError
+        try:
+            loop = asyncio.get_running_loop()
+            if loop.is_running():
+                self._monitor_task = loop.create_task(self.monitor_pending_loop())
+            else:
+                self._monitor_task = loop.create_task(self.monitor_pending_loop())
+        except RuntimeError:
+            logger.warning("[GATE] No asyncio loop — using threaded monitor fallback")
+            self._monitor_task = None
+            try:
+                loop = asyncio.get_event_loop()
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+            self.monitor_thread = threading.Thread(
+                target=self._monitor_pending_loop_sync, 
+                args=(loop,),
+                daemon=True
+            )
+            self.monitor_thread.start()
         logger.info("[GATE] Validation Monitor Started.")
 
-    def monitor_pending_loop(self):
-        """
-        Background loop to check pending signals every 2 seconds.
-        """
+    def _monitor_pending_loop_sync(self, loop: asyncio.AbstractEventLoop):
+        """Fallback sync monitor that dispatches to async via run_coroutine_threadsafe."""
         while self.monitoring_active:
-            # 1. Check Cooldown Signals (Phase 43.4)
+            try:
+                if self.pending_signals:
+                    future = asyncio.run_coroutine_threadsafe(
+                        self.check_pending_signals(self.trade_manager), loop
+                    )
+                    future.result(timeout=30)
+                if self.cooldown_signals:
+                    self.flush_pending_signals()
+            except Exception as e:
+                logger.error(f"Sync Monitor Loop Error: {e}")
+            time.sleep(2)
+
+    async def monitor_pending_loop(self):
+        """Async background loop. FIX #1: now async so we can await enter_position."""
+        while self.monitoring_active:
             if self.cooldown_signals:
                 try:
-                    self.flush_pending_signals()
+                    await asyncio.to_thread(self.flush_pending_signals)  # BUG R3 FIX: Offload sync REST call
                 except Exception as e:
                     logger.error(f"Cooldown flush error: {e}")
 
-            # 2. Check Validation Gate Signals
             if not self.pending_signals:
-                time.sleep(5) # Sleep longer if empty
+                await asyncio.sleep(5)
                 continue
                 
             try:
-                self.check_pending_signals(self.trade_manager)
+                await self.check_pending_signals(self.trade_manager)
             except Exception as e:
                 logger.error(f"Monitor Loop Error: {e}")
                 
-            time.sleep(2) # 2s Interval
+            await asyncio.sleep(2)
 
-    def check_pending_signals(self, trade_manager):
+    async def check_pending_signals(self, trade_manager):
         """
         Phase 37: Monitors pending signals for Validation Trigger.
-        Called from Main Loop.
+        FIX #1: Now async. FIX #3: Slot guard + burn-after-confirm.
         """
         if not self.pending_signals: return
 
@@ -182,9 +227,9 @@ class FocusEngine:
         
         for symbol, pending in current_pending:
             try:
-                # 1. Fetch LTP
+                # 1. Fetch LTP (sync call → run in thread to avoid blocking event loop)
                 data = {"symbols": symbol}
-                resp = self.fyers.quotes(data=data)
+                resp = await asyncio.to_thread(self.fyers.quotes, data=data)
                 if 'd' not in resp or not resp['d']: continue
                 
                 ltp = resp['d'][0]['v']['lp']
@@ -255,10 +300,25 @@ class FocusEngine:
                              asyncio.create_task(self.telegram_bot.send_alert(msg))
                              
                          del self.pending_signals[symbol]
-                         return None
+                         continue  # BUG R1 FIX: Process next symbol instead of exiting loop
 
                     logger.info(f"✅ [VALIDATED] {symbol} broke {trigger_price} @ {ltp}. EXECUTING!")
                     
+                    # =========================================================
+                    # FIX #3a: SLOT GUARD — check BEFORE executing
+                    # =========================================================
+                    analyzer = getattr(self, 'analyzer', None)
+                    if analyzer and hasattr(analyzer, 'signal_manager'):
+                        can_trade, reason = analyzer.signal_manager.can_signal(symbol)
+                        if not can_trade:
+                            logger.info(f"🚫 [SLOT BLOCKED] {symbol} — {reason}")
+                            if _gr is not None:
+                                _gr.verdict = "REJECTED"
+                                _gr.rejection_reason = f"Slot guard: {reason}"
+                                get_gate_result_logger().record(_gr)
+                            del self.pending_signals[symbol]
+                            continue  # BUG R1 FIX: Process next symbol instead of exiting loop
+
                     # Execute via OrderManager — MUST be initialized (P0 fix)
                     if self.order_manager is None:
                         if _gr is not None:
@@ -270,19 +330,20 @@ class FocusEngine:
                             "This is a startup initialization failure.", symbol
                         )
                         if self.telegram_bot:
-                            self.telegram_bot.send_alert(
+                            asyncio.create_task(self.telegram_bot.send_alert(
                                 f"🚨 CRITICAL: OrderManager not initialized. "
                                 f"Order for {symbol} BLOCKED. Check startup init chain."
-                            )
+                            ))
                         raise RuntimeError(f"OrderManager not initialized for {symbol}")
 
-                    pos = self.order_manager.enter_position(pending['data'])
-                    if pos:
-                        # Bug 2 fix: record_signal() happens HERE — at the moment an order
-                        # is placed, not earlier. Daily signal slot only burns on real execution.
+                    # FIX #1: await the async enter_position call
+                    pos = await self.order_manager.enter_position(pending['data'])
+                    logger.info(f"[DEBUG] enter_position returned type={type(pos)} value={pos}")
+
+                    # FIX #3b: Only burn slot if order actually returned a valid dict
+                    if pos and isinstance(pos, dict):
                         try:
                             signal_data = pending.get('data', {})
-                            analyzer = getattr(self, 'analyzer', None)
                             if analyzer and hasattr(analyzer, 'signal_manager'):
                                 sl = signal_data.get('stop_loss', 0.0)
                                 pattern = signal_data.get('pattern', '')
@@ -299,9 +360,16 @@ class FocusEngine:
                             _gr.qty = pos.get('qty')
                             get_gate_result_logger().record(_gr)
                         self.start_focus(symbol, pos)
+                    else:
+                        # Order returned None — do NOT burn slot
+                        logger.warning(f"⚠️ [EXECUTION FAILED] {symbol} — enter_position returned: {pos}")
+                        if self.telegram_bot:
+                            asyncio.create_task(self.telegram_bot.send_alert(
+                                f"⚠️ ORDER FAILED: {symbol} — broker returned {pos}"
+                            ))
                     
                     del self.pending_signals[symbol]
-                    return {'status': 'EXECUTED'}  # Return result to Main
+                    continue  # BUG R1 FIX: Process next symbol instead of exiting loop
                     
                 # B. CHECK INVALIDATION (STOP HIT BEFORE ENTRY)
                 elif ltp > inval_price:
@@ -353,6 +421,11 @@ class FocusEngine:
                      
             except Exception as e:
                 logger.error(f"Validation Check Error {symbol}: {e}")
+                # FIX #3: Alert on execution error instead of silent swallow
+                if self.telegram_bot:
+                    asyncio.create_task(self.telegram_bot.send_alert(
+                        f"🔴 EXECUTION ERROR {symbol}: {e}"
+                    ))
         
         return None
 

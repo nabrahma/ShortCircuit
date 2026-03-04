@@ -334,6 +334,10 @@ async def _trading_loop(shutdown_event: asyncio.Event, ctx: RuntimeContext):
         ctx.bot._auto_mode = True
         ctx.bot._auto_on_queued = False
         logger.info("[AUTO] Queued Auto ON activated — market ready")
+        # FIX #5: Flush stale pending signals from pre-market
+        if hasattr(ctx, 'focus_engine') and ctx.focus_engine:
+            ctx.focus_engine.flush_stale_pending_signals(max_age_minutes=20)
+            logger.info("[SESSION] Stale pending signals flushed at session open")
         await ctx.bot.send_message(
             "✅ *Auto Mode activated* — market is open, scanning live",
             parse_mode="Markdown",

@@ -127,9 +127,8 @@ class FyersScanner:
                 self._candle_debug_done = True
             
             # Check Time: If < 10:00 AM, we won't have many candles (Market opens 09:15)
-            import datetime
             import config
-            now_dt = datetime.datetime.fromtimestamp(to_date)
+            now_dt = _dt.datetime.now()
             is_early_morning = now_dt.hour < 10
             
             # RVOL validity gate — replaces is_early_morning heuristic
