@@ -220,7 +220,18 @@ class FyersAnalyzer:
         try:
             profile = self.profile_analyzer.calculate_tpo_profile(df)
         except Exception as e:
-            logger.warning(f"Profile computation error: {e}")
+            logger.warning(f"Profile computation error for {symbol}: {e}")
+
+        # FIX-3: VAH is mandatory per Dalton auction theory.
+        # If profile is None (computation failed), reject — do NOT proceed to G5.
+        if profile is None:
+            gr.g5_pass = False
+            gr.verdict = "REJECTED"
+            gr.first_fail_gate = "G5_PROFILE_UNAVAILABLE"
+            gr.rejection_reason = "Market profile computation failed — VAH unverifiable"
+            grl.record(gr)
+            logger.warning(f"  REJECTED {symbol} G5_PROFILE_UNAVAILABLE — cannot verify VAH")
+            return None
 
         # ── G5: Gate 5 — Exhaustion at Stretch ──────────────────────
         # Runs BEFORE breakdown check — detects exhaustion at the high
@@ -297,10 +308,27 @@ class FyersAnalyzer:
             grl.record(gr)
             return None
 
+        import concurrent.futures
+
         # ── G9: HTF Confluence ────────────────────────────────────
         # Runs in analyzer, NOT focus_engine. Moved out of _finalize_signal()
         # so the gate result is recorded if it fails. (Bug 1 fix)
-        htf_ok, htf_msg = self.htf_confluence.check_trend_exhaustion(symbol)
+        # FIX-5: Wrap in 1.5s timeout. REST call for 15m candles can stall scan loop.
+        # On timeout: pass through (True) — G9 is an enhancement, not a safety gate.
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _htf_exec:
+                _htf_future = _htf_exec.submit(self.htf_confluence.check_trend_exhaustion, symbol)
+                try:
+                    htf_ok, htf_msg = _htf_future.result(timeout=1.5)
+                except concurrent.futures.TimeoutError:
+                    htf_ok  = True
+                    htf_msg = "HTF_TIMEOUT_PASS"
+                    logger.warning(f"  G9 HTF timeout for {symbol} — passing through (1.5s exceeded)")
+        except Exception as e:
+            htf_ok  = True
+            htf_msg = f"HTF_ERROR_PASS:{e}"
+            logger.warning(f"  G9 HTF exception for {symbol} — passing through: {e}")
+
         gr.g9_pass  = htf_ok
         gr.g9_value = htf_msg
         if not htf_ok:
@@ -375,13 +403,19 @@ class FyersAnalyzer:
         """Checks if momentum is too strong to short."""
         try:
             recent_vols = df['volume'].iloc[-20:-1]
-            avg_v = recent_vols.mean()
+            avg_v  = recent_vols.mean()
             curr_v = df['volume'].iloc[-1]
             rvol_now = curr_v / avg_v if avg_v > 0 else 0
-            
-            if rvol_now > 5.0 and slope > 40:
-                logger.warning(f"🛑 TRAIN FILTER: {symbol} blocked (RVOL {rvol_now:.1f}, Slope {slope:.1f})")
+
+            # FIX-2: OR condition. Either alone is sufficient to block.
+            # Previously: both required simultaneously — almost never triggered.
+            if rvol_now > 5.0:
+                logger.warning(f"  MOMENTUM BLOCK {symbol} RVOL {rvol_now:.1f}x (> 5.0x threshold)")
                 return True
+            if slope > 60:
+                logger.warning(f"  MOMENTUM BLOCK {symbol} Slope {slope:.1f} (> 60 threshold)")
+                return True
+
         except Exception:
             pass
         return False
@@ -721,8 +755,24 @@ class FyersAnalyzer:
             grl.record(gr)
             return None
 
+        import concurrent.futures
+
         # ── G9: HTF Confluence ─────────────────────────────────────────
-        htf_ok, htf_msg = self.htf_confluence.check_trend_exhaustion(symbol)
+        # FIX-5: Wrap in 1.5s timeout. REST call for 15m candles can stall scan loop.
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _htf_exec:
+                _htf_future = _htf_exec.submit(self.htf_confluence.check_trend_exhaustion, symbol)
+                try:
+                    htf_ok, htf_msg = _htf_future.result(timeout=1.5)
+                except concurrent.futures.TimeoutError:
+                    htf_ok  = True
+                    htf_msg = "HTF_TIMEOUT_PASS"
+                    logger.warning(f"  G9 HTF timeout for {symbol} — passing through (1.5s exceeded)")
+        except Exception as e:
+            htf_ok  = True
+            htf_msg = f"HTF_ERROR_PASS:{e}"
+            logger.warning(f"  G9 HTF exception for {symbol} — passing through: {e}")
+
         gr.g9_pass  = htf_ok
         gr.g9_value = htf_msg
         if not htf_ok:

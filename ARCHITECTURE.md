@@ -970,7 +970,14 @@ Impact: This was the singular reason for 2 months of zero trade execution.
 
 | Gate | ID | Location | What It Checks | Fail Behaviour |
 |------|----|----------|----------------|----------------|
-| Gain Constraints | G1 | `analyzer.py / check_setup()` | gain% in 6–20% range | grl.record(REJECTED) |
+| G1 | PROXIMITY_AND_GAIN | analyzer.py | check_setup() → gmanalyst.check_constraints() |
+|    | Checks:                                                                              |
+|    | 1. trend_gain >= 5.0% OR max_gain_pct (day_high vs open) >= 7.0%                   |
+|    | 2. trend_gain <= 15.0% (circuit risk ceiling)                                        |
+|    | 3. dist_from_high = (day_high - ltp) / day_high * 100 <= 2.5%                       |
+|    |    (3.5% if max_gain_pct > 10.0%)                                                    |
+|    | NOTE: Primary rejection cause is rule 3 (proximity), NOT rule 1/2 (gain range).     |
+|    | Stocks failing G1 as "GAINCONSTRAINTS" are almost always too far from their high.    |
 | RVOL Validity | G2 | `analyzer.py / check_setup()` | ≥20 min since market open when `RVOL_VALIDITY_GATE_ENABLED` | grl.record(REJECTED) |
 | Circuit Guard | G3 | `analyzer.py / check_setup()` | Not near upper circuit | grl.record(REJECTED) |
 | Momentum | G4 | `analyzer.py / check_setup()` | VWAP slope not too steep | grl.record(REJECTED) |

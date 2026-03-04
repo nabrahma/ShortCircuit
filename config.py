@@ -239,3 +239,16 @@ ETF_CLUSTER_KEYWORDS = ["SILVER"]  # Extend: ["SILVER", "GOLD", "NIFTY"]
 
 # Editable Signal Message Flow (Section 2.1/2.2) — behind feature flag
 EDITABLE_SIGNAL_FLOW_ENABLED = False  # Set True only after stability confirmed
+
+# ============================================================================
+# PHASE 44.8: GATE 5 STRETCH CONSTANTS
+# ============================================================================
+
+# Minimum intraday gain % for a stock to pass the scanner filter (gain >= this to be a candidate)
+# Also used as the stretch_score baseline in G5: score = (gain_pct - BASE) / BASE
+# Source: scanner.py gain filter threshold
+SCANNER_GAIN_MIN_PCT: float = 6.18
+
+# G5 stretch sweet spot window (gain_pct must be in [STRETCH_LOW, STRETCH_HIGH])
+G5_STRETCH_LOW_PCT:  float = 9.0
+G5_STRETCH_HIGH_PCT: float = 14.5

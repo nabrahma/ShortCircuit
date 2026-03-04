@@ -100,20 +100,18 @@ class GodModeAnalyst:
         if trend_gain > 15.0:
             return False, f"Gain {trend_gain:.1f}% too high (> 15%) - Circuit Risk"
             
-        # 2. Smart Day High Proximity
-        # Base: Allow 4.0% pullback.
-        # Turbo: If Max Gain > 10%, allow 6.0% pullback (Deep retracement allowed).
-        
+        # FIX-1: Tightened proximity. Books-backed: enter at the extreme or not at all.
+        # Mathematical basis: 2.5% pullback keeps gain_pct above G5 Gate A threshold (9%)
+        # for any stock with day_high >= 9.5% gain.
         dist_from_high_pct = (day_high - ltp) / day_high * 100
-        
-        allowed_dist = 4.0 
+
+        allowed_dist = 2.5                          # was 4.0
         if max_gain_pct > 10.0:
-            allowed_dist = 6.0
-        elif was_strong_trend: 
-             allowed_dist = 6.0 # Allow deeper pullback if we verified it was a strong trend
-            
+            allowed_dist = 3.5                      # was 6.0 — slight relaxation only for very strong trend days
+        # REMOVED: elif was_strong_trend: allowed_dist = 6.0  ← deleted entirely
+
         if dist_from_high_pct > allowed_dist:
-             return False, f"Too far from High ({dist_from_high_pct:.2f}%) > {allowed_dist}%"
+            return False, f"Too far from High ({dist_from_high_pct:.2f}%) > {allowed_dist}%"
             
         return True, "PASSED"
 
@@ -265,14 +263,18 @@ class GodModeAnalyst:
             result["reject_reason"] = "insufficient_candles"
             return result
 
+        import config
+
         # ── Gate A: Stretch sweet spot ──────────────────────────────
-        stretch_score = round((gain_pct - 6.18) / 6.18, 3)
+        # stretch_score = relative stretch above scanner minimum.
+        # = 0.0 at scanner floor (6.18%), = 1.0 at 12.36%, = 1.346 at 14.5% max.
+        stretch_score = round((gain_pct - config.SCANNER_GAIN_MIN_PCT) / config.SCANNER_GAIN_MIN_PCT, 3)
         result["stretch_score"] = stretch_score
 
-        if gain_pct < 9.0:
+        if gain_pct < config.G5_STRETCH_LOW_PCT:
             result["reject_reason"] = f"stretch_too_low:{gain_pct:.2f}%"
             return result
-        if gain_pct > 14.5:
+        if gain_pct > config.G5_STRETCH_HIGH_PCT:
             result["reject_reason"] = f"stretch_too_high:{gain_pct:.2f}%"
             return result
 
@@ -298,11 +300,21 @@ class GodModeAnalyst:
             return result
 
         # ── Gate D: Price above VAH (no acceptance) ─────────────────
-        if profile is not None:
-            vah = profile.get('vah') if isinstance(profile, dict) else getattr(profile, 'vah', None)
-            if vah and candles[-1]['close'] <= vah:
-                result["reject_reason"] = f"price_below_vah:{candles[-1]['close']}"
-                return result
+        if profile is None:
+            # Should never reach here after analyzer.py FIX-3, but guard anyway
+            result["reject_reason"] = "profile_none:vah_unverifiable"
+            result["fired"] = False
+            return result
+
+        vah = profile.get('vah') if isinstance(profile, dict) else getattr(profile, 'vah', None)
+        if vah is None or vah <= 0:
+            result["reject_reason"] = "vah_not_computed"
+            result["fired"] = False
+            return result
+
+        if candles[-1]['close'] <= vah:
+            result["reject_reason"] = f"price_below_vah:{candles[-1]['close']:.2f}|vah:{vah:.2f}"
+            return result
 
         # ── All gates passed — base signal fires ────────────────────
         result["fired"] = True
@@ -317,11 +329,13 @@ class GodModeAnalyst:
 
         # ── Bonus: existing bearish pattern upgrades confidence ──────
         try:
-            # We need to construct a dataframe for detect_structure_advanced
-            # Since detect_structure_advanced accepts df, we can just pass the last 3 candles
+            # FIX-4: Pass last 20 candles for statistically valid z_score in detect_structure_advanced.
+            # detect_structure_advanced needs iloc[-20:-1] for avg_vol → requires at least 21 rows in df.
+            # candles[-3:] gave only 3 rows → z_score was computed on 2 points (meaningless).
             import pandas as pd
-            df_slice = pd.DataFrame(candles[-3:])
-            pattern, _ = self.detect_structure_advanced(df_slice)
+            bonus_candles = candles[-20:] if len(candles) >= 20 else candles
+            df_slice = pd.DataFrame(bonus_candles)
+            pattern, z_score = self.detect_structure_advanced(df_slice)
             if pattern in ("BEARISH_ENGULFING", "SHOOTING_STAR",
                            "EVENING_STAR", "VOLUME_TRAP", "ABSORPTION_DOJI"):
                 result["pattern_bonus"] = pattern
