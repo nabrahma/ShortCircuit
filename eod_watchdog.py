@@ -24,34 +24,31 @@ EOD_SOFT_SHUTDOWN = (15, 32)  # (hour, minute) IST — graceful
 EOD_HARD_KILL = (15, 40)      # (hour, minute) IST — SIGTERM
 
 
-async def eod_watchdog(shutdown_event: asyncio.Event) -> None:
+async def eod_watchdog(shutdown_event: asyncio.Event):
     """
-    Standalone failsafe. Fires graceful shutdown at 15:32 IST,
-    SIGTERM at 15:40 IST if still alive.
+    Hard failsafe. Sets shutdown_event at 15:32.
+    Force-kills process at 15:40 if still alive.
     """
-    logger.info("[EOD-WATCHDOG] Started. Monitoring for %02d:%02d IST.", *EOD_SOFT_SHUTDOWN)
-    soft_fired = False
+    IST = pytz.timezone("Asia/Kolkata")
 
-    while True:
-        await asyncio.sleep(30)
+    while True:   # ← keep the while True but add the break
         now = datetime.now(IST)
-        h, m = now.hour, now.minute
 
-        # Graceful shutdown at 15:32
-        if not soft_fired and (
-            h > EOD_SOFT_SHUTDOWN[0]
-            or (h == EOD_SOFT_SHUTDOWN[0] and m >= EOD_SOFT_SHUTDOWN[1])
-        ):
-            logger.info("[EOD-WATCHDOG] ⏰ %02d:%02d IST reached. Firing graceful shutdown.", *EOD_SOFT_SHUTDOWN)
-            shutdown_event.set()
-            soft_fired = True
+        # Soft shutdown at 15:32 — give cleanup_runtime() 25s to finish
+        if now.hour == 15 and now.minute >= 32:
+            if not shutdown_event.is_set():
+                logger.warning("[EOD-WATCHDOG] 15:32 IST — setting shutdown_event.")
+                shutdown_event.set()
 
-        # Hard kill at 15:40 — process still alive means cleanup is stuck
-        if h > EOD_HARD_KILL[0] or (h == EOD_HARD_KILL[0] and m >= EOD_HARD_KILL[1]):
-            if soft_fired:
-                logger.critical(
-                    "[EOD-WATCHDOG] ☠️ %02d:%02d IST reached. Process still alive. SIGTERM.",
-                    *EOD_HARD_KILL,
-                )
-                os.kill(os.getpid(), signal.SIGTERM)
-                return  # should never reach here
+        # ✅ HARD KILL at 15:40 — cannot be trapped, cannot be ignored
+        if now.hour == 15 and now.minute >= 40:
+            logger.critical("[EOD-WATCHDOG] 15:40 IST — process did not exit cleanly. "
+                            "Forcing os._exit(0).")
+            os._exit(0)   # ← bypasses all Python cleanup, kills immediately
+
+        # ✅ EXIT the loop once shutdown is confirmed AND it's past 15:32
+        if shutdown_event.is_set() and now.hour == 15 and now.minute >= 32:
+            logger.info("[EOD-WATCHDOG] Shutdown confirmed. Watchdog exiting cleanly.")
+            return   # ← lets the TaskGroup finish normally
+
+        await asyncio.sleep(30)

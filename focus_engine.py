@@ -108,6 +108,27 @@ class FocusEngine:
         for k in stale_keys:
             self.pending_signals.pop(k, None)
 
+    def stop(self, reason: str = "SHUTDOWN"):
+        """
+        Hard stop for the validation monitor. Called at EOD or on shutdown.
+        Clears all queues, cancels the async monitor task, stops the sync thread.
+        """
+        logger.info(f"[GATE] FocusEngine.stop() called — reason: {reason}")
+        self.monitoring_active = False
+        self.pending_signals.clear()
+        self.cooldown_signals.clear()
+
+        # Cancel async task if running
+        task = getattr(self, '_monitor_task', None)
+        if task and not task.done():
+            task.cancel()
+            logger.info("[GATE] Monitor task cancelled.")
+
+        # Stop sync fallback thread (it checks monitoring_active)
+        thread = getattr(self, 'monitor_thread', None)
+        if thread and thread.is_alive():
+            logger.info("[GATE] Sync monitor thread will exit on next iteration.")
+
     def queue_cooldown_signal(self, signal_data, unlock_at):
         """Phase 43.4: Queues a signal that passed gates but hit cooldown."""
         symbol = signal_data['symbol']
@@ -196,23 +217,31 @@ class FocusEngine:
             time.sleep(2)
 
     async def monitor_pending_loop(self):
-        """Async background loop. FIX #1: now async so we can await enter_position."""
+        """Async background loop. Stops automatically at EOD."""
         while self.monitoring_active:
+
+            # ✅ EOD GUARD — kill the loop at 15:10
+            now = datetime.datetime.now()
+            if now.hour == 15 and now.minute >= 10:
+                logger.info("[GATE] EOD: 15:10 reached — stopping validation monitor.")
+                self.stop("EOD_TIME_BOUNDARY")
+                return
+
             if self.cooldown_signals:
                 try:
-                    await asyncio.to_thread(self.flush_pending_signals)  # BUG R3 FIX: Offload sync REST call
+                    await asyncio.to_thread(self.flush_pending_signals)
                 except Exception as e:
                     logger.error(f"Cooldown flush error: {e}")
 
             if not self.pending_signals:
                 await asyncio.sleep(5)
                 continue
-                
+
             try:
                 await self.check_pending_signals(self.trade_manager)
             except Exception as e:
                 logger.error(f"Monitor Loop Error: {e}")
-                
+
             await asyncio.sleep(2)
 
     async def check_pending_signals(self, trade_manager):
@@ -220,7 +249,16 @@ class FocusEngine:
         Phase 37: Monitors pending signals for Validation Trigger.
         FIX #1: Now async. FIX #3: Slot guard + burn-after-confirm.
         """
-        if not self.pending_signals: return
+        if not self.pending_signals:
+            return
+
+        # ✅ EOD GUARD — never execute after 15:10
+        now = datetime.datetime.now()
+        if now.hour == 15 and now.minute >= 10:
+            logger.info(f"[GATE] EOD guard triggered in check_pending_signals. "
+                        f"Clearing {len(self.pending_signals)} pending signals.")
+            self.stop("EOD_CHECK_GUARD")
+            return
 
         # Create copy to avoid runtime error during modification
         current_pending = list(self.pending_signals.items())

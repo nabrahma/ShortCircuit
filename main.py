@@ -467,6 +467,14 @@ async def _cleanup_runtime(ctx: Optional[RuntimeContext]):
 
     logger.info("[SHUTDOWN] Beginning cleanup sequence.")
 
+    # ✅ ADD: Stop FocusEngine first — prevents post-shutdown signals
+    if ctx.focus_engine:
+        try:
+            ctx.focus_engine.stop("PROCESS_SHUTDOWN")
+            logger.info("[CLEANUP] FocusEngine stopped.")
+        except Exception as e:
+            logger.error(f"[CLEANUP] FocusEngine stop failed: {e}")
+
     # 1. RecEngine — 10s max
     try:
         await asyncio.wait_for(ctx.reconciliation_engine.stop(), timeout=10.0)
@@ -602,6 +610,11 @@ async def main() -> int:
                 logger.error("[NOTIFY] Failed: %s", exc)
 
         async def _trigger_squareoff():
+            # ✅ ADD: Stop the validation monitor BEFORE squaring off
+            if ctx.focus_engine:
+                ctx.focus_engine.stop("EOD_SQUAREOFF")
+                logger.info("[EOD] FocusEngine validation monitor stopped before square-off.")
+
             message = await asyncio.to_thread(ctx.trade_manager.close_all_positions)
             await _notify(f"[EOD] Square-off result:\n{message}")
 
@@ -691,7 +704,21 @@ async def main() -> int:
         _update_terminal_log()  # keep last, captures full session shutdown
         logger.info("[SUPERVISOR] Cleanup complete.")
 
-    return exit_code
+        # ✅ HARD EXIT FALLBACK — kills any hanging non-daemon threads
+        # Give Python 3 seconds to exit naturally first
+        import threading
+        def _force_exit():
+            import time
+            time.sleep(3)
+            logger.warning("[SUPERVISOR] Process did not exit naturally after 3s. "
+                           "Forcing os._exit(0).")
+            os._exit(0)
+
+        t = threading.Thread(target=_force_exit, daemon=True)
+        t.start()
+        # Return normally — if Python exits cleanly, the daemon thread dies with it
+        # If Python hangs, the daemon thread force-kills after 3s
+        return exit_code
 
 
 if __name__ == "__main__":

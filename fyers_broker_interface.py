@@ -201,6 +201,13 @@ class FyersBrokerInterface:
         self._cache_state: str = "UNINITIALIZED"  # UNINITIALIZED | PRIMING | READY | DEGRADED
         self._cache_ready_event = threading.Event()  # Set when readiness threshold first crossed
         self._subscribed_count: int = 0
+        self._ws_subscribed_symbols: list[str] = []
+        self._ws_subscribed_symbols_set: set[str] = set()
+
+        # PRD-007: Cache reliability state machine
+        self._cache_state: str = "UNINITIALIZED"  # UNINITIALIZED | PRIMING | READY | DEGRADED
+        self._cache_ready_event = threading.Event()  # Set when readiness threshold first crossed
+        self._subscribed_count: int = 0
         self._prime_start_ts: float = 0.0
         self._health_monitor_thread: threading.Thread | None = None
         self._health_monitor_running: bool = False
@@ -208,6 +215,7 @@ class FyersBrokerInterface:
         self._last_reprime_time: float = 0.0
         self._consecutive_reprime_failures: int = 0
         self._sub_ack = threading.Event()  # BUG-02: blocks until Fyers confirms subscription
+        self._ws_cache_stop = False
         
         # Background tasks
         self.tasks = []
@@ -973,6 +981,9 @@ class FyersBrokerInterface:
         """
         consecutive_critical = 0
         while self._health_monitor_running:
+            if getattr(self, '_ws_cache_stop', False):
+                logger.info("[BROKER] Health monitor stopping on _ws_cache_stop flag.")
+                break
             time.sleep(30)
             try:
                 snap = self.cache_health_snapshot()
@@ -1254,5 +1265,35 @@ class FyersBrokerInterface:
         pass
 
     async def disconnect(self):
-        """Phase 44.5 compatibility alias for supervisor cleanup."""
-        await self.shutdown()
+        """
+        Cleanly stop WebSocket threads. Called during cleanup_runtime().
+        """
+        logger.info("[BROKER] Disconnecting WebSocket connections...")
+
+        # Stop the health monitor thread
+        health_thread = getattr(self, '_health_monitor_thread', None)
+        if health_thread and health_thread.is_alive():
+            # Signal the thread to stop — set a stop flag it checks
+            self._ws_cache_stop = True
+            health_thread.join(timeout=3.0)
+            logger.info("[BROKER] Health monitor thread stopped.")
+
+        # Stop data WebSocket
+        try:
+            data_ws = getattr(self, 'data_ws', None) or getattr(self, '_data_ws', None)
+            if data_ws:
+                await asyncio.to_thread(data_ws.close)
+                logger.info("[BROKER] Data WebSocket closed.")
+        except Exception as e:
+            logger.warning(f"[BROKER] Data WS close error (non-fatal): {e}")
+
+        # Stop order WebSocket
+        try:
+            order_ws = getattr(self, 'order_ws', None) or getattr(self, '_order_ws', None)
+            if order_ws:
+                await asyncio.to_thread(order_ws.close)
+                logger.info("[BROKER] Order WebSocket closed.")
+        except Exception as e:
+            logger.warning(f"[BROKER] Order WS close error (non-fatal): {e}")
+
+        logger.info("[BROKER] Disconnect complete.")
