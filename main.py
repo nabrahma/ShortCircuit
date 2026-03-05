@@ -164,8 +164,6 @@ async def _initialize_runtime() -> RuntimeContext:
     capital_manager = CapitalManager(
         leverage=getattr(config, "INTRADAY_LEVERAGE", 5.0),
     )
-    startup_recovery = StartupRecovery(fyers_client)
-    startup_recovery.scan_orphaned_trades()
 
     trade_manager = TradeManager(fyers_client, capital_manager)
     focus_engine = FocusEngine(trade_manager)
@@ -308,9 +306,27 @@ async def _initialize_runtime() -> RuntimeContext:
         broker=broker,
         db_manager=db_manager,
         telegram_bot=bot,
+        capital_manager=capital_manager,
+        order_manager=order_manager,
+    )
+
+    # Phase 44.6: Scalper Position Manager wiring
+    from scalper_position_manager import ScalperPositionManager
+    trade_manager.scalper_manager = ScalperPositionManager(
+        trade_manager,
+        on_position_closed=lambda: capital_manager.release_slot(broker=broker)
     )
 
     await order_manager.startup_reconciliation()
+
+    # Phase 44.6: Startup Recovery (now adopts orphans)
+    startup_recovery = StartupRecovery(
+        fyers_client=fyers_client,
+        order_manager=order_manager,
+        capital_manager=capital_manager,
+        telegram=bot,
+    )
+    startup_recovery.scan_orphaned_trades()
 
     return RuntimeContext(
         fyers_client=fyers_client,

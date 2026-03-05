@@ -22,8 +22,10 @@ ORPHANED_LOG = getattr(config, 'ORPHANED_POSITION_LOG_PATH', 'logs/orphaned_posi
 
 class PositionReconciliation:
     """
-    Verifies bot's internal state matches broker's actual positions.
-    Critical for detecting orphaned positions from bugs.
+    DEPRECATED Phase 44.6 — Use ReconciliationEngine (reconciliation.py) instead.
+    This sync-only module has been superseded. It remains for legacy startup_recovery
+    compatibility only. All runtime orphan detection now runs through ReconciliationEngine
+    which actually adopts orphans and releases capital slots.
     """
 
     def __init__(self, fyers, trade_manager, bot=None):

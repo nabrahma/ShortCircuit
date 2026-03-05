@@ -4,8 +4,10 @@ import time
 import logging
 from datetime import datetime
 
+
 import config
 from capital_manager import CapitalManager
+
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +29,10 @@ class TradeManager:
         
         # Phase 42.3.4: Reconciliation Engine (Injected)
         self.reconciliation_engine = None
+
+        # Phase 44.6: Scalper Position Manager (Injected)
+        self.scalper_manager = None
+
 
     def set_auto_trade(self, enabled: bool):
         self.auto_trade_enabled = enabled

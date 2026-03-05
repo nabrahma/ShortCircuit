@@ -56,11 +56,13 @@ class ScalperPositionManager:
     Called every 2 seconds with current LTP, returns action dicts.
     """
 
-    def __init__(self, trade_manager, logger_override=None):
+    def __init__(self, trade_manager, logger_override=None, on_position_closed=None):
         self.trade_manager = trade_manager
         self.log = logger_override or logger
         self.risk_calc = ScalperRiskCalculator()
         self.active_position = None
+        # Phase 44.6: callback fired on full close
+        self._on_position_closed = on_position_closed
 
     def start_position(
         self,
@@ -119,6 +121,19 @@ class ScalperPositionManager:
               - 'STOP_HIT': stopped out (quantity, reason, price)
               - 'CLOSE_ALL': full close at TP3 (quantity, reason, price)
         """
+        def _close_and_notify(action_dict: dict) -> dict:
+            """Sets active_position=None and fires the capital release callback."""
+            self.active_position = None
+            if self._on_position_closed:
+                try:
+                    result = self._on_position_closed()
+                    import asyncio, inspect
+                    if inspect.isawaitable(result):
+                        asyncio.get_event_loop().create_task(result)
+                except Exception as e:
+                    self.log.error(f"[SCALPER] on_position_closed callback failed: {e}")
+            return action_dict
+
         if self.active_position is None:
             return {"action": "NO_POSITION"}
 
@@ -139,13 +154,12 @@ class ScalperPositionManager:
                 f"(SL was ₹{pos.current_stop:.2f})"
             )
             qty = pos.remaining_quantity
-            self.active_position = None  # Position closed
-            return {
+            return _close_and_notify({
                 "action": "STOP_HIT",
                 "quantity": qty,
                 "reason": "STOP_LOSS",
                 "price": current_ltp,
-            }
+            })
 
         # ── PHASE 5: TP3 Check — Close all (before TP1/TP2 to catch gap-downs) ─
         if pos.tp2_hit and not pos.tp3_hit and current_ltp <= pos.tp3:
@@ -154,13 +168,12 @@ class ScalperPositionManager:
             qty = pos.remaining_quantity
             pos.realized_pnl_points += qty * profit_points
             pos.remaining_quantity = 0
-            self.active_position = None  # Position fully closed
-            return {
+            return _close_and_notify({
                 "action": "CLOSE_ALL",
                 "quantity": qty,
                 "reason": "TP3_HOME_RUN",
                 "price": current_ltp,
-            }
+            })
 
         # ── PHASE 4: TP2 Check — Close another 50% of original (75% total) ──
         if pos.tp1_hit and not pos.tp2_hit and current_ltp <= pos.tp2:
@@ -181,13 +194,12 @@ class ScalperPositionManager:
 
             # If nothing remains, close fully
             if pos.remaining_quantity <= 0:
-                self.active_position = None
-                return {
+                return _close_and_notify({
                     "action": "CLOSE_ALL",
                     "quantity": close_qty,
                     "reason": "TP2_FULL_CLOSE",
                     "price": current_ltp,
-                }
+                })
 
             return {
                 "action": "CLOSE_PARTIAL",
@@ -211,13 +223,12 @@ class ScalperPositionManager:
 
             # If nothing remains (qty was 1), close fully
             if pos.remaining_quantity <= 0:
-                self.active_position = None
-                return {
+                return _close_and_notify({
                     "action": "CLOSE_ALL",
                     "quantity": close_qty,
                     "reason": "TP1_FULL_CLOSE",
                     "price": current_ltp,
-                }
+                })
 
             return {
                 "action": "CLOSE_PARTIAL",

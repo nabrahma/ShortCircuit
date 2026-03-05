@@ -34,6 +34,7 @@ class SignalManager:
         # Stats
         self.stats = defaultdict(int)
         self._lock = threading.Lock()  # FIX #4: protect list/dict from concurrent thread access
+        self._exec_cooldowns: dict = {}   # symbol → datetime (unblock_at)
     
     def _reset_if_new_day(self):
         """Reset counters at the start of a new trading day."""
@@ -61,6 +62,17 @@ class SignalManager:
         with self._lock:
             self._reset_if_new_day()
             now = datetime.now()
+            
+            # Check 0: Execution failure cooldown (set on broker failures, not just normal cooldown)
+            cd = self._exec_cooldowns.get(symbol)
+            if cd:
+                now_ts = datetime.now()
+                if now_ts < cd['blocked_until']:
+                    remaining = int((cd['blocked_until'] - now_ts).total_seconds())
+                    self.stats['blocked_exec_cooldown'] = self.stats.get('blocked_exec_cooldown', 0) + 1
+                    return False, f"Exec cooldown: {symbol} blocked {remaining}s ({cd['reason']})"
+                else:
+                    del self._exec_cooldowns[symbol]  # expired
             
             # Check 1: Daily limit
             if len(self.signals_today) >= self.max_signals_per_day:
@@ -110,6 +122,53 @@ class SignalManager:
             self.stats['signals_sent'] += 1
             
             logger.info(f"Signal recorded: {symbol} @ {entry_price} (#{len(self.signals_today)} today)")
+
+    def record_execution_failure(
+        self,
+        symbol: str,
+        cooldown_seconds: int = 900,
+        reason: str = 'EXEC_FAILED'
+    ):
+        """
+        Phase 44.6: Sets a hard re-entry block when enter_position() returns None.
+        Different from record_signal() — this fires on FAILURE, not success.
+        The scan can still discover the symbol; only execution is blocked.
+
+        Cooldown guide:
+          FILL_TIMEOUT  → 1200s (20 min)
+          BROKER_ERROR  →  600s (10 min)
+          ZERO_QTY      →  300s ( 5 min)
+          Default       →  900s (15 min)
+        """
+        from datetime import timedelta
+        with self._lock:
+            unblock_at = datetime.now() + timedelta(seconds=cooldown_seconds)
+            self._exec_cooldowns[symbol] = {
+                'blocked_until': unblock_at,
+                'reason':        reason,
+                'set_at':        datetime.now(),
+            }
+            logger.warning(
+                f"⏳ EXEC COOLDOWN SET | {symbol} | reason={reason} | "
+                f"blocked {cooldown_seconds}s until {unblock_at.strftime('%H:%M:%S')}"
+            )
+
+    def is_exec_blocked(self, symbol: str) -> tuple:
+        """
+        Returns (blocked: bool, remaining_seconds: int, reason: str).
+        Called by focus_engine before attempting entry.
+        """
+        with self._lock:
+            cd = self._exec_cooldowns.get(symbol)
+            if not cd:
+                return False, 0, ''
+            now = datetime.now()
+            if now < cd['blocked_until']:
+                remaining = int((cd['blocked_until'] - now).total_seconds())
+                return True, remaining, cd['reason']
+            # Expired — clean up
+            del self._exec_cooldowns[symbol]
+            return False, 0, ''
     
     def record_outcome(self, symbol, is_win):
         """

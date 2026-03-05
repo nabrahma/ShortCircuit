@@ -435,7 +435,28 @@ class FocusEngine:
 
                     logger.info(f"🚀 [EXECUTING] {symbol} | trigger=₹{trigger_price} ltp=₹{ltp}")
 
-                    # FIX: await the async enter_position call
+                    # ── EXEC COOLDOWN GATE (Phase 44.6) ─────────────────────────────
+                    # order_manager._exec_cooldowns is set on any failed entry attempt.
+                    # Signal is NOT removed from gate — stays observable for ML logging.
+                    if self.order_manager and hasattr(self.order_manager, 'is_exec_cooldown_active'):
+                        cd_active, cd_remaining = self.order_manager.is_exec_cooldown_active(symbol)
+                        if cd_active:
+                            logger.info(
+                                f"⏳ EXEC COOLDOWN {symbol} | {cd_remaining}s remaining | "
+                                f"signal visible but not executed"
+                            )
+                            if self.telegram_bot:
+                                asyncio.create_task(self.telegram_bot.send_alert(
+                                    f"⏳ *EXEC COOLDOWN ACTIVE*\n\n"
+                                    f"Symbol: `{symbol}`\n"
+                                    f"Trigger broke @ ₹{ltp:.2f}\n"
+                                    f"Blocked: {cd_remaining}s remaining\n\n"
+                                    f"_Signal valid — not executed due to cooldown_"
+                                ))
+                            # DO NOT delete from pending_signals — keep for continued monitoring
+                            continue
+                    # ────────────────────────────────────────────────────────────────
+
                     pos = await self.order_manager.enter_position(pending['data'])
                     logger.info(f"[DEBUG] enter_position returned type={type(pos)} value={pos}")
 
