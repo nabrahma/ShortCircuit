@@ -252,3 +252,10 @@ SCANNER_GAIN_MIN_PCT: float = 6.18
 # G5 stretch sweet spot window (gain_pct must be in [STRETCH_LOW, STRETCH_HIGH])
 G5_STRETCH_LOW_PCT:  float = 9.0
 G5_STRETCH_HIGH_PCT: float = 14.5
+
+# Minimum LTP for a stock to be considered a scanner candidate.
+# Stocks below this threshold are disproportionately operator-driven on NSE
+# and produce unreliable RVOL, VAH, and tape signals.
+# ₹50 filters sub-₹50 manipulation vehicles while keeping all legitimate
+# small/mid-cap candidates that your strategy targets.
+SCANNER_MIN_LTP: float = 50.0

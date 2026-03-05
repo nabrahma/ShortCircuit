@@ -162,7 +162,7 @@ FocusEngine.stop(reason) [NEW METHOD]:
 **Calls into:** Fyers REST API (via `fyers_connect`), NSE symbol master endpoint
 **State it owns:** `symbols: list` (cached symbol universe)
 **Error handling:** `check_chart_quality` passes on API lag (does not reject liquid stocks due to transient empty data); individual quote fetch failures caught per-symbol
-**Notes:** Gain filter: 6–18%. Volume filter: >100k. LTP filter: >₹5. `SCANNER_PARALLEL_WORKERS=3`. Symbol list cached — re-fetched from NSE master synchronously on startup via requests. WS cache vastly reduces REST API calls during scans. Candle history fetch uses `date_format="1"` with YYYY-MM-DD range strings and 5-day lookback. Tier freshness TTL sourced from `config.WS_TICK_FRESHNESS_TTL_SECONDS`. Tier selector: `WS_CACHE` when fresh ≥ threshold; `HYBRID` when `known_pct ≥ 90%`; `REST_EMERGENCY` only when truly unknown.
+**Notes:** Gain filter: 6–18%. Volume filter: >100k. LTP filter: config.SCANNER_MIN_LTP (default 50). `SCANNER_PARALLEL_WORKERS=3`. Symbol list cached — re-fetched from NSE master synchronously on startup via requests. WS cache vastly reduces REST API calls during scans. Candle history fetch uses `date_format="1"` with YYYY-MM-DD range strings and 5-day lookback. Tier freshness TTL sourced from `config.WS_TICK_FRESHNESS_TTL_SECONDS`. Tier selector: `WS_CACHE` when fresh ≥ threshold; `HYBRID` when `known_pct ≥ 90%`; `REST_EMERGENCY` only when truly unknown.
 
 ```
 Bug Fixed (2026-03-04):

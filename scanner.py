@@ -308,7 +308,7 @@ class FyersScanner:
                     gain   = abs(quote.get('ch_oc', 0))
                     oi     = quote.get('oi', 0)
 
-                    if gain >= 6.0 and gain <= 18.0 and volume >= 100_000 and ltp >= 5:
+                    if gain >= 6.0 and gain <= 18.0 and volume >= 100_000 and ltp >= config.SCANNER_MIN_LTP:
                         if self.quality_reject_counts.get(symbol, 0) >= 3:
                             logger.debug(f"BLACKLIST {symbol} — Quality rejected 3x today, skipping.")
                             continue
