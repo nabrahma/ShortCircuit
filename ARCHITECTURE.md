@@ -1,5 +1,5 @@
 # ShortCircuit — Architecture Reference
-**Version:** Post-Phase 44.9 + PRD v2.2 | **Last Updated:** 2026-03-03
+**Version:** Post-Phase 44.8.9 + PRD v3.0 | **Last Updated:** 2026-03-05
 
 ---
 
@@ -24,7 +24,7 @@ The concurrency model is a **single asyncio event loop** with a `TaskGroup` laun
 **Calls into:** All of the above
 **State it owns:** `shutdown_event: asyncio.Event`, `RuntimeContext` dataclass instance, `IST` timezone
 **Error handling:** `except* Exception` on `TaskGroup` failures; `_supervised()` wrapper retries crashed tasks up to `max_retries`; `_validate_dependencies()` raises `RuntimeError` + Telegram alert if any dep is `None`; `finally` always calls `_cleanup_runtime()` and `_update_terminal_log()`
-**Notes:** `AUTO_MODE` is hardcoded `False` in `config.py` — cannot be enabled by env var; only `/auto on` Telegram command enables trading. Startup injects broker into scanner and subscribes to the scanner universe via WebSocket. Startup sequence includes: (a) `broker.seed_from_rest(scanner_symbols)` before WS subscribe — seeds cache so no symbols start as `Missing`; (b) startup validation gate — candle API HARD HALT, DB HARD HALT, WS SOFT WARN; (c) at trading loop start: auto queue resolution (`_auto_on_queued` → `auto_mode=True`) then `_send_morning_briefing()`.
+**Notes:** `AUTO_MODE` is hardcoded `False` in `config.py` — cannot be enabled by env var; only `/auto on` Telegram command enables trading. Startup injects broker into scanner and subscribes to the scanner universe via WebSocket. Startup sequence includes: (a) `broker.seed_from_rest(scanner_symbols)` before WS subscribe — seeds cache so no symbols start as `Missing`; (b) startup validation gate — candle API HARD HALT, DB HARD HALT, WS SOFT WARN; (c) at trading loop start: auto queue resolution (`_auto_on_queued` → `auto_mode=True`) then `_send_morning_briefing()`. **[Phase 44.8.9]** `broker.set_telegram(telegram_bot)` is wired immediately after both broker (`await broker.initialize()`) and bot (`ShortCircuitBot(...)`) are constructed, enabling Telegram alerts from the broker health monitor daemon thread.
 
 ---
 
@@ -37,20 +37,20 @@ The concurrency model is a **single asyncio event loop** with a `TaskGroup` laun
 **Calls into:** `os`, `dotenv`, `datetime`, `pytz`
 **State it owns:** All module-level constants (`CAPITAL_PER_TRADE=1800`, `INTRADAY_LEVERAGE=5.0`, `AUTO_MODE=False`, `MAX_SIGNALS_PER_DAY` via `SignalManager` default, `VALIDATION_TIMEOUT_MINUTES=15`, `SQUARE_OFF_TIME=15:10`, `EDITABLE_SIGNAL_FLOW_ENABLED=False`, `ETF_CLUSTER_DEDUP_ENABLED=True`, etc.)
 **Error handling:** None — config errors surface as `AttributeError` at import time
-**Notes:** `AUTO_MODE` is overridden to `False` regardless of env var (explicit safety measure). `TRADING_ENABLED` is dynamically updated by `MarketSession` via `set_trading_enabled()`.
+**Notes:** `AUTO_MODE` is overridden to `False` regardless of env var (explicit safety measure). `TRADING_ENABLED` is dynamically updated by `MarketSession` via `set_trading_enabled()`. **[Phase 44.8.9]** `SCANNER_MIN_LTP` default is `50.0` — do not lower this value; it prevents penny stocks from reaching the order stage.
 
 ---
 
 ### fyers_broker_interface.py
 **Role:** Unified broker interface — manages Fyers REST API client and both WebSocket connections (Data WS for ticks, Order WS for fill events); exposes `place_order`, `get_positions`, tick subscriptions, and callback registration.
 **Key Classes:** `OrderUpdate`, `PositionUpdate`, `TickData`, `FyersBrokerInterface`, `CacheEntry` (dataclass), `CacheEntrySource` (enum: `WS_TICK`, `REST_SEED`)
-**Key Functions:** `get_quote_cache_snapshot`, `subscribe_scanner_universe`, `seed_from_rest`
+**Key Functions:** `get_quote_cache_snapshot`, `subscribe_scanner_universe`, `seed_from_rest`, `set_telegram`, `is_cache_severely_degraded`, `increment_degraded_scan_count`
 **Imports from project:** None (imports Fyers SDK: `fyers_apiv3`, `fyers_apiv3.FyersWebsocket.data_ws`, `fyers_apiv3.FyersWebsocket.order_ws`)
 **Called by:** `main.py`, `order_manager.py`, `reconciliation.py`, `trade_manager.py` (via fyers client), `focus_engine.py` (via FyersConnect)
 **Calls into:** Fyers SDK (external), `database.py`
 **State it owns:** `position_cache: dict[str, PositionUpdate]`, `_quote_cache: dict`, `_ws_subscribed_symbols_set: set`, `order_callbacks: list`, `tick_callbacks: list`, `data_ws`, `order_ws`, connection state flags, rate-limit tracking dict
 **Error handling:** `_on_data_ws_error` / `_on_order_ws_error` log errors; WebSocket reconnect handled by Fyers SDK automatically; DNS errors (errno 11001) logged and SDK retries; `place_order` wraps REST call in try/except returning `None` on failure
-**Notes:** Both WebSocket connections run in background daemon threads (blocking SDK calls); asyncio callbacks are scheduled via `asyncio.get_event_loop().call_soon_threadsafe`. WS import has a fallback if `setuptools==79.0.1` is not installed. Maintains a real-time `_quote_cache` from Data WS ticks via a formal UNINITIALIZED→PRIMING→READY state machine (Phase 44.9 — see SECTION 16). Health monitor daemon thread runs every 30s and triggers automatic re-prime if cache freshness drops below 50%. Cache entries now use `CacheEntry` dataclass with `source` field (`WS_TICK` or `REST_SEED`). `seed_from_rest(symbols)` seeds all symbols from REST snapshot at startup so none are counted as `Missing` before first WS tick. Health snapshot includes `fresh`, `stale`, `seeded`, `missing` fields. Scan tier uses `known_pct` (fresh + stale + seeded) for `WS_CACHE`/`HYBRID`/`REST_EMERGENCY` decisions. 3 consecutive re-prime failures trigger a **nuclear full reconnect**: Data WS torn down completely, 5-second sleep, full re-subscribe + re-seed cycle. Guarded by `_reprime_failure_count` counter, reset to 0 on any successful re-prime.
+**Notes:** Both WebSocket connections run in background daemon threads (blocking SDK calls); asyncio callbacks are scheduled via `asyncio.run_coroutine_threadsafe()` using `self._loop` captured via `asyncio.get_running_loop()` during `initialize()` — never `get_event_loop()` from a thread (which is unsafe in Python 3.12). WS import has a fallback if `setuptools==79.0.1` is not installed. Maintains a real-time `_quote_cache` from Data WS ticks via a formal UNINITIALIZED→PRIMING→READY state machine (Phase 44.9 — see SECTION 16). Health monitor daemon thread runs every 30s. **[Phase 44.8.9]** DEGRADED status is now determined solely by `fresh_pct` (WS-ticked symbols / total) — NOT `known_pct`. This fixes the trap where REST-seeded data kept `known_pct >= 90%` healthy even when no real WS ticks existed. `_severe_degraded_since` timestamp tracks continuous degradation; 30-second gate must expire before auto-recovery triggers. Max 3 reprime attempts per degraded episode; on 3rd failure transitions to UNRECOVERABLE and sends Telegram alert. Telegram alerts sent on: DEGRADED entry, RECOVERED, and UNRECOVERABLE. `set_telegram(bot)` wired from `main.py` after broker and bot are both initialized. `is_cache_severely_degraded()` returns bool — polled by `scanner.py` for DEGRADED MODE banner. `increment_degraded_scan_count()` called by scanner each cycle during degraded state. Tier freshness TTL sourced from `config.WS_TICK_FRESHNESS_TTL_SECONDS`. Tier selector: `WS_CACHE` when fresh ≥ threshold; `HYBRID` when `known_pct ≥ 90%`; `REST_EMERGENCY` only when truly unknown. 3 consecutive re-prime failures trigger a **nuclear full reconnect**: Data WS torn down completely, 5-second sleep, full re-subscribe + re-seed cycle. Guarded by `_reprime_failure_count` counter, reset to 0 on any successful re-prime.
 
 ---
 
@@ -162,7 +162,7 @@ FocusEngine.stop(reason) [NEW METHOD]:
 **Calls into:** Fyers REST API (via `fyers_connect`), NSE symbol master endpoint
 **State it owns:** `symbols: list` (cached symbol universe)
 **Error handling:** `check_chart_quality` passes on API lag (does not reject liquid stocks due to transient empty data); individual quote fetch failures caught per-symbol
-**Notes:** Gain filter: 6–18%. Volume filter: >100k. LTP filter: config.SCANNER_MIN_LTP (default 50). `SCANNER_PARALLEL_WORKERS=3`. Symbol list cached — re-fetched from NSE master synchronously on startup via requests. WS cache vastly reduces REST API calls during scans. Candle history fetch uses `date_format="1"` with YYYY-MM-DD range strings and 5-day lookback. Tier freshness TTL sourced from `config.WS_TICK_FRESHNESS_TTL_SECONDS`. Tier selector: `WS_CACHE` when fresh ≥ threshold; `HYBRID` when `known_pct ≥ 90%`; `REST_EMERGENCY` only when truly unknown.
+**Notes:** Gain filter: 6–18%. Volume filter: >100k. LTP filter: `config.SCANNER_MIN_LTP` (default **₹50** — penny stocks below ₹50 are rejected at pre-filter before any API call, eliminating Fyers basket-rule rejections e.g. ESSARSHPNG ₹27, STEELXIND ₹8). `SCANNER_PARALLEL_WORKERS=3`. Symbol list cached — re-fetched from NSE master synchronously on startup via requests. WS cache vastly reduces REST API calls during scans. Candle history fetch uses `date_format="1"` with YYYY-MM-DD range strings and 5-day lookback. Tier freshness TTL sourced from `config.WS_TICK_FRESHNESS_TTL_SECONDS`. Tier selector: `WS_CACHE` when fresh ≥ threshold; `HYBRID` when `known_pct ≥ 90%`; `REST_EMERGENCY` only when truly unknown. **[Phase 44.8.9]** DEGRADED MODE banner: when `broker.is_cache_severely_degraded()` is `True`, `scan_market()` logs a `⚠️ DEGRADED MODE — cache severely degraded` warning banner every 10 scan cycles.
 
 ```
 Bug Fixed (2026-03-04):
@@ -464,6 +464,19 @@ Thread Safety:
 
 ---
 
+### gate_result_logger.py
+**Role:** Gate audit trail logger — buffers `GateResult` objects in-memory and flushes them in batches to the `gate_results` PostgreSQL table. Provides a JSON-Lines fallback on any DB failure so no audit record is ever lost.
+**Key Classes:** `GateResultLogger`
+**Key Functions:** `get_gate_result_logger` (singleton accessor), `_flush_batch`, `_sanitize_row`, `_flush_to_json_fallback`
+**Imports from project:** `database.DatabaseManager`
+**Called by:** `analyzer.py` (records G1–G9 outcomes per candidate), `focus_engine.py` (records G10–G12 outcomes on validation), `main.py` (calls `get_gate_result_logger().set_dsn(dsn)` at startup)
+**Calls into:** `database.py` (async `executemany`), `aiofiles` (async fallback write)
+**State it owns:** `_buffer: list[GateResult]`, `_dsn: str`, `_fallback_path: Path`
+**Error handling:** `_flush_batch()` calls `_sanitize_row()` on every row before insert, then wraps `executemany` in `try/except`; on any DB exception falls through to `_flush_to_json_fallback()` — guarantees zero silent data loss.
+**Notes:** **[Phase 44.8.9]** `_COLUMN_SPEC` dict defines the expected Python type for each of the 36 SQL parameters. `_sanitize_row()` coerces all values to their expected types before `executemany` (e.g. casts `g9_value` and `g11_value` to `str` since those columns are now `VARCHAR`). `_flush_to_json_fallback()` appends records to `logs/gate_fallback_YYYYMMDD.jsonl` using `aiofiles` for non-blocking I/O. Singleton via `get_gate_result_logger()`. `set_dsn()` called from `main.py` after DB pool is initialized.
+
+---
+
 ### emergency_logger.py
 **Role:** Emergency alert logger — writes critical failure events to `logs/emergency_alerts.log` and `logs/orphaned_positions.log`.
 **Key Classes:** <!-- AUDIT NOTE: unclear — verify class name -->
@@ -663,6 +676,8 @@ Thread Safety:
 **Purpose:** PostgreSQL schema migration SQL scripts.
 **Files:**
 - `v42_1_0_postgresql.sql` — Phase 42.1 schema: creates `orders`, `positions`, `reconciliation_log` tables with indexes and `update_updated_at` trigger.
+- `v44_8_2_gate_results.sql` — Phase 44.9 schema: creates the `gate_results` table for full 12-gate audit trail.
+- `v44_8_3_gate_results_g9_type_fix.sql` — **[Phase 44.8.9]** Alters `g9_value` and `g11_value` from `NUMERIC` to `VARCHAR(100)`. Run this migration before deploying Phase 44.8.9 code.
 **Consumed by:** `apply_migration.py` (manual run)
 
 ---
@@ -689,6 +704,8 @@ Thread Safety:
 - `emergency_alerts.log` — Critical failure events
 - `orphaned_positions.log` — Orphaned position discoveries
 - `diagnostic_analysis.csv` — `/why` command runs
+- `gate_fallback_YYYYMMDD.jsonl` — **[Phase 44.8.9 NEW]** JSON-Lines fallback written by `GateResultLogger._flush_to_json_fallback()` when DB `executemany` fails. One JSON record per line. Recovered via `tools/eod_reimport.py`.
+- `rejections_YYYYMMDD.log` — Per-symbol gate rejection summary written at EOD by `GateResultLogger`.
 - `/logs/fyers_rest/` — Fyers SDK REST call logs
 **Consumers:** `main.py` (`RotatingFileHandler`), `analyzer.py` (signals.csv), `detector_performance_tracker.py`, `eod_analysis.py`, `emergency_logger.py`, `diagnostic_analyzer.py`
 
@@ -707,6 +724,7 @@ Thread Safety:
 **Files:**
 - `get_auth_url.py` — Prints Fyers OAuth URL for manual browser auth
 - `set_token.py` — Writes access token to `data/access_token.txt`
+- `eod_reimport.py` — **[Phase 44.8.9 NEW]** EOD recovery utility. Reads `logs/gate_fallback_YYYYMMDD.jsonl` (written during DB downtime) and re-imports records into `gate_results`. Run manually after market close: `python tools/eod_reimport.py`
 **Consumed by:** Operator (manual run only)
 
 ---
@@ -829,6 +847,7 @@ Defined at `main.py:138`. Assembled in `_initialize_runtime()`. Passed into ever
 | 16.5 | `broker.subscribe_scanner_universe()` → cache state → PRIMING; health monitor thread starts | WebSocket | — | — |
 | 16.6 | **[PRD-007]** `await asyncio.to_thread(broker.wait_for_cache_ready, 45.0)` — **BLOCKS** until ≥ 85% symbols have tick or 45s timeout | WebSocket | up to 45s | CRITICAL log + Telegram alert + REST fallback |
 | 16.7 | **[PRD-008]** `get_gate_result_logger().set_dsn(db_dsn)` — enables periodic 100-record flush to `gate_results` table | — | — | — |
+| 16.8 | **[Phase 44.8.9]** `broker.set_telegram(telegram_bot)` — wires Telegram into broker health monitor for thread-safe DEGRADED/RECOVERED/UNRECOVERABLE alerts from daemon thread | — | — | — |
 | 17 | **[P0 FIX]** `OrderManager(broker, bot, db, capital_manager)` constructed | — | — | — |
 | 18 | **[P0 FIX]** `focus_engine.order_manager = order_manager` injected | — | — | — |
 | 19 | **[P0 FIX]** `bot.order_manager = order_manager` injected | — | — | — |
@@ -884,7 +903,7 @@ Impact: This was the singular reason for 2 months of zero trade execution.
 |------|--------|
 | 1.1 | `fetch_nse_symbols()` — downloads NSE EQ master CSV, filters for EQ series (~2418 symbols) |
 | 1.2 | Check WS quote cache (<60s old); fall back to Batch REST requests (50 symbols/call) if empty/stale |
-| 1.3 | Pre-filter per symbol: gain% 6–18%, volume >100k, LTP >₹5, tick size valid, OI >0 |
+| 1.3 | Pre-filter per symbol: gain% 6–18%, volume >100k, LTP ≥ `config.SCANNER_MIN_LTP` (₹50), tick size valid, OI >0 |
 | 1.4 | Parallel `fetch_quality()` for all candidates (up to `SCANNER_PARALLEL_WORKERS=3` threads) |
 | 1.5 | `check_chart_quality()` — last 60 min 1-min candles: reject if >50% zero-volume or >50% doji candles |
 | 1.6 | Return filtered candidate list to `_trading_loop` |
@@ -1306,6 +1325,8 @@ Stores every gate evaluation: one row per candidate per scan.
 
 **Indexes:** `(session_date, symbol)`, `(session_date, verdict)`, `(session_date, first_fail_gate) WHERE first_fail_gate IS NOT NULL`
 
+**[Phase 44.8.9 — migration `v44_8_3_gate_results_g9_type_fix.sql`]** `g9_value` and `g11_value` columns were `NUMERIC` and have been altered to `VARCHAR(100)`. The HTF confluence gate (G9) and cooldown-spacing gate (G11) return string rejection reasons (e.g. `"NO_HTF_LOWER_HIGH"`), not numbers. The old NUMERIC type caused `decimal.ConversionSyntax` errors that silently dropped 2,300+ gate records per session.
+
 **Key diagnostic query:**
 ```sql
 SELECT symbol, first_fail_gate, COUNT(*) AS n
@@ -1346,6 +1367,7 @@ All keys from `config.py`. Loaded from `.env` via `python-dotenv` unless marked 
 | `CONFIDENCE_THRESHOLD_MEDIUM` | float | `2.0` | `multi_edge_detector.py` | MEDIUM threshold |
 | `LOG_MULTI_EDGE_DETAILS` | bool | `True` | `multi_edge_detector.py` | Log all detection attempts |
 | `SCANNER_PARALLEL_WORKERS` | int | `3` | `scanner.py` | Max concurrent candle quality-check threads |
+| `SCANNER_MIN_LTP` | float | `50.0` | `scanner.py` | Minimum LTP (₹) for symbol to pass Phase 1 pre-filter. Blocks all penny stocks from reaching order stage. |
 | `RVOL_MIN_CANDLES` | int | `20` | `analyzer.py` | Min minutes since open for valid RVOL |
 | `RVOL_VALIDITY_GATE_ENABLED` | bool | `True` | `analyzer.py` | Feature flag — set False to disable instantly |
 | `USE_SCALPER_RISK_MANAGEMENT` | bool | `False` | `trade_manager.py` | Scalper SL system master switch |
