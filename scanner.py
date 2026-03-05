@@ -193,6 +193,21 @@ class FyersScanner:
         3. Filter (Gain 6-18%, Vol > 100k, LTP > 5)
         4. Parallel fetch history + quality check for all candidates
         """
+        # PRD-3: DEGRADED MODE scan banner (fires every 10 scans while WS is severely degraded)
+        if hasattr(self, 'broker') and self.broker.is_cache_severely_degraded():
+            scan_num = self.broker.increment_degraded_scan_count()
+            if scan_num % 10 == 0:
+                recovery_attempts = self.broker._consecutive_reprime_failures
+                logger.warning(
+                    f"⚠️ SESSION DEGRADED MODE — Scan #{scan_num} running on stale REST data. "
+                    f"Signal quality compromised. WS recovery attempt {recovery_attempts}/3. "
+                    f"Consider restarting if this persists."
+                )
+        else:
+            # Reset banner count when recovered
+            if hasattr(self, 'broker') and getattr(self.broker, '_degraded_scan_count', 0) > 0:
+                self.broker.reset_degraded_scan_count()
+
         from concurrent.futures import ThreadPoolExecutor, as_completed
         import config
 

@@ -216,12 +216,22 @@ class FyersBrokerInterface:
         self._consecutive_reprime_failures: int = 0
         self._sub_ack = threading.Event()  # BUG-02: blocks until Fyers confirms subscription
         self._ws_cache_stop = False
+
+        # PRD-3: Telegram hook for WS cache alerts
+        # Set via broker.set_telegram(bot) from main.py after both are constructed
+        self._telegram_bot = None
+
+        # PRD-3: Severe-degraded tracking (fresh < 5% for > 30s triggers recovery)
+        self._severe_degraded_since: float = 0.0      # epoch when fresh% first dropped below 5%
+        self._last_degraded_telegram_alert: float = 0.0   # throttle Telegram spam
+        self._degraded_scan_count: int = 0            # incremented by scanner for banner log
         
         # Background tasks
         self.tasks = []
         
     async def initialize(self):
         logger.info("Initializing Fyers Broker Interface...")
+        self._loop = asyncio.get_running_loop()
 
         # Step 1: REST API — FATAL if fails
         try:
@@ -854,6 +864,36 @@ class FyersBrokerInterface:
         """
         return self._cache_ready_event.wait(timeout=timeout_sec)
 
+    def set_telegram(self, telegram_bot) -> None:
+        """
+        Wire Telegram bot for WS cache degradation alerts.
+        Called from main.py after both broker and bot are initialized:
+            broker.set_telegram(telegram_bot)
+        """
+        self._telegram_bot = telegram_bot
+        logger.info("[WS Cache] Telegram bot wired for cache degradation alerts.")
+
+    def is_cache_severely_degraded(self) -> bool:
+        """
+        Returns True when fresh% < 5% AND degradation has persisted > 30s.
+        Called by scanner.py and focus_engine.py for the scan-level DEGRADED banner.
+        """
+        return (
+            self._severe_degraded_since > 0
+            and (time.time() - self._severe_degraded_since) >= 30
+        )
+
+    def increment_degraded_scan_count(self) -> int:
+        """
+        Called by scanner on each scan while severely degraded.
+        Returns current count for banner modulo check.
+        """
+        self._degraded_scan_count += 1
+        return self._degraded_scan_count
+
+    def reset_degraded_scan_count(self) -> None:
+        self._degraded_scan_count = 0
+
     def cache_health_snapshot(self) -> dict:
         """Returns current cache health metrics dict."""
         import config as _cfg
@@ -977,30 +1017,105 @@ class FyersBrokerInterface:
     def _run_cache_health_monitor(self):
         """
         Background daemon thread. Runs every 30s.
-        Logs health metrics. Escalates CRITICAL and triggers re-prime if needed.
+        PRD-3 Fix: Added _severe_degraded_since tracking so that
+        fresh% < 5% (even when known% >= 90% from REST seed) triggers
+        recovery after 30s instead of being trapped in DEGRADED forever.
         """
         consecutive_critical = 0
+
         while self._health_monitor_running:
             if getattr(self, '_ws_cache_stop', False):
                 logger.info("[BROKER] Health monitor stopping on _ws_cache_stop flag.")
                 break
+
             time.sleep(30)
             try:
                 snap = self.cache_health_snapshot()
-                total = max(snap['total'], 1)
-                fresh_pct = snap['fresh'] / total
+                total        = max(snap['total'], 1)
+                fresh_pct    = snap['fresh'] / total
+                # PRD-3 FIX: Do NOT use known_pct to determine DEGRADED/CRITICAL.
+                # known_pct counts REST-seeded entries which remain "known" even
+                # when the WS is completely dead — causing infinite DEGRADED trap.
+                # Health is determined solely by fresh_pct (WS ticks within TTL).
                 known_pct = (snap['fresh'] + snap['stale'] + snap.get('seeded', 0)) / total
 
+                # ── Status Classification (PRD-3 Fixed) ──────────────────────
                 if fresh_pct >= 0.85:
                     status = "HEALTHY"
                     consecutive_critical = 0
-                elif known_pct >= 0.90 or fresh_pct >= 0.50:
+                    # Recovery: reset severe-degraded tracking
+                    if self._severe_degraded_since > 0:
+                        elapsed = time.time() - self._severe_degraded_since
+                        logger.info(
+                            f"[WS Cache] ✅ RECOVERED — fresh={fresh_pct:.1%} | "
+                            f"was degraded for {elapsed:.0f}s | returning to TIER 1 WS_CACHE"
+                        )
+                        if self._telegram_bot:
+                            try:
+                                import asyncio
+                                asyncio.run_coroutine_threadsafe(
+                                    self._telegram_bot.send_util_alert(
+                                        f"✅ *WS Cache RECOVERED*\n\n"
+                                        f"Fresh: {snap['fresh']}/{snap['total']} ({fresh_pct:.1%})\n"
+                                        f"Was degraded for {elapsed:.0f}s — returning to TIER 1 WS_CACHE"
+                                    ),
+                                    self._loop
+                                )
+                            except Exception:
+                                pass
+                        self._severe_degraded_since = 0.0
+                        self._degraded_scan_count = 0
+                    if self._consecutive_reprime_failures > 0:
+                        logger.info("[WS Cache] ✅ Cache recovered — resetting re-prime failure counter")
+                        self._consecutive_reprime_failures = 0
+
+                elif fresh_pct >= 0.50:
+                    # Genuinely degraded but not critical — no action, just log
                     status = "DEGRADED"
                     consecutive_critical = 0
-                else:
-                    status = "CRITICAL"
-                    consecutive_critical += 1
+                    # Only track severe degradation for < 5%
+                    if self._severe_degraded_since > 0:
+                        self._severe_degraded_since = 0.0   # recovered from severe
 
+                else:
+                    # fresh_pct < 50%
+                    # PRD-3 FIX: Was incorrectly classified as DEGRADED when known_pct >= 90%.
+                    # Now we check fresh_pct alone.
+                    if fresh_pct < 0.05:
+                        # Severe: < 5% fresh — this is the failure mode from 13:17:27
+                        status = "SEVERE_DEGRADED"
+                        consecutive_critical += 1
+                        if self._severe_degraded_since == 0.0:
+                            self._severe_degraded_since = time.time()
+                            logger.critical(
+                                f"[WS Cache] ⚠️ SEVERE DEGRADATION DETECTED — "
+                                f"fresh={fresh_pct:.1%} ({snap['fresh']}/{snap['total']}) | "
+                                f"known={known_pct:.1%} (mostly REST-seeded, WS is likely dead) | "
+                                f"monitoring for 30s before recovery attempt"
+                            )
+                            # First Telegram alert
+                            now = time.time()
+                            if self._telegram_bot and (now - self._last_degraded_telegram_alert) > 120:
+                                self._last_degraded_telegram_alert = now
+                                try:
+                                    import asyncio
+                                    asyncio.run_coroutine_threadsafe(
+                                        self._telegram_bot.send_util_alert(
+                                            f"⚠️ *WS Cache SEVERELY DEGRADED*\n\n"
+                                            f"Fresh: {snap['fresh']}/{snap['total']} ({fresh_pct:.1%})\n"
+                                            f"WS appears to have stopped pushing ticks.\n"
+                                            f"Auto-recovery will begin in 30s if not resolved."
+                                        ),
+                                        self._loop
+                                    )
+                                except Exception:
+                                    pass
+                    else:
+                        # 5–50% fresh: CRITICAL but not severe
+                        status = "CRITICAL"
+                        consecutive_critical += 1
+
+                # ── Log Health Line ───────────────────────────────────────────
                 logger.info(
                     f"[WS Cache] CACHE HEALTH | Fresh: {snap['fresh']}/{snap['total']} ({fresh_pct:.1%}) "
                     f"| Stale: {snap['stale']} | Seeded: {snap.get('seeded', 0)} | Missing: {snap['missing']} "
@@ -1008,17 +1123,69 @@ class FyersBrokerInterface:
                     f"| Known: {known_pct:.1%} | State: {snap['state']} | Status: {status}"
                 )
 
-                if status == "CRITICAL" and consecutive_critical >= 2:
+                # ── Recovery Trigger ──────────────────────────────────────────
+                # PRD-3 FIX: SEVERE_DEGRADED (< 5% fresh) after 30s triggers reprime.
+                # Previously only CRITICAL (< 50% AND known < 90%) triggered — never fired.
+                if self._severe_degraded_since > 0:
+                    elapsed_severe = time.time() - self._severe_degraded_since
+                    if elapsed_severe >= 30:
+                        logger.critical(
+                            f"[WS Cache] 🔄 SEVERE DEGRADED for {elapsed_severe:.0f}s "
+                            f"(fresh={fresh_pct:.1%}) — triggering auto-recovery"
+                        )
+                        now = time.time()
+                        if self._telegram_bot and (now - self._last_degraded_telegram_alert) > 120:
+                            self._last_degraded_telegram_alert = now
+                            attempt_num = self._consecutive_reprime_failures + 1
+                            try:
+                                import asyncio
+                                asyncio.run_coroutine_threadsafe(
+                                    self._telegram_bot.send_util_alert(
+                                        f"🔄 *WS Cache DEGRADED — Auto-Recovery*\n\n"
+                                        f"Fresh: {snap['fresh']}/{snap['total']} ({fresh_pct:.1%})\n"
+                                        f"Degraded for {elapsed_severe:.0f}s\n"
+                                        f"Attempt {attempt_num}/3"
+                                    ),
+                                    self._loop
+                                )
+                            except Exception:
+                                pass
+                        self._trigger_reprime()
+
+                # Old CRITICAL path (kept for 5–50% fresh range)
+                elif status == "CRITICAL" and consecutive_critical >= 2:
                     logger.critical(
                         f"[WS Cache] CACHE CRITICAL FOR 60s — Fresh only {fresh_pct:.1%}. Triggering re-prime."
                     )
                     self._trigger_reprime()
                     consecutive_critical = 0
 
-                # Reset failure counter on recovery
-                if status == "HEALTHY" and self._consecutive_reprime_failures > 0:
-                    logger.info("[WS Cache] ✅ Cache recovered — resetting re-prime failure counter")
-                    self._consecutive_reprime_failures = 0
+                # ── Unrecoverable Banner ──────────────────────────────────────
+                if self._consecutive_reprime_failures >= 3 and self._severe_degraded_since > 0:
+                    logger.critical(
+                        "[WS Cache] ⛔ UNRECOVERABLE after 3 attempts — "
+                        "continuing in HYBRID mode for session remainder. "
+                        "Consider manual restart."
+                    )
+                    now = time.time()
+                    if self._telegram_bot and (now - self._last_degraded_telegram_alert) > 300:
+                        self._last_degraded_telegram_alert = now
+                        try:
+                            import asyncio
+                            asyncio.run_coroutine_threadsafe(
+                                self._telegram_bot.send_util_alert(
+                                    f"⛔ *WS Cache UNRECOVERABLE*\n\n"
+                                    f"3 recovery attempts all failed.\n"
+                                    f"Bot is running on stale REST data (slow scans).\n"
+                                    f"⚠️ Consider manual restart."
+                                ),
+                                self._loop
+                            )
+                        except Exception:
+                            pass
+
+            except Exception as e:
+                logger.error(f"[WS Cache] Health monitor error: {e}")
 
             except Exception as e:
                 logger.error(f"[WS Cache] Health monitor error: {e}")

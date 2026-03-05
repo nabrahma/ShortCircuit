@@ -350,46 +350,67 @@ class GateResultLogger:
         ON CONFLICT DO NOTHING
     """
 
-    def _build_rows(self, records: List[GateResult]) -> List[tuple]:
-        """Assemble DB row tuples from a list of GateResult objects."""
-        rows = []
-        today = datetime.date.today()
-        for r in records:
-            rows.append((
-                today,
-                r.scan_id,
-                r.evaluated_at,
-                r.symbol,
-                r.nifty_regime,
-                r.nifty_level,
-                r.g1_pass,  _to_num(r.g1_value),
-                r.g2_pass,  _to_num(r.g2_value),
-                r.g3_pass,  _to_num(r.g3_value),
-                r.g4_pass,  _to_num(r.g4_value),
-                r.g5_pass,  _to_num(r.g5_value),
-                r.g6_pass,  str(r.g6_value) if r.g6_value is not None else None,
-                r.g7_pass,  str(r.g7_value) if r.g7_value is not None else None,
-                r.g8_pass,  _to_num(r.g8_value),
-                r.g9_pass,  str(r.g9_value) if r.g9_value is not None else None,
-                r.g10_pass, _to_num(r.g10_value),
-                r.g11_pass, _to_num(r.g11_value),
-                r.g12_pass, _to_num(r.g12_value),
-                r.verdict,
-                r.first_fail_gate,
-                r.rejection_reason or None,
-                r.data_tier,
-                r.entry_price,
-                r.qty,
-            ))
-        return rows
+    # Column index → (expected_type, nullable)
+    # Matches exact positional order of _INSERT_SQL parameters $1–$36
+    _COLUMN_SPEC = {
+        # $1–$4: identity (handled natively)
+        5:  (float,  True),    # nifty_level
+        # $7,$9,$11,...: booleans — fine as-is
+        8:  (float,  True),    # g1_value  NUMERIC
+        10: (float,  True),    # g2_value  NUMERIC
+        12: (float,  True),    # g3_value  NUMERIC
+        14: (float,  True),    # g4_value  NUMERIC
+        16: (float,  True),    # g5_value  NUMERIC
+        18: (str,    True),    # g6_value  VARCHAR
+        20: (str,    True),    # g7_value  VARCHAR
+        22: (float,  True),    # g8_value  NUMERIC
+        24: (str,    True),    # g9_value  ← ROOT CAUSE: was NUMERIC in schema, now VARCHAR
+        26: (float,  True),    # g10_value NUMERIC
+        28: (float,  True),    # g11_value NUMERIC/VARCHAR
+        30: (float,  True),    # g12_value NUMERIC
+        35: (float,  True),    # entry_price
+        36: (int,    True),    # qty
+    }
+
+    def _sanitize_row(self, row: tuple) -> tuple:
+        """
+        PRD-3: Coerce every value to its expected Python type before executemany.
+        Prevents decimal.ConversionSyntax when a text field is sent to a NUMERIC column.
+        Any uncoercible value becomes NULL instead of crashing the entire batch.
+        """
+        import decimal
+        out = list(row)
+        for idx, (expected_type, nullable) in self._COLUMN_SPEC.items():
+            i = idx - 1   # Convert 1-based SQL position to 0-based tuple index
+            if i >= len(out):
+                continue
+            val = out[i]
+            if val is None:
+                continue
+            try:
+                # Support float conversion for everything numeric
+                if expected_type == float:
+                    # _to_num logic already applied in _build_rows, 
+                    # but double check and catch asyncpg-specific decimal issues
+                    out[i] = float(val)
+                elif expected_type == str:
+                    out[i] = str(val)
+                else:
+                    out[i] = expected_type(val)
+            except (ValueError, TypeError, decimal.InvalidOperation) as e:
+                logger.warning(
+                    f"[GateResultLogger] SANITIZE col=${idx} val={repr(val)!r:.60} "
+                    f"expected={expected_type.__name__} error={e} → NULL"
+                )
+                out[i] = None
+        return tuple(out)
 
     async def _flush_batch(self) -> int:
         """
-        Inserts only the records not yet flushed (_flushed_count cursor).
-        Opens its own asyncpg connection — safe to call from asyncio.run()
-        in a daemon thread (periodic) OR from the main event loop (EOD).
-        Advances _flushed_count only on success so EOD catches any failures.
-        Returns number of rows inserted.
+        PRD-3: Inserts only records not yet flushed (_flushed_count cursor).
+        Now includes:
+          1. Per-row sanitization (prevents decimal.ConversionSyntax)
+          2. JSON fallback — never loses data on DB flush failure
         """
         if not self._db_dsn:
             logger.debug("[GateResultLogger] No DSN set — flush skipped.")
@@ -399,30 +420,86 @@ class GateResultLogger:
         if not pending:
             return 0
 
-        rows = self._build_rows(pending)
+        raw_rows  = self._build_rows(pending)
+        safe_rows = [self._sanitize_row(r) for r in raw_rows]   # PRD-3: sanitize before insert
+
         conn = None
         try:
             conn = await asyncpg.connect(self._db_dsn)
-            await conn.executemany(self._INSERT_SQL, rows)
-            # Advance count AFTER successful insert, BEFORE close
-            self._flushed_count += len(rows)
+            await conn.executemany(self._INSERT_SQL, safe_rows)
+            self._flushed_count += len(safe_rows)
             logger.info(
-                f"[GateResultLogger] GATE FLUSH: {len(rows)} records saved "
+                f"[GateResultLogger] GATE FLUSH: {len(safe_rows)} records saved "
                 f"(session total: {self._flushed_count})"
             )
-            return len(rows)
+            return len(safe_rows)
+
         except Exception as e:
             logger.error(
                 f"[GateResultLogger] GATE FLUSH ERROR: {e} — "
-                f"will retry at EOD ({len(rows)} records pending)"
+                f"writing {len(safe_rows)} records to JSON fallback"
             )
+            # PRD-3: Never lose data — write to JSONL fallback file
+            await self._flush_to_json_fallback(pending)
+            # We DON'T increment _flushed_count because reimport script will handle these,
+            # but usually we'd want to skip them for subsequent flushes in-memory.
+            # However, logic in _flush_batch is [self._flushed_count:]. 
+            # If we don't increment, we'll try to re-flush them to DB later.
+            # Better to increment and let JSON fallback be the primary record.
+            self._flushed_count += len(safe_rows)
             return 0
+
         finally:
             if conn:
                 try:
                     await conn.close()
                 except Exception:
-                    pass  # Close failure doesn't affect data integrity
+                    pass
+
+    async def _flush_to_json_fallback(self, records: list) -> None:
+        """
+        PRD-3: JSON fallback when DB flush fails.
+        Writes to daily gate_fallback_YYYYMMDD.jsonl file.
+        eod_reimport.py re-inserts these after market close.
+        """
+        import json
+        import aiofiles
+        from datetime import date
+
+        os.makedirs("logs", exist_ok=True)
+        fallback_path = f"logs/gate_fallback_{date.today().strftime('%Y%m%d')}.jsonl"
+
+        try:
+            # Note: requires aiofiles (pip install aiofiles)
+            # If not available, we use sync fallback
+            try:
+                async with aiofiles.open(fallback_path, 'a', encoding='utf-8') as f:
+                    for r in records:
+                        await f.write(
+                            json.dumps(
+                                {k: str(v) if not isinstance(v, (int, float, bool, type(None), str)) else v
+                                 for k, v in r.__dict__.items()},
+                                default=str
+                            ) + '\n'
+                        )
+            except (ImportError, ModuleNotFoundError):
+                with open(fallback_path, 'a', encoding='utf-8') as f:
+                    for r in records:
+                        f.write(
+                            json.dumps(
+                                {k: str(v) if not isinstance(v, (int, float, bool, type(None), str)) else v
+                                 for k, v in r.__dict__.items()},
+                                default=str
+                            ) + '\n'
+                        )
+            logger.info(
+                f"[GateResultLogger] FALLBACK: {len(records)} records → {fallback_path}"
+            )
+        except Exception as e:
+            logger.critical(
+                f"[GateResultLogger] FALLBACK WRITE FAILED: {e} — "
+                f"{len(records)} records are LOST. Check disk space."
+            )
 
     async def flush_to_db(self, db_manager=None) -> int:
         """

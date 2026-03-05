@@ -206,6 +206,8 @@ async def _initialize_runtime() -> RuntimeContext:
         emergency_logger=None,
     )
     await broker.initialize()
+    # PRD-3: Wire Telegram bot to broker for WS cache alerts
+    broker.set_telegram(bot)
 
     # ── PRD-007: Phase 44.7 + Startup Gate ───────────────────────────
     # 1. Create scanner with broker reference
