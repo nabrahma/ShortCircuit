@@ -293,13 +293,14 @@ class FocusEngine:
                 # A. CHECK TRIGGER (VALIDATION CONFIRMED)
                 # For Short: LTP < Trigger (Signal Low)
                 if ltp < trigger_price:
-                    # ── PRD-008: G10-G12 Recording (SIGNAL FIRED path) ───────
+
+                    # ── PRD-008: G10-G12 Recording ──────────────────────────────
                     _gr = pending.get('data', {}).get('_gate_result')
                     if _gr is not None:
-                        _gr.g10_pass  = True   # G10 Cooldown: passed (signal was queued successfully)
-                        _gr.g11_pass  = True   # G11 Capital: assumed available (enter_position will catch)
-                        _gr.g12_pass  = True   # G12 Conviction: LTP broke trigger
-                        _gr.g12_value = round(trigger_price - ltp, 4)  # distance below trigger
+                        _gr.g10_pass  = True
+                        _gr.g11_pass  = True   # Will re-evaluate below
+                        _gr.g12_pass  = True
+                        _gr.g12_value = round(trigger_price - ltp, 4)
 
                     _queue_validation_update(
                         outcome='VALIDATED',
@@ -310,41 +311,99 @@ class FocusEngine:
                         }
                     )
 
-                    # =========================================================
-                    # AUTO MODE GATE (Phase 42.2.6)
-                    # =========================================================
+                    # ── AUTO MODE GATE ───────────────────────────────────────────
                     auto_enabled = False
                     if hasattr(self, 'telegram_bot') and self.telegram_bot:
                         auto_enabled = self.telegram_bot.is_auto_mode()
-                    
+
                     if not auto_enabled:
-                         # PRD-008: log as SUPPRESSED (auto mode off)
-                         if _gr is not None:
-                             _gr.verdict = "SUPPRESSED"
-                             _gr.rejection_reason = "Auto mode OFF — signal alerted manually"
-                             get_gate_result_logger().record(_gr)
+                        if _gr is not None:
+                            _gr.verdict = "SUPPRESSED"
+                            _gr.rejection_reason = "Auto mode OFF — signal alerted manually"
+                            get_gate_result_logger().record(_gr)
+                        logger.info(f"📊 SIGNAL (ALERT ONLY): {symbol} BROKE TRIGGER @ {ltp} | Auto mode OFF")
+                        if self.telegram_bot:
+                            msg = (
+                                f"📊 **SIGNAL TRIGGERED (MANUAL)**\n\n"
+                                f"Symbol: `{symbol}`\n"
+                                f"Trigger: {trigger_price}\n"
+                                f"LTP: {ltp}\n"
+                                f"**Action: Auto-Trade OFF 🛑**\n\n"
+                                f"Enable with `/auto on` for NEXT signal."
+                            )
+                            asyncio.create_task(self.telegram_bot.send_alert(msg))
+                        del self.pending_signals[symbol]
+                        continue
 
-                         logger.info(f"📊 SIGNAL (ALERT ONLY): {symbol} BROKE TRIGGER @ {ltp} | Auto mode OFF")
-                         
-                         if self.telegram_bot:
-                             msg = (
-                                 f"📊 **SIGNAL TRIGGERED (MANUAL)**\n\n"
-                                 f"Symbol: `{symbol}`\n"
-                                 f"Trigger: {trigger_price}\n"
-                                 f"LTP: {ltp}\n"
-                                 f"**Action: Auto-Trade OFF 🛑**\n\n"
-                                 f"Enable with `/auto on` for NEXT signal."
-                             )
-                             asyncio.create_task(self.telegram_bot.send_alert(msg))
-                             
-                         del self.pending_signals[symbol]
-                         continue  # BUG R1 FIX: Process next symbol instead of exiting loop
+                    logger.info(f"✅ [VALIDATED] {symbol} broke {trigger_price} @ {ltp}. Checking capital...")
 
-                    logger.info(f"✅ [VALIDATED] {symbol} broke {trigger_price} @ {ltp}. EXECUTING!")
-                    
-                    # =========================================================
-                    # FIX #3a: SLOT GUARD — check BEFORE executing
-                    # =========================================================
+                    # ────────────────────────────────────────────────────────────────
+                    # CAPITAL SLOT CHECK (Phase 44.6)
+                    # NEW BEHAVIOUR: Signal is fully observed even when capital is locked.
+                    # Show Telegram alert just like a real entry — but with "NOT TAKEN" footer.
+                    # Log to gate_result_logger as OBSERVED_NO_CAPITAL for ML training.
+                    # ────────────────────────────────────────────────────────────────
+                    capital = getattr(self.order_manager, 'capital', None) if self.order_manager else None
+
+                    if capital and not capital.is_slot_free:
+                        active_sym = capital.active_symbol or "unknown"
+                        cap_status = capital.get_slot_status()
+
+                        logger.info(
+                            f"📊 [OBSERVED — NOT TAKEN] {symbol} | "
+                            f"trigger broken @ ₹{ltp} (trigger=₹{trigger_price}) | "
+                            f"capital slot occupied by {active_sym}"
+                        )
+
+                        # Send same-format signal alert but with NOT TAKEN footer
+                        if self.telegram_bot:
+                            sig_data = pending.get('data', {})
+                            asyncio.create_task(self.telegram_bot.send_alert(
+                                f"📊 **SIGNAL PASSED — NOT TAKEN**\n\n"
+                                f"Symbol:   `{symbol}`\n"
+                                f"Trigger:  ₹{trigger_price} → LTP ₹{ltp}\n"
+                                f"Signal:   {sig_data.get('signal_type', 'SHORT')}\n"
+                                f"Gain:     {sig_data.get('day_gain_pct', 0):.2f}%\n"
+                                f"RVOL:     {sig_data.get('rvol', 0):.1f}x\n\n"
+                                f"❌ *Not Executed — Capital Locked*\n"
+                                f"Active:   `{active_sym}`\n"
+                                f"Margin:   ₹{cap_status['real_margin']:.2f}\n"
+                                f"Last Sync: {cap_status['last_sync']}\n\n"
+                                f"_Will trade again after `{active_sym}` position closes._"
+                            ))
+
+                        # Log as OBSERVED_NO_CAPITAL for ML data (not REJECTED — it genuinely passed)
+                        if _gr is not None:
+                            _gr.g11_pass = False
+                            _gr.verdict = "OBSERVED_NO_CAPITAL"
+                            _gr.rejection_reason = f"Capital slot occupied by {active_sym} — signal valid but not executed"
+                            get_gate_result_logger().record(_gr)
+
+                        del self.pending_signals[symbol]
+                        continue  # Move to next pending symbol
+
+                    # ── EXECUTION COOLDOWN CHECK (Phase 44.6) ───────────────────────
+                    if self.order_manager:
+                        cooldown_active, remaining_secs = self.order_manager.is_exec_cooldown_active(symbol)
+                        if cooldown_active:
+                            logger.info(
+                                f"⏳ [EXEC COOLDOWN] {symbol} | {remaining_secs}s remaining | "
+                                f"skipping execution but monitoring continues"
+                            )
+                            # Don't delete from pending — keep monitoring
+                            # (cooldown protects execution but not observation)
+                            if self.telegram_bot:
+                                asyncio.create_task(self.telegram_bot.send_alert(
+                                    f"⏳ **SIGNAL PASSED — COOLDOWN ACTIVE**\n\n"
+                                    f"Symbol: `{symbol}`\n"
+                                    f"Trigger: ₹{trigger_price} → LTP ₹{ltp}\n"
+                                    f"⏳ Execution blocked: {remaining_secs // 60}m {remaining_secs % 60}s remaining\n"
+                                    f"_(Previous entry attempt failed)_"
+                                ))
+                            del self.pending_signals[symbol]
+                            continue
+
+                    # ── SLOT GUARD (Signal Manager) ──────────────────────────────────
                     analyzer = getattr(self, 'analyzer', None)
                     if analyzer and hasattr(analyzer, 'signal_manager'):
                         can_trade, reason = analyzer.signal_manager.can_signal(symbol)
@@ -355,9 +414,9 @@ class FocusEngine:
                                 _gr.rejection_reason = f"Slot guard: {reason}"
                                 get_gate_result_logger().record(_gr)
                             del self.pending_signals[symbol]
-                            continue  # BUG R1 FIX: Process next symbol instead of exiting loop
+                            continue
 
-                    # Execute via OrderManager — MUST be initialized (P0 fix)
+                    # ── ORDER MANAGER GUARD ──────────────────────────────────────────
                     if self.order_manager is None:
                         if _gr is not None:
                             _gr.verdict = "DATA_ERROR"
@@ -374,16 +433,17 @@ class FocusEngine:
                             ))
                         raise RuntimeError(f"OrderManager not initialized for {symbol}")
 
-                    # FIX #1: await the async enter_position call
+                    logger.info(f"🚀 [EXECUTING] {symbol} | trigger=₹{trigger_price} ltp=₹{ltp}")
+
+                    # FIX: await the async enter_position call
                     pos = await self.order_manager.enter_position(pending['data'])
                     logger.info(f"[DEBUG] enter_position returned type={type(pos)} value={pos}")
 
-                    # FIX #3b: Only burn slot if order actually returned a valid dict
                     if pos and isinstance(pos, dict):
                         try:
                             signal_data = pending.get('data', {})
                             if analyzer and hasattr(analyzer, 'signal_manager'):
-                                sl = signal_data.get('stop_loss', 0.0)
+                                sl      = signal_data.get('stop_loss', 0.0)
                                 pattern = signal_data.get('pattern', '')
                                 analyzer.signal_manager.record_signal(symbol, ltp, sl, pattern)
                                 remaining = analyzer.signal_manager.get_remaining_signals()
@@ -391,23 +451,23 @@ class FocusEngine:
                         except Exception as _sm_err:
                             logger.warning(f"[SignalManager] record_signal failed (non-fatal): {_sm_err}")
 
-                        # PRD-008: SIGNAL_FIRED — record final outcome
                         if _gr is not None:
-                            _gr.verdict = "SIGNAL_FIRED"
+                            _gr.verdict     = "SIGNAL_FIRED"
                             _gr.entry_price = pos.get('entry_price') or pos.get('entry')
-                            _gr.qty = pos.get('qty')
+                            _gr.qty         = pos.get('qty')
                             get_gate_result_logger().record(_gr)
                         self.start_focus(symbol, pos)
+
                     else:
-                        # Order returned None — do NOT burn slot
                         logger.warning(f"⚠️ [EXECUTION FAILED] {symbol} — enter_position returned: {pos}")
                         if self.telegram_bot:
                             asyncio.create_task(self.telegram_bot.send_alert(
-                                f"⚠️ ORDER FAILED: {symbol} — broker returned {pos}"
+                                f"⚠️ ORDER FAILED: {symbol} — broker returned {pos}\n"
+                                f"⏳ 15-min execution cooldown set."
                             ))
-                    
+
                     del self.pending_signals[symbol]
-                    continue  # BUG R1 FIX: Process next symbol instead of exiting loop
+                    continue
                     
                 # B. CHECK INVALIDATION (STOP HIT BEFORE ENTRY)
                 elif ltp > inval_price:

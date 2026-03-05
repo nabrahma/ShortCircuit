@@ -177,16 +177,17 @@ async def test_order_manager_backward_compatible():
     broker_mock.get_order_status.return_value = 'FILLED'
     broker_mock.get_ltp.return_value = 100.0
 
-    # Phase 44.4: capital_manager.get_status() now called for position sizing
-    capital_mock.get_status.return_value = {
-        'base_capital': 1800.0,
-        'leverage': 5.0,
-        'total_buying_power': 9000.0,
-        'available': 9000.0,
-        'in_use': 0.0,
-        'positions_count': 0,
-        'positions': {}
+    capital_mock.compute_qty.return_value = (2, 1000.0, 200.0)
+    capital_mock.get_slot_status.return_value = {
+        'in_use': True,
+        'symbol': 'NSE:SBIN-EQ',
+        'real_margin': 1000.0,
+        'since': '2023-01-01T12:00:00',
+        'cost': 1000.0
     }
+    capital_mock.acquire_slot = AsyncMock()
+    capital_mock.release_slot = AsyncMock()
+    capital_mock._real_margin = 1800.0
 
     # Phase 44.4: telegram_bot may receive send_alert calls (awaited in order_manager)
     alert_mock.send_alert = AsyncMock()

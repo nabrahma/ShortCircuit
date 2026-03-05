@@ -330,7 +330,8 @@ class TradeManager:
                     logger.info(f"Entry SUCCESS: {resp_entry}")
 
                     # Phase 42.1: Allocate capital AFTER successful entry
-                    self.capital_manager.allocate(symbol, required_cost)
+                    # Phase 44.6: acquire_slot logic runs after fill now, removing direct allocate
+                    asyncio.create_task(self.capital_manager.acquire_slot(symbol))
 
                     # Phase 42.1: Log signal as EXECUTED
                     self._log_signal_executed(signal, qty, ltp)
@@ -484,12 +485,12 @@ class TradeManager:
         elif broker_pos['net_qty'] == 0:
             logger.info(f"[EMERGENCY] Position already flat for {symbol} — skipping exit")
             self._cleanup_sl_tracking(symbol)
-            self.capital_manager.release(symbol)  # Phase 42.1
+            asyncio.create_task(self.capital_manager.release_slot(broker=self.fyers))  # Phase 44.6
             return
         elif broker_pos['net_qty'] > 0:
             logger.critical(f"🚨🚨 [EMERGENCY] {symbol} is LONG {broker_pos['net_qty']} — WRONG SIDE! Manual intervention needed!")
             self._cleanup_sl_tracking(symbol)
-            self.capital_manager.release(symbol)  # Phase 42.1
+            asyncio.create_task(self.capital_manager.release_slot(broker=self.fyers))  # Phase 44.6
             return
 
         # Confirmed we're short — safe to exit
@@ -514,7 +515,7 @@ class TradeManager:
             logger.critical(f"[CRIT] EMERGENCY EXIT FAILED for {symbol}: {e}")
         finally:
             self._cleanup_sl_tracking(symbol)
-            self.capital_manager.release(symbol)  # Phase 42.1
+            asyncio.create_task(self.capital_manager.release_slot(broker=self.fyers))  # Phase 44.6
             # Phase 42.3.4: Mark Dirty
             if self.reconciliation_engine: self.reconciliation_engine.mark_dirty()
 
@@ -664,7 +665,7 @@ class TradeManager:
                     self._cleanup_sl_tracking(symbol)
 
                     # Phase 42.1: Release capital
-                    self.capital_manager.release(symbol)
+                    asyncio.create_task(self.capital_manager.release_slot(broker=self.fyers))
                     
                     # Phase 42.3.4: Mark Dirty
                     if self.reconciliation_engine: self.reconciliation_engine.mark_dirty()

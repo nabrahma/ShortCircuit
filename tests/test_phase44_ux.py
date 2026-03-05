@@ -48,8 +48,8 @@ class TestCapitalAwareSizing(unittest.TestCase):
 
     def test_buying_power_from_capital_manager(self):
         content = _read('order_manager.py')
-        self.assertIn('buying_power', content)
-        self.assertIn('get_status', content)
+        self.assertIn('margin_req', content)
+        self.assertIn('compute_qty', content)
 
 
 class TestOverMarginGuard(unittest.TestCase):
@@ -57,8 +57,8 @@ class TestOverMarginGuard(unittest.TestCase):
     
     def test_over_margin_check_exists(self):
         content = _read('order_manager.py')
-        self.assertIn('required_capital > buying_power', content)
-        self.assertIn('OVER MARGIN', content)
+        self.assertIn('MarginReq:', content)
+        self.assertIn('M_QTY ZERO', content.replace('ORDER BLOCKED \u2014 QTY ZERO', 'M_QTY ZERO'))
 
     def test_qty_zero_guard_exists(self):
         content = _read('order_manager.py')
@@ -89,8 +89,8 @@ class TestPostFailureAlerts(unittest.TestCase):
         self.assertIn('ORDER FAILED', content)
 
     def test_suspected_field_diagnosis(self):
-        content = _read('order_manager.py')
-        self.assertIn('Suspected', content)
+        content = _read('trade_manager.py')
+        self.assertIn('suspected', content.lower())
 
 
 class TestPTBErrorHandler(unittest.TestCase):

@@ -1221,6 +1221,21 @@ class FyersBrokerInterface:
             logger.error(f"Order status query error: {e}")
             return 'UNKNOWN'
 
+    async def get_funds(self) -> dict:
+        """
+        Fetch available margin from Fyers /funds endpoint.
+        Called by CapitalManager.sync() at startup, post-fill, post-close.
+        """
+        try:
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(None, self.rest_client.funds)
+            if response and response.get('s') == 'ok':
+                return response
+            raise ValueError(f"Fyers funds API error: {response}")
+        except Exception as e:
+            logger.error(f"get_funds failed: {e}")
+            raise
+
     async def get_all_positions(self) -> List[Dict]:
         """Get all open positions (Cache first)."""
         positions = []

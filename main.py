@@ -162,7 +162,6 @@ async def _initialize_runtime() -> RuntimeContext:
         raise RuntimeError("Fyers authentication failed.")
 
     capital_manager = CapitalManager(
-        base_capital=getattr(config, "CAPITAL_PER_TRADE", 1800.0),
         leverage=getattr(config, "INTRADAY_LEVERAGE", 5.0),
     )
     startup_recovery = StartupRecovery(fyers_client)
@@ -311,6 +310,8 @@ async def _initialize_runtime() -> RuntimeContext:
         telegram_bot=bot,
     )
 
+    await order_manager.startup_reconciliation()
+
     return RuntimeContext(
         fyers_client=fyers_client,
         access_token=access_token,
@@ -356,6 +357,10 @@ async def _trading_loop(shutdown_event: asyncio.Event, ctx: RuntimeContext):
 
     while not shutdown_event.is_set():
         try:
+            if hasattr(ctx.capital_manager, "_last_sync") and ctx.capital_manager._last_sync:
+                from datetime import datetime
+                if (datetime.utcnow() - ctx.capital_manager._last_sync).total_seconds() > 300:
+                    await ctx.capital_manager.sync(ctx.broker)
             if not ctx.market_session.should_trade_now():
                 current_state = ctx.market_session.get_current_state()
                 if current_state in ("POST_MARKET", "EOD_WINDOW"):

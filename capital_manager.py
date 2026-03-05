@@ -1,132 +1,271 @@
 """
-Phase 42.1: Capital Management Module
+Phase 44.6: Capital Management Module — Live Fyers Sync Edition
 
-Tracks available capital with 5× intraday leverage.
-Prevents orders when funds are insufficient.
-
-Usage:
-    cm = CapitalManager(base_capital=1800.0, leverage=5.0)
-    check = cm.can_afford('NSE:RELIANCE-EQ', 2800.0)
-    if check['allowed']:
-        # place order...
-        cm.allocate('NSE:RELIANCE-EQ', 2800.0)
-    # on exit:
-    cm.release('NSE:RELIANCE-EQ')
+Key changes from Phase 42.1:
+- Removed hardcoded base_capital. Real margin fetched from Fyers GET /funds.
+- compute_qty() for full margin utilization (replaces floor(available/ltp)).
+- acquire_slot() / release_slot() for single-position enforcement.
+- Soft observation mode: slot check is SEPARATE from execution block.
+  Callers can observe capital status without being hard-blocked.
+- Backward-compatible get_status() / can_afford() kept for legacy callers.
 """
 
+import asyncio
 import logging
+from datetime import datetime
+from math import floor
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
 
 class CapitalManager:
     """
-    Simple capital tracker with 5× leverage.
-    Prevents orders when funds insufficient.
+    Live-synced capital tracker.
+    Source of truth: Fyers GET /funds → available_margin.
+    NOT the hardcoded base_capital from config.
     """
 
-    def __init__(self, base_capital: float = 1800.0, leverage: float = 5.0):
-        """
-        Args:
-            base_capital: Your actual capital (₹1,800)
-            leverage: Fixed at 5.0 (NSE intraday)
-        """
-        self.base_capital = base_capital
+    def __init__(self, leverage: float = 5.0):
         self.leverage = leverage
-        self.total_buying_power = base_capital * leverage  # ₹9,000
-        self.available = self.total_buying_power
+        self._real_margin: float = 0.0        # always from Fyers, never hardcoded
+        self._last_sync: Optional[datetime] = None
+        self._position_active: bool = False
+        self._active_symbol: Optional[str] = None
+        self._lock = asyncio.Lock()
 
-        # Track active positions: {symbol: capital_allocated}
-        self.positions = {}
+        logger.info(
+            f"💰 Capital Manager initialized | leverage={leverage}x | "
+            f"real_margin=PENDING (call sync() before trading)"
+        )
 
-        logger.info(f"💰 Capital Manager initialized:")
-        logger.info(f"   Base: ₹{base_capital:.2f}")
-        logger.info(f"   Leverage: {leverage}×")
-        logger.info(f"   Buying Power: ₹{self.total_buying_power:.2f}")
+    # ─────────────────────────────────────────────────────────────────────────
+    # Properties
+    # ─────────────────────────────────────────────────────────────────────────
+
+    @property
+    def buying_power(self) -> float:
+        return self._real_margin * self.leverage
+
+    @property
+    def is_slot_free(self) -> bool:
+        return not self._position_active
+
+    @property
+    def active_symbol(self) -> Optional[str]:
+        return self._active_symbol
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Fyers Sync
+    # ─────────────────────────────────────────────────────────────────────────
+
+    async def sync(self, broker) -> float:
+        """
+        Pull actual available_margin from Fyers.
+
+        Call schedule:
+          - Session start (before first scan)
+          - After every confirmed fill
+          - After every position close (SL/TP/manual)
+          - Every 5 minutes in health monitor heartbeat
+
+        Returns: real_margin (float)
+        """
+        async with self._lock:
+            try:
+                funds = await broker.get_funds()
+                margin = self._parse_fyers_funds(funds)
+                self._real_margin = margin
+                self._last_sync = datetime.utcnow()
+
+                logger.info(
+                    f"💰 CAPITAL SYNC | real_margin=₹{self._real_margin:.2f} | "
+                    f"buying_power=₹{self.buying_power:.2f} | "
+                    f"slot={'OCCUPIED → ' + (self._active_symbol or '?') if self._position_active else 'FREE'} | "
+                    f"synced_at={self._last_sync.strftime('%H:%M:%S')}"
+                )
+                return self._real_margin
+
+            except Exception as e:
+                logger.error(
+                    f"💰 CAPITAL SYNC FAILED: {e} | "
+                    f"keeping last value ₹{self._real_margin:.2f}"
+                )
+                return self._real_margin
+
+    def _parse_fyers_funds(self, funds: dict) -> float:
+        """
+        Parse Fyers /funds response — handles multiple API response shapes.
+
+        Fyers v3 /funds returns:
+          { "s": "ok", "fund_limit": [
+              {"id": 1, "title": "Total Balance",     "equityAmount": 1800.00},
+              {"id": 2, "title": "Available Balance", "equityAmount": 1700.00},
+              ...
+          ]}
+
+        We want id=2 "Available Balance".
+        """
+        if not isinstance(funds, dict) or funds.get('s') != 'ok':
+            raise ValueError(f"Fyers funds response invalid: {funds}")
+
+        # Pattern 1: fund_limit list (Fyers v3 standard)
+        for item in funds.get('fund_limit', []):
+            # id=2 is "Available Balance" in Fyers v3
+            if item.get('id') == 2 or 'available' in str(item.get('title', '')).lower():
+                val = float(item.get('equityAmount', 0) or 0)
+                if val > 0:
+                    return val
+
+        # Pattern 2: equity dict (some Fyers SDK wrappers)
+        eq = funds.get('equity', {})
+        if isinstance(eq, dict):
+            for key in ('available_margin', 'availableMargin', 'available'):
+                if key in eq:
+                    return float(eq[key] or 0)
+
+        # Pattern 3: flat dict
+        for key in ('available_margin', 'availableMargin', 'available_balance'):
+            if key in funds:
+                return float(funds[key] or 0)
+
+        raise ValueError(f"Cannot parse available margin from Fyers funds: {funds}")
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Sizing
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def compute_qty(self, symbol: str, ltp: float) -> tuple:
+        """
+        Compute maximum qty for FULL margin utilization.
+
+        Uses real Fyers margin (not virtual/hardcoded).
+        Applies 2% safety buffer to avoid Fyers code -50.
+
+        Returns: (qty: int, cost: float, margin_required: float)
+
+        Example on ₹1,700 account:
+          LTFOODS @ ₹407 → buying_power=₹8,500
+          raw=20.88 → qty=20 → cost=₹8,140 → margin_req=₹1,628
+          utilization = 1628/1700 = 95.8%
+        """
+        if ltp <= 0 or self._real_margin <= 0:
+            return 0, 0.0, 0.0
+
+        safety_cap = self._real_margin * 0.98   # 2% safety buffer
+        raw_qty = self.buying_power / ltp
+        qty = int(floor(raw_qty))
+
+        # Walk down until margin fits within safety cap
+        while qty > 0:
+            cost = qty * ltp
+            margin_req = cost / self.leverage
+            if margin_req <= safety_cap:
+                utilization = (margin_req / self._real_margin) * 100
+                logger.info(
+                    f"💰 SIZING {symbol} | real_margin=₹{self._real_margin:.2f} "
+                    f"buying_power=₹{self.buying_power:.2f} | ltp=₹{ltp:.2f} "
+                    f"raw={raw_qty:.2f} → qty={qty} | cost=₹{cost:.2f} "
+                    f"margin_req=₹{margin_req:.2f} | utilization={utilization:.1f}%"
+                )
+                return qty, cost, margin_req
+            qty -= 1
+
+        logger.warning(
+            f"💰 SIZING {symbol} — ZERO QTY | "
+            f"real_margin=₹{self._real_margin:.2f} ltp=₹{ltp:.2f} "
+            f"(stock costs more than available margin)"
+        )
+        return 0, 0.0, 0.0
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Slot Management (Single-Position Architecture)
+    # ─────────────────────────────────────────────────────────────────────────
+
+    async def acquire_slot(self, symbol: str):
+        """
+        Lock capital slot after confirmed fill.
+        Call AFTER broker confirms fill, BEFORE SL placement.
+        """
+        async with self._lock:
+            if self._position_active:
+                raise RuntimeError(
+                    f"Slot occupied by {self._active_symbol} — "
+                    f"cannot acquire for {symbol}"
+                )
+            self._position_active = True
+            self._active_symbol = symbol
+            logger.info(
+                f"💰 CAPITAL SLOT ACQUIRED → {symbol} | "
+                f"margin_committed=₹{self._real_margin:.2f} | "
+                f"all new entries BLOCKED until position closes"
+            )
+
+    async def release_slot(self, broker=None):
+        """
+        Release capital slot after SL/TP/manual exit.
+        Re-syncs Fyers margin if broker is provided.
+        """
+        async with self._lock:
+            released = self._active_symbol
+            self._position_active = False
+            self._active_symbol = None
+            logger.info(f"💰 CAPITAL SLOT RELEASED ← {released}")
+
+        # Sync outside lock — avoids deadlock, gets fresh margin for next trade
+        if broker:
+            await self.sync(broker)
+
+    def get_slot_status(self) -> dict:
+        """Rich status dict — used in Telegram capital alerts."""
+        return {
+            'slot_free': self.is_slot_free,
+            'active_symbol': self._active_symbol,
+            'real_margin': self._real_margin,
+            'buying_power': self.buying_power,
+            'leverage': self.leverage,
+            'last_sync': self._last_sync.strftime('%H:%M:%S') if self._last_sync else 'NEVER',
+        }
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Legacy Compatibility (keeps existing callers working)
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def get_status(self) -> dict:
+        """Legacy-compatible — used by order_manager for buying_power lookup."""
+        return {
+            'base_capital': self._real_margin,
+            'leverage': self.leverage,
+            'total_buying_power': self.buying_power,
+            'available': self.buying_power if self.is_slot_free else 0.0,
+            'in_use': self.buying_power if not self.is_slot_free else 0.0,
+            'positions_count': 1 if self._position_active else 0,
+            'active_symbol': self._active_symbol,
+        }
 
     def can_afford(self, symbol: str, cost: float) -> dict:
-        """
-        Check if we can afford a trade.
-
-        Args:
-            symbol: NSE:SYMBOL-EQ
-            cost: Required capital (LTP × qty)
-
-        Returns:
-            {
-                'allowed': bool,
-                'reason': str,
-                'available': float,
-                'required': float
-            }
-        """
-        # Check 1: Already holding this symbol?
-        if symbol in self.positions:
+        """Legacy-compatible — kept for backward compat. Use get_slot_status() for new code."""
+        if not self.is_slot_free:
             return {
                 'allowed': False,
-                'reason': 'ALREADY_HOLDING',
-                'available': self.available,
-                'required': cost
+                'reason': 'CAPITAL_LOCKED',
+                'available': 0.0,
+                'required': cost,
+                'active_symbol': self._active_symbol,
             }
-
-        # Check 2: Sufficient capital?
-        if cost > self.available:
+        if cost > self.buying_power:
             return {
                 'allowed': False,
                 'reason': 'INSUFFICIENT_FUNDS',
-                'available': self.available,
-                'required': cost
+                'available': self.buying_power,
+                'required': cost,
             }
-
-        # All good
-        return {
-            'allowed': True,
-            'reason': 'OK',
-            'available': self.available,
-            'required': cost
-        }
+        return {'allowed': True, 'reason': 'OK', 'available': self.buying_power, 'required': cost}
 
     def allocate(self, symbol: str, cost: float):
-        """
-        Reserve capital for a position.
-        Call AFTER order is successfully placed.
-        """
-        if symbol in self.positions:
-            logger.warning(f"⚠️ Already allocated capital for {symbol}, skipping")
-            return
-
-        self.positions[symbol] = cost
-        self.available -= cost
-
-        logger.info(f"✅ Capital allocated: {symbol}")
-        logger.info(f"   Used: ₹{cost:.2f}")
-        logger.info(f"   Available: ₹{self.available:.2f} / ₹{self.total_buying_power:.2f}")
+        """DEPRECATED — use acquire_slot(). Kept so old code doesn't crash."""
+        logger.warning(f"⚠️ capital.allocate() called [DEPRECATED] for {symbol} — migrate to acquire_slot()")
 
     def release(self, symbol: str):
-        """
-        Free up capital when position closes.
-        Call AFTER exit order is filled.
-        """
-        if symbol not in self.positions:
-            logger.warning(f"⚠️ No capital allocated for {symbol}, skipping release")
-            return
-
-        cost = self.positions[symbol]
-        self.available += cost
-        del self.positions[symbol]
-
-        logger.info(f"✅ Capital released: {symbol}")
-        logger.info(f"   Freed: ₹{cost:.2f}")
-        logger.info(f"   Available: ₹{self.available:.2f} / ₹{self.total_buying_power:.2f}")
-
-    def get_status(self) -> dict:
-        """Get current status for logging/Telegram."""
-        return {
-            'base_capital': self.base_capital,
-            'leverage': self.leverage,
-            'total_buying_power': self.total_buying_power,
-            'available': self.available,
-            'in_use': self.total_buying_power - self.available,
-            'positions_count': len(self.positions),
-            'positions': dict(self.positions)
-        }
+        """DEPRECATED — use release_slot(). Kept so old code doesn't crash."""
+        logger.warning(f"⚠️ capital.release() called [DEPRECATED] for {symbol} — migrate to release_slot()")
