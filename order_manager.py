@@ -85,14 +85,29 @@ class OrderManager:
         del self._exec_cooldowns[symbol]
         return False, 0
 
-    def _set_exec_cooldown(self, symbol: str, reason: str, seconds: int = EXEC_COOLDOWN_SECONDS):
-        """Set execution failure cooldown for symbol."""
-        unblock_at = datetime.utcnow() + timedelta(seconds=seconds)
-        self._exec_cooldowns[symbol] = unblock_at
-        logger.warning(
-            f"⏳ EXEC COOLDOWN SET | {symbol} | reason={reason} | "
-            f"blocked for {seconds}s until {unblock_at.strftime('%H:%M:%S')} UTC"
-        )
+    @staticmethod
+    def _round_sl_to_tick(price: float, side: str, tick: float = 0.05) -> float:
+        """
+        Round SL trigger price to nearest valid Fyers tick boundary.
+
+        Fyers rejects SL-M orders where trigger_price % tick_size != 0.
+        NSE equities: tick_size = 0.05 for all stocks above ₹1.
+
+        Rounding direction (away from entry = more buffer, never tighter):
+          SHORT (SELL entry) → SL is above entry → round UP (ceiling)
+          LONG  (BUY entry)  → SL is below entry → round DOWN (floor)
+
+        Examples:
+          SHORT: 745.16 → ceil(745.16/0.05)*0.05 = ceil(14903.2)*0.05 = 745.20  ✅
+          SHORT: 745.20 → 745.20  (already valid, no change)
+          LONG:  718.94 → floor(718.94/0.05)*0.05 = floor(14378.8)*0.05 = 718.90  ✅
+        """
+        import math
+        if side == 'SELL':   # SHORT trade — SL is above entry
+            rounded = math.ceil(price / tick) * tick
+        else:                # LONG trade — SL is below entry
+            rounded = math.floor(price / tick) * tick
+        return round(rounded, 2)
 
     async def _verify_fill_via_rest(self, order_id: str) -> Optional[float]:
         """
@@ -460,34 +475,65 @@ class OrderManager:
                     await self.capital.acquire_slot(symbol)
 
                 # ── Step 3: Place SL-M Immediately ───────────────────────
-                sl_pct    = 0.02
-                stop_price = (
-                    round(ltp * (1 + sl_pct), 2) if side == 'SELL'
-                    else round(ltp * (1 - sl_pct), 2)
+                sl_pct     = 0.02
+                raw_sl     = (
+                    ltp * (1 + sl_pct) if side == 'SELL'
+                    else ltp * (1 - sl_pct)
                 )
-                sl_side = 'BUY' if side == 'SELL' else 'SELL'
+                stop_price = self._round_sl_to_tick(raw_sl, side)
+                sl_side    = 'BUY' if side == 'SELL' else 'SELL'
 
-                sl_id = await self.broker.place_order(
-                    symbol=symbol,
-                    side=sl_side,
-                    qty=qty,
-                    order_type='SL_MARKET',
-                    trigger_price=stop_price
+                logger.info(
+                    f"[SL-CALC] {symbol} raw_sl=₹{raw_sl:.4f} → "
+                    f"tick_rounded=₹{stop_price:.2f} (tick=0.05)"
                 )
 
-                if not sl_id:
-                    logger.critical("🚨 SL PLACEMENT FAILED! EMERGENCY EXIT NOW!")
+                try:
+                    sl_id = await self.broker.place_order(
+                        symbol=symbol,
+                        side=sl_side,
+                        qty=qty,
+                        order_type='SL_MARKET',
+                        trigger_price=stop_price
+                    )
+                except Exception as sl_exc:
+                    sl_id = None
+                    sl_error = str(sl_exc)
+                    logger.critical(
+                        f"🚨 [SL-FAIL] SL placement raised exception for {symbol}: {sl_error}"
+                    )
                     if self.telegram and hasattr(self.telegram, 'send_alert'):
                         await self.telegram.send_alert(
                             f"🚨 *SL PLACEMENT FAILED*\n\n"
                             f"Symbol: `{symbol}`\n"
-                            f"Entry filled but SL could not be placed.\n"
-                            f"⚡ Emergency exit triggered."
+                            f"Entry filled @ ₹{ltp:.2f} — SL order threw exception.\n"
+                            f"Error: `{sl_error[:150]}`\n"
+                            f"StopPrice attempted: ₹{stop_price:.2f}\n"
+                            f"⚡ Emergency exit triggered. Capital slot released."
                         )
                     await self._emergency_exit(symbol, qty, sl_side)
-                    # Release capital slot since we're exiting
                     if self.capital:
                         await self.capital.release_slot(broker=self.broker)
+                    self._set_exec_cooldown(symbol, reason='SL_EXCEPTION', seconds=EXEC_COOLDOWN_SECONDS)
+                    return None
+
+                if not sl_id:
+                    logger.critical(
+                        f"🚨 [SL-FAIL] SL placement returned None for {symbol} "
+                        f"(stop_price=₹{stop_price:.2f})"
+                    )
+                    if self.telegram and hasattr(self.telegram, 'send_alert'):
+                        await self.telegram.send_alert(
+                            f"🚨 *SL PLACEMENT FAILED*\n\n"
+                            f"Symbol: `{symbol}`\n"
+                            f"Entry filled @ ₹{ltp:.2f} — SL returned no order ID.\n"
+                            f"StopPrice attempted: ₹{stop_price:.2f}\n"
+                            f"⚡ Emergency exit triggered. Capital slot released."
+                        )
+                    await self._emergency_exit(symbol, qty, sl_side)
+                    if self.capital:
+                        await self.capital.release_slot(broker=self.broker)
+                    self._set_exec_cooldown(symbol, reason='SL_NO_ID', seconds=EXEC_COOLDOWN_SECONDS)
                     return None
 
                 logger.info(f"🛡️ SL Placed: {sl_id} @ ₹{stop_price:.2f}")
@@ -528,8 +574,20 @@ class OrderManager:
                 error_msg = str(e)
                 logger.error(f"❌ [ENTRY] Exception for {symbol}: {error_msg}")
 
-                # FIX 4: Set cooldown on broker exception
+                # Set cooldown on broker exception
                 self._set_exec_cooldown(symbol, reason=f'BROKER_EXCEPTION: {error_msg[:50]}')
+
+                # CRITICAL: Release capital if slot was acquired before this exception
+                # (slot is acquired after fill, before SL — so SL exceptions reach here with slot held)
+                if self.capital and not self.capital.is_slot_free:
+                    try:
+                        logger.warning(
+                            f"[ENTRY-EXCEPT] Capital slot still occupied during exception "
+                            f"for {symbol} — force releasing."
+                        )
+                        await self.capital.release_slot(broker=self.broker)
+                    except Exception as cap_e:
+                        logger.error(f"[ENTRY-EXCEPT] Capital release failed: {cap_e}")
 
                 real_margin = self.capital._real_margin if self.capital else 0
                 failure_msg = (
