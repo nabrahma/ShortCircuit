@@ -107,6 +107,9 @@ class CacheEntry:
     oi: float
     bid: float
     ask: float
+    open_price: float  # Phase 51
+    high_price: float  # Phase 51
+    prev_close: float  # Phase 51
     last_time: float
     source: CacheEntrySource
     tick_count: int = 0
@@ -445,6 +448,9 @@ class FyersBrokerInterface:
                         oi=message.get('oi', 0),
                         bid=message.get('bid', 0),
                         ask=message.get('ask', 0),
+                        open_price=message.get('open_price', message.get('o', 0)),
+                        high_price=message.get('high_price', message.get('h', 0)),
+                        prev_close=message.get('prev_close_price', message.get('pc', 0)),
                         last_time=time.time(),
                         source=CacheEntrySource.WS_TICK,
                         tick_count=tick_count,
@@ -719,6 +725,9 @@ class FyersBrokerInterface:
                     'oi': entry.oi,
                     'bid': entry.bid,
                     'ask': entry.ask,
+                    'open': entry.open_price,   # Phase 51
+                    'high': entry.high_price,   # Phase 51
+                    'pc': entry.prev_close,     # Phase 51
                     'ts': entry.last_time,
                     'source': entry.source.value,
                     'tick_count': entry.tick_count,
@@ -773,6 +782,9 @@ class FyersBrokerInterface:
                         oi=qv.get("oi", 0),
                         bid=qv.get("bid", 0),
                         ask=qv.get("ask", 0),
+                        open_price=qv.get("o", qv.get("open_price", 0)), # Phase 51
+                        high_price=qv.get("h", qv.get("high_price", 0)), # Phase 51
+                        prev_close=qv.get("pc", qv.get("prev_close_price", 0)), # Phase 51
                         last_time=now_ts,
                         source=CacheEntrySource.REST_SEED,
                         tick_count=0,

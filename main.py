@@ -292,12 +292,17 @@ async def _initialize_runtime() -> RuntimeContext:
         telegram_bot=bot,
         db=db_manager,
         capital_manager=capital_manager,
+        trade_manager=trade_manager,
     )
 
     # Inject into FocusEngine (was None → caused NSESGL-EQ execution miss)
     focus_engine.order_manager = order_manager
     # PRD-008 Bug 2 fix: inject analyzer so focus_engine can call record_signal() at order placement
     focus_engine.analyzer = analyzer
+
+    # Phase 52: Wire event loop for sync thread async dispatch
+    focus_engine._event_loop = asyncio.get_event_loop()
+    logger.info(f"[FOCUS] Event loop set: {focus_engine._event_loop is not None}")
     logger.info("[INIT] ✅ OrderManager constructed and injected into FocusEngine.")
 
     # Also wire into bot for /positions, /pnl, order alerts
@@ -416,6 +421,7 @@ async def _trading_loop(shutdown_event: asyncio.Event, ctx: RuntimeContext):
                     cand["ltp"],
                     cand.get("oi", 0),
                     cand.get("history_df"),
+                    cand.get("history_df_15m"), # Phase 51: Pass pre-fetched 15m
                     _scan_id,
                     _data_tier,
                 )

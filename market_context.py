@@ -47,6 +47,9 @@ class MarketContext:
         self.last_regime = 'UNKNOWN'
         self.regime_change_time = None
         self.trend_duration_minutes = 0
+        self._circuit_touched_today = set() # Phase 51: G3 Blacklist (Session-permanent)
+        self._circuit_blacklist_date = datetime.now(IST).date()
+
         
         if self._morning_high:
             logger.info(f"✅ Market Context Initialized with Morning Range: {self._morning_low} - {self._morning_high}")
@@ -354,6 +357,13 @@ class MarketContext:
         if phase == "LUNCH":
             return False, f"BLOCKED: {phase} - No signals during lunch (12:00-13:00)"
         
+        # Phase 51: G7 EOD Cutoff
+        if config.PHASE_51_ENABLED and config.P51_G7_TIME_GATE_ENABLED:
+            now_ist = datetime.now(IST).time()
+            if now_ist >= time(15, 10):
+                return False, "BLOCKED [G7]: EOD Cutoff (after 15:10)"
+
+        
         # More lenient during afternoon/EOD
         if phase in ["AFTERNOON_TREND", "EOD_REVERSION"]:
             return True, f"Time: {phase} - {recommendation}"
@@ -366,3 +376,29 @@ class MarketContext:
         
         return True, f"Time: {phase} - {recommendation}"
 
+    # ── Phase 51: G3 Circuit Hitter Methods ────────────────────
+    
+    def mark_circuit_touched(self, symbol: str):
+        """
+        Mark a symbol as having touched circuit limits.
+        Phase 51 [G3]: Session-permanent block.
+        """
+        self._refresh_circuit_blacklist_if_needed()
+        self._circuit_touched_today.add(symbol)
+        logger.warning(f"[G3] Symbol {symbol} marked as CIRCUIT HITTER. Blacklisted for remainder of session.")
+
+    def is_circuit_hitter(self, symbol: str) -> bool:
+        """
+        Check if symbol is currently blacklisted due to circuit touch.
+        Phase 51 [G3]: Session-permanent block.
+        """
+        self._refresh_circuit_blacklist_if_needed()
+        return symbol in self._circuit_touched_today
+
+    def _refresh_circuit_blacklist_if_needed(self):
+        """Resets the circuit blacklist if a new day has started."""
+        today = datetime.now(IST).date()
+        if self._circuit_blacklist_date != today:
+            self._circuit_touched_today.clear()
+            self._circuit_blacklist_date = today
+            logger.info("[G3] Daily Circuit Blacklist cleared for new session.")

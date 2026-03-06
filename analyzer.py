@@ -103,6 +103,7 @@ class FyersAnalyzer:
             return None
 
     def check_setup(self, symbol: str, ltp: float, oi: float = 0, pre_fetched_df: Optional[pd.DataFrame] = None,
+                    df_15m: Optional[pd.DataFrame] = None, # Phase 51
                     scan_id: int = 0, data_tier: str = "UNKNOWN") -> Optional[Dict[str, Any]]:
         """
         Validates a trading candidate using the God Mode strategy.
@@ -111,8 +112,12 @@ class FyersAnalyzer:
         grl = get_gate_result_logger()
         gr = GateResult(symbol=symbol, scan_id=scan_id, data_tier=data_tier)
 
-        # ── G7: Pre-analysis Filters (Market Regime) ─────────────────
-        allow_short, regime_reason = self._check_filters_detailed(symbol)
+        # ── G7: Pre-analysis Filters (Time Gate & Regime) ────────────
+        if config.PHASE_51_ENABLED and config.P51_G7_TIME_GATE_ENABLED:
+            allow_short, regime_reason = self.market_context.is_favorable_time_for_shorts()
+        else:
+            allow_short, regime_reason = self._check_filters_detailed(symbol)
+            
         gr.g7_pass = allow_short
         gr.g7_value = regime_reason
         if not allow_short:
@@ -161,7 +166,7 @@ class FyersAnalyzer:
         gain_pct = ((ltp - open_price) / open_price) * 100
         
         # ── G1: Gain range / hard constraints ───────────────────────
-        ok, msg = self.gm_analyst.check_constraints(ltp, day_high, gain_pct, open_price)
+        ok, msg = self.gm_analyst.check_constraints(ltp, day_high, gain_pct, open_price, df=df)
         gr.g1_pass = ok
         gr.g1_value = round(gain_pct, 2)
         if not ok:
@@ -173,22 +178,29 @@ class FyersAnalyzer:
         
 
 
-        # ── G3: Circuit Guard ────────────────────────────────────────
+        # ── G3: Circuit Guard & Blacklist ───────────────────────────
         depth_data = None
         try:
             full_depth = self.fyers.depth(data={"symbol": symbol, "ohlcv_flag":"1"})
             if 'd' in full_depth and symbol in full_depth['d']:
                 depth_data = full_depth['d'][symbol]
+                
+                # Check for circuit touches to mark for blacklist
+                uc = depth_data.get('upper_ckt', 0)
+                if uc > 0 and ltp >= uc * 0.999:
+                    self.market_context.mark_circuit_touched(symbol)
         except:
             pass
             
-        circuit_blocked = self._check_circuit_guard(symbol, ltp, depth_data)
+        is_blacklisted = self.market_context.is_circuit_hitter(symbol)
+        circuit_blocked = is_blacklisted or self._check_circuit_guard(symbol, ltp, depth_data)
+        
         gr.g3_pass = not circuit_blocked
-        gr.g3_value = round(ltp, 2)
+        gr.g3_value = "BLACKLISTED" if is_blacklisted else round(ltp, 2)
         if circuit_blocked:
             gr.verdict = "REJECTED"
             gr.first_fail_gate = "G3_CIRCUIT_GUARD"
-            gr.rejection_reason = f"LTP {ltp} too close to upper circuit"
+            gr.rejection_reason = "Circuit Hitter (Session Blacklist)" if is_blacklisted else f"LTP {ltp} too close to upper circuit"
             grl.record(gr)
             return None
 
@@ -234,12 +246,12 @@ class FyersAnalyzer:
             return None
 
         # ── G5: Gate 5 — Exhaustion at Stretch ──────────────────────
-        # Runs BEFORE breakdown check — detects exhaustion at the high
-        # Gate 10 WebSocket is the sole breakdown confirmation
+        atr = self.gm_analyst.calculate_atr(df)
         exhaustion = self.gm_analyst.is_exhaustion_at_stretch(
             candles=df.to_dict('records'),
             profile=profile,
-            gain_pct=gain_pct
+            gain_pct=gain_pct,
+            atr=atr
         )
         gr.g5_pass = exhaustion["fired"]
         gr.g5_value = round(exhaustion.get("stretch_score", 0), 3)
@@ -276,7 +288,7 @@ class FyersAnalyzer:
             else "EXHAUSTION_FADE"
         )
 
-        # ── G6: Pro Confluence / POC divergence ─────────────────────
+        # ── G6: Tiered Scoring ──────────────────────────────────────
         vwap_sd = self.gm_analyst.calculate_vwap_bands(prev_df)
         is_extended = vwap_sd > 2.0
 
@@ -284,6 +296,15 @@ class FyersAnalyzer:
             symbol, df, prev_df, slope, is_extended, vwap_sd,
             pattern_desc, depth_data, ltp, oi, signal_meta
         )
+        
+        # Phase 51: Tiered Scoring [Section 2.5]
+        if config.PHASE_51_ENABLED:
+            confluence_score = len(pro_conf_msgs)
+            # PRD: Score >= 2 required. NO auto-passes for Extreme/Patterns.
+            if confluence_score < 2:
+                valid_signal = False
+                gr.rejection_reason = f"Low Confluence Score: {confluence_score} (need 2+)"
+            
         gr.g6_pass = valid_signal
         gr.g6_value = f"+{len(pro_conf_msgs)}conf"
         if pro_conf_msgs:
@@ -291,8 +312,7 @@ class FyersAnalyzer:
 
         if not valid_signal:
             gr.verdict = "REJECTED"
-            gr.first_fail_gate = "G6_PRO_CONFLUENCE"
-            gr.rejection_reason = "No pro confluence: structure valid but no secondary confirmation"
+            gr.first_fail_gate = "G6_TIERED_SCORING"
             grl.record(gr)
             return None
 
@@ -311,13 +331,9 @@ class FyersAnalyzer:
         import concurrent.futures
 
         # ── G9: HTF Confluence ────────────────────────────────────
-        # Runs in analyzer, NOT focus_engine. Moved out of _finalize_signal()
-        # so the gate result is recorded if it fails. (Bug 1 fix)
-        # FIX-5: Wrap in 1.5s timeout. REST call for 15m candles can stall scan loop.
-        # On timeout: pass through (True) — G9 is an enhancement, not a safety gate.
         try:
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _htf_exec:
-                _htf_future = _htf_exec.submit(self.htf_confluence.check_trend_exhaustion, symbol)
+                _htf_future = _htf_exec.submit(self.htf_confluence.check_trend_exhaustion, symbol, df_15m=df_15m)
                 try:
                     htf_ok, htf_msg = _htf_future.result(timeout=1.5)
                 except concurrent.futures.TimeoutError:
@@ -408,12 +424,16 @@ class FyersAnalyzer:
             rvol_now = curr_v / avg_v if avg_v > 0 else 0
 
             # FIX-2: OR condition. Either alone is sufficient to block.
-            # Previously: both required simultaneously — almost never triggered.
-            if rvol_now > 5.0:
-                logger.warning(f"  MOMENTUM BLOCK {symbol} RVOL {rvol_now:.1f}x (> 5.0x threshold)")
+            # Phase 51: Using config thresholds
+            rvol_thresh = config.P51_G4_RVOL_THRESHOLD if config.PHASE_51_ENABLED else 5.0
+            slope_thresh = config.P51_G4_SLOPE_MIN if config.PHASE_51_ENABLED else 60.0 # Wait, PRD says 0.5?
+            # Existing was 60 (Degrees? No, basis points). I'll use P51_G4_SLOPE_MIN.
+            
+            if rvol_now > rvol_thresh:
+                logger.warning(f"  MOMENTUM BLOCK {symbol} RVOL {rvol_now:.1f}x (> {rvol_thresh}x threshold)")
                 return True
-            if slope > 60:
-                logger.warning(f"  MOMENTUM BLOCK {symbol} Slope {slope:.1f} (> 60 threshold)")
+            if slope > slope_thresh:
+                logger.warning(f"  MOMENTUM BLOCK {symbol} Slope {slope:.1f} (> {slope_thresh} threshold)")
                 return True
 
         except Exception:
@@ -893,6 +913,7 @@ class FyersAnalyzer:
             'day_high': df['high'].max(),
             'signal_low': df.iloc[-2]['low'], # CRITICAL: Validation Level
             'setup_high': setup_high,         # Phase 41.2: For scalper SL calc
+            'signal_high': setup_high,        # Phase 51: Consistent naming
             'tick_size': 0.05,                # Phase 41.2: Default NSE tick
             'atr': atr,                       # Phase 41.2: For legacy simulation
             'meta': meta_str

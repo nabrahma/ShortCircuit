@@ -89,7 +89,7 @@ import datetime
 import pytz
 
 # Early Session Data Validity Gate Phase 44.3
-RVOL_MIN_CANDLES = 20           # Minimum candles for valid RVOL calculation
+RVOL_MIN_CANDLES = 45           # Phase 51: Up from 20
 RVOL_VALIDITY_GATE_ENABLED = True  # Feature flag — set False to disable instantly
 
 def minutes_since_market_open() -> float:
@@ -248,7 +248,7 @@ EDITABLE_SIGNAL_FLOW_ENABLED = False  # Set True only after stability confirmed
 # Minimum intraday gain % for a stock to pass the scanner filter (gain >= this to be a candidate)
 # Also used as the stretch_score baseline in G5: score = (gain_pct - BASE) / BASE
 # Source: scanner.py gain filter threshold
-SCANNER_GAIN_MIN_PCT: float = 6.18
+SCANNER_GAIN_MIN_PCT: float = 9.0  # Phase 51: Up from 6.18
 
 # G5 stretch sweet spot window (gain_pct must be in [STRETCH_LOW, STRETCH_HIGH])
 G5_STRETCH_LOW_PCT:  float = 9.0
@@ -260,3 +260,67 @@ G5_STRETCH_HIGH_PCT: float = 14.5
 # ₹50 filters sub-₹50 manipulation vehicles while keeping all legitimate
 # small/mid-cap candidates that your strategy targets.
 SCANNER_MIN_LTP: float = 50.0
+
+# ============================================================================
+# PHASE 51: GATE QUALITY HARDENING (Section 1)
+# ============================================================================
+PHASE_51_ENABLED = True
+
+# G1: Constraints & Time-Since-High
+P51_G1_TIME_SINCE_HIGH_CANDLES = 20
+P51_G1_KILL_BACKDOOR = True # Reject if ltp < day_high - 0.5% (Section 2.2)
+
+# G2: Data Quality
+P51_G2_MIN_TICKS_60M = 100
+
+# G3: Circuit Hitter Blacklist
+P51_G3_CIRCUIT_TOUCH_TIMEOUT_MINUTES = 60
+
+# G4: Sustained Momentum
+P51_G4_RVOL_THRESHOLD = 5.0
+P51_G4_SLOPE_MIN = 0.5 # Degrees or placeholder for logic
+
+# G5: Exhaustion Stretch
+P51_G5_GATE_B_USE_ALLDAY_HIGH = True
+P51_G5_GATE_D_ATR_CLEARANCE = True
+P51_G5_GATE_E_LATE_SESSION_EXTREME_ONLY = True
+P51_G5_ATR_EXTREME_STRETCH_MULT = 3.5
+
+# G7: Time Gate
+P51_G7_TIME_GATE_ENABLED = True
+
+# G8: Daily Cap & Cooldown
+P51_G8_DAILY_SIGNAL_CAP = 3
+P51_G8_SIGNAL_COOLDOWN_MINUTES = 45 # G8.1 standard cooldown
+P51_G8_COOLDOWN_ON_SIGNAL_ADD = True # G8.3 immediate trigger
+
+# G9: VWAP SD Extension
+P51_G9_VWAP_SD_EXTREME = 1.5
+
+# G10: Spread & Confirmation
+P51_G10_MAX_SPREAD_PCT = 0.004 # 0.4% (PRD: Downgrade to CAUTIOUS, not block)
+P51_G10_TICK_OFFSET = 2 # Execute 2 ticks better than current LTP
+
+# G11: Dynamic Timeout
+P51_G11_MIN_REMAINING_MINUTES = 15
+
+# G12: Invalidation Buffer
+P51_G12_INVALIDATION_BUFFER_PCT = 0.002 # 0.2%
+
+# G13: Risk & Reward (Phase 51 Hardening)
+P51_SL_ATR_MULTIPLIER = 0.5
+P51_SL_MIN_TICK_BUFFER = 3
+P51_TP1_ATR_MULT = 1.5
+P51_TP2_ATR_MULT = 2.5
+P51_TP3_ATR_MULT = 3.5
+P51_TP3_TRAIL_ATR_MULT = 1.0
+
+# ============================================================================
+# PHASE 52 — PARTIAL EXIT ENGINE & HUMAN INTERVENTION SAFETY
+# ============================================================================
+
+P52_PARTIAL_EXIT_ENABLED: bool = True      # Master: enables 40/40/20 TP logic
+P52_BREAKEVEN_AFTER_TP1: bool = True       # Move SL to entry after TP1 hit
+P52_SL_MOVE_AFTER_TP2: bool = True         # Move SL to TP1 level after TP2 hit
+P52_CLEANUP_ON_STOP_FOCUS: bool = True     # Cancel pending orders on stop_focus()
+P52_HARD_STOP_RECONCILE_SECONDS: int = 30  # Active position SL poll interval (was 1800)

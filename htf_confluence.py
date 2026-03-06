@@ -115,33 +115,67 @@ class HTFConfluence:
         is_sufficient = count >= 5
         return count, is_sufficient
     
-    def check_trend_exhaustion(self, symbol):
+    def check_trend_exhaustion(self, symbol, df_15m=None):
         """
-        Combined check for short entry:
+        Combined check for short entry (Phase 51 Hardened):
         1. 15m showing weakness (lower high)
         2. 5+ consecutive bullish candles (exhaustion run)
+        3. G9.3: HTF Flatness (New for Phase 51)
         
         Returns:
             tuple: (is_exhausted, message)
         """
-        # Check 1: 15m structure
-        has_weakness, weakness_msg = self.check_15m_structure(symbol)
+        import config
         
-        # Check 2: Consecutive bullish count
+        # ── Step 0: Fetch/Use 15m data ────────────────────────────
+        df = df_15m if df_15m is not None else self._get_htf_history(symbol, interval="15")
+        
+        if df is None or len(df) < 5:
+            return True, "Insufficient HTF for G9 — PASS (Fail-Open)"
+
+        # ── Step 1: 15m Pivot Structure ───────────────────────────
+        # (Using logic from check_15m_structure but inlined for perf/context)
+        recent_highs = df['h'].iloc[-3:].values
+        last_high = recent_highs[-1]
+        prev_high = recent_highs[-2]
+        has_weakness = last_high < prev_high
+        weakness_msg = f"15m LH ({last_high:.2f} < {prev_high:.2f})" if has_weakness else "15m HH/Equal"
+
+        # ── Step 2: Consecutive 5m Bullish Count ──────────────────
         bullish_count, is_sufficient = self.count_consecutive_bullish(symbol)
-        
-        # For shorts, we want:
-        # - Either 15m weakness OR significant bullish run
-        # - We're being lenient here: one of the conditions is enough
-        
+
+        # ── Step 3: G9.3 HTF Flatness/Acceleration [Phase 51] ─────
+        # Req abs(curr_15m_gain - prev_15m_gain) < 1.0%
+        # Rejects if gain accelerated (diff > 2.0%)
+        if config.PHASE_51_ENABLED:
+            try:
+                # Need prev_close to calculate gain % correctly
+                # Simplified: compare price change in last two 15m candles
+                curr_c = df['c'].iloc[-1]
+                prev_c = df['c'].iloc[-2]
+                pprev_c = df['c'].iloc[-3]
+                
+                curr_move_pct = abs(curr_c - prev_c) / prev_c * 100
+                prev_move_pct = abs(prev_c - pprev_c) / pprev_c * 100
+                acceleration = curr_move_pct - prev_move_pct
+                
+                if acceleration > 2.0:
+                    return False, f"G9.3 REJECT: HTF Accel ({acceleration:.1f}% > 2.0%)"
+                
+                is_flat = abs(acceleration) < 1.0
+                if is_flat:
+                    return True, f"G9.3 PASS: HTF Flatness ({abs(acceleration):.2f}% < 1.0%)"
+            except Exception as e:
+                logger.warning(f"G9.3 Flatness check error: {e}")
+
+        # ── Final Synthesis ───────────────────────────────────────
         if has_weakness:
-            return True, f"HTF Confirmed: {weakness_msg}"
+            return True, f"HTF Weakness: {weakness_msg}"
         
         if is_sufficient:
-            return True, f"Exhaustion Run: {bullish_count} consecutive bullish candles"
+            return True, f"Exhaustion Run: {bullish_count} consecutive bullish"
         
-        # Neither condition met
-        return False, f"No HTF weakness (15m: {weakness_msg}, Bullish run: {bullish_count})"
+        return False, f"No HTF weakness (15m: {weakness_msg}, Run: {bullish_count})"
     
     def get_key_levels(self, symbol):
         """

@@ -1,7 +1,6 @@
 # ShortCircuit — Architecture Reference
-**Version:** Phase 44.9.4 — SL tick rounding enforced, adopt_orphan idempotent + DB-backed,
-GateResultLogger buildrows implemented, _COLUMN_SPEC aligned to 36-col schema.
- | **Last Updated:** 2026-03-06
+**Version:** Phase 52 — Partial Exit Engine & Human Intervention Safety
+ | **Last Updated:** 2026-03-07
 
 ---
 
@@ -39,7 +38,7 @@ The concurrency model is a **single asyncio event loop** with a `TaskGroup` laun
 **Calls into:** `os`, `dotenv`, `datetime`, `pytz`
 **State it owns:** All module-level constants (`CAPITAL_PER_TRADE=1800`, `INTRADAY_LEVERAGE=5.0`, `AUTO_MODE=False`, `MAX_SIGNALS_PER_DAY` via `SignalManager` default, `VALIDATION_TIMEOUT_MINUTES=15`, `SQUARE_OFF_TIME=15:10`, `EDITABLE_SIGNAL_FLOW_ENABLED=False`, `ETF_CLUSTER_DEDUP_ENABLED=True`, etc.)
 **Error handling:** None — config errors surface as `AttributeError` at import time
-**Notes:** `AUTO_MODE` is overridden to `False` regardless of env var (explicit safety measure). `TRADING_ENABLED` is dynamically updated by `MarketSession` via `set_trading_enabled()`. **[Phase 44.8.9]** `SCANNER_MIN_LTP` default is `50.0` — do not lower this value; it prevents penny stocks from reaching the order stage.
+**Notes:** `AUTO_MODE` is overridden to `False` regardless of env var (explicit safety measure). `TRADING_ENABLED` is dynamically updated by `MarketSession` via `set_trading_enabled()`. **[Phase 51+52]** Added `P51_` flags for gate hardening and `P52_` flags for partial exits and safety cleanup.
 
 ---
 
@@ -59,25 +58,26 @@ The concurrency model is a **single asyncio event loop** with a `TaskGroup` laun
 ### order_manager.py
 **Role:** Async order lifecycle manager — entry, SL placement, WebSocket fill detection, safe exit, capital allocation/release, and DB journaling. Primary execution path for all live trades.
 **Key Classes:** `OrderManager`
-**Key Functions:** `_round_sl_to_tick(price, side, tick=0.05)` (static — rounds SL trigger price to nearest valid Fyers tick boundary; ceil for SHORT/SELL, floor for LONG/BUY; prevents Fyers code=-50 StopPrice rejection)
+**Key Functions:** `_round_sl_to_tick(price, side, tick=0.05)`, `close_partial_position()`, `modify_sl_qty()`, `safe_exit()`
 **Imports from project:** `fyers_broker_interface.FyersBrokerInterface`
-**Called by:** `focus_engine.py` (`check_pending_signals` → `order_manager.enter_position`), `telegram_bot.py` (manual exit commands), `main.py` (construction + injection), `reconciliation.py` (`_finalize_closed_position` called from phantom handler and `adopt_orphan`)
-**Calls into:** `fyers_broker_interface.py`, `database.py`, `capital_manager.py`, `telegram_bot.py` (alerts)
-**State it owns:** `active_positions: dict[str, dict]` (open positions keyed by symbol), `position_locks: dict[str, asyncio.Lock]` (per-symbol locks), `exit_in_progress: dict[str, bool]`, `hard_stops: dict[str, str]` (symbol→sl_order_id), `_exec_cooldowns: dict[str, datetime]` (symbol→unblock_at, 15-min execution failure cooldown)
-**Error handling:** `enter_position`: entry order and SL order each have their own separate try/except blocks — SL failures cannot be mislabeled as entry failures. SL failure path always does: emergency_exit + capital.release_slot() + set_exec_cooldown + SL-specific Telegram alert. Outer except block includes `capital.release_slot()` safety net when `not capital.is_slot_free` (catches any exception thrown after fill but before SL placement). Capital is never deducted until fill is confirmed via WebSocket. `safe_exit` has WebSocket race condition protection via per-symbol asyncio locks.
-**Notes:** `FYERS_ORDER_STATUS_TRADED = 2` constant used to detect fill from WS event. [P0 FIX] — previously never instantiated; `focus_engine.order_manager` was `None`. **[Phase 44.6]** `compute_qty()` via `CapitalManager.compute_qty()` — full Fyers margin utilization; `acquire_slot()` called after confirmed fill (was missing entirely); fill timeout 30s → 15s with REST verification fallback; execution failure cooldown 15-min block per symbol; `_finalize_closed_position()` calls async `release_slot(broker)`. **[PRD-5 / Phase 44.9.2]** `_round_sl_to_tick()` static method added — all SL trigger prices are now rounded to nearest 0.05 tick before placement (math.ceil for SHORT, math.floor for LONG). SL placement wrapped in its own try/except separate from entry order except block. Capital release safety net added to outer except. Fixes live bug: Fyers code=-50 StopPrice not a multiple of tick size 0.0500, triggered for ~60% of LTP values where `ltp * 1.02` does not naturally land on a 0.05 boundary. `import math` already present in top-level imports.
+**Called by:** `focus_engine.py`, `telegram_bot.py`, `main.py`, `reconciliation.py`
+**Calls into:** `fyers_broker_interface.py`, `database.py`, `capital_manager.py`, `telegram_bot.py`
+**State it owns:** `active_positions`, `position_locks`, `exit_in_progress`, `hard_stops`, `_exec_cooldowns`
+**Error handling:** Multi-stage try/except; SL placement isolation; capital release safety net.
+**Notes:** **[Phase 51+52]** Added ATR-based SL calculation: `max(ATR * 0.5, 3 * tick)`. Implemented `close_partial_position()` for 40/40/20 TP strategy with G13 isolation. Added `modify_sl_qty()` for broker SL-M sync. Patched `safe_exit()` for cancel-first execution.
 
 ---
 
 ### focus_engine.py
 **Role:** Signal validation gate and position monitor — maintains `pending_signals` dict, monitors price vs. trigger in a background thread, fires `order_manager.enter_position` on validation, and runs the `focus_loop` for active position management.
 **Key Classes:** `FocusEngine`
-**Key Functions:** None (all methods)
+**Key Functions:** `start_focus()`, `stop_focus()`, `focus_loop()`, `check_pending_signals()`
 **Imports from project:** `fyers_connect.FyersConnect`, `config`, `order_manager.OrderManager`, `discretionary_engine.DiscretionaryEngine`
-**Called by:** `main.py` (construction, injection, `_trading_loop` calls `check_pending_signals`)
-**Calls into:** `order_manager.py`, `fyers_connect.py`, `discretionary_engine.py`, `telegram_bot.py` (via `self.telegram_bot`)
-**State it owns:** `pending_signals: dict`, `cooldown_signals: dict`, `active_trade: dict`, `monitor_thread: threading.Thread`, `is_running: bool`
-**Error handling:** [P0 FIX] — `check_pending_signals` raises `RuntimeError` if `self.order_manager is None` (was previously a silent no-op). `attempt_recovery()` called in `__init__` to adopt orphaned broker positions.
+**Called by:** `main.py`, `telegram_bot.py`
+**Calls into:** `order_manager.py`, `fyers_connect.py`, `discretionary_engine.py`, `telegram_bot.py`
+**State it owns:** `pending_signals`, `cooldown_signals`, `active_trade`, `_event_loop`
+**Error handling:** [P0 FIX] `order_manager` injection check. `CLOSED_EXTERNALLY` safety bypass for G13.
+**Notes:** **[Phase 52]** Implemented Partial Exit Engine (40/40/20 strategy). Added cancel-first exit logic and `cleanup_orders()` in `stop_focus()`. Fixed async dispatch to `monitor_hard_stop_status` via `run_coroutine_threadsafe`.
 
 ```
 Validation Gate Architecture (Updated 2026-03-04):
@@ -258,43 +258,13 @@ Current behaviour:
 ### signal_manager.py
 **Role:** Daily signal gate — enforces max 5 signals/day, 45-min per-symbol cooldown, and 3-consecutive-loss auto-pause. Global singleton via `get_signal_manager()`.
 **Key Classes:** `SignalManager`
-**Key Functions:** `get_signal_manager`
+**Key Functions:** `get_signal_manager`, `record_outcome()`
 **Imports from project:** None
-**Called by:** `analyzer.py` (`get_signal_manager()` singleton), `telegram_bot.py` (status display)
+**Called by:** `analyzer.py`, `telegram_bot.py`, `order_manager.py` (G13)
 **Calls into:** Nothing
-**State it owns:** `signals_today: list`, `last_signal_time: dict`, `consecutive_losses: int`, `is_paused: bool`, `stats: defaultdict`
-**Error handling:** `_reset_if_new_day()` called at start of every public method — auto-resets on date change
-
-```
-Slot Burn Behaviour (Updated 2026-03-04):
-
-PREVIOUS (BROKEN) FLOW:
-1. Signal validated
-2. record_signal() called → slot burned
-3. enter_position() called (was missing await → crashed)
-4. Slot burned on EVERY crash → signals_today filled with phantom entries
-5. can_signal() never consulted → slot count irrelevant
-6. Same stock re-validated 3,500+ times per session
-
-CURRENT (FIXED) FLOW:
-1. can_signal(symbol) called BEFORE any execution attempt
-   → if slots exhausted: signal dropped, pending_signals cleared, continue
-2. await enter_position() called
-3. Only if pos is a valid dict with order_id:
-   → record_signal() called → slot burned
-   → remaining slots logged
-4. If pos is None or invalid:
-   → WARNING logged
-   → Telegram alert sent
-   → Slot NOT burned
-
-Thread Safety:
-- threading.Lock() added to SignalManager.__init__
-- All reads (can_signal) and writes (record_signal) wrapped with self._lock
-- Prevents race condition when two signals fire concurrently
-```
-
-**Notes:** Singleton — one instance per process. Uses naive `datetime.now()` for date comparison (sufficient for daily reset purposes).
+**State it owns:** `signals_today`, `last_signal_time`, `consecutive_losses`, `is_paused`, `stats`
+**Error handling:** Thread-safe via `threading.Lock()`; auto-resets on date change.
+**Notes:** **[Phase 51]** G13 Trade Outcome Recording: `record_outcome()` updates win rate and consecutive losses. Daily symbol blacklist and 3-signal cap enforced.
 
 ---
 
@@ -351,15 +321,14 @@ Thread Safety:
 ---
 
 ### market_context.py
-**Role:** Macro context engine — determines NIFTY market regime (TREND_UP/TREND_DOWN/RANGE) using first-hour range, filters out unfavorable shorting conditions. Fetches 9:15–9:45 IST morning range via REST (IST-aware epoch with `ZoneInfo("Asia/Kolkata")`). Exposes `morning_range_valid` flag to guard all range-dependent logic.
+**Role:** Macro context engine — determines NIFTY market regime (TREND_UP/TREND_DOWN/RANGE) and manages session-level blacklists. Exposes `morning_range_valid` flag and circuit-touched sets.
 **Key Classes:** `MarketContext`
-**Key Functions:** `_fetch_morning_range_from_rest`, `_refresh_morning_range_if_needed` (5-min throttled), `morning_high` (property), `morning_low` (property)
-**Imports from project:** `symbols.NIFTY_50`, `symbols.validate_symbol`, `config`
-**Called by:** `analyzer.py` (`_check_filters` calls `market_context.should_allow_short()`)
+**Key Functions:** `should_allow_short()`, `is_circuit_touched()`
+**Imports from project:** `symbols.NIFTY_50`, `config`
+**Called by:** `analyzer.py`
 **Calls into:** Fyers REST (NIFTY intraday data)
-**State it owns:** `morning_high/low`, `morning_range_valid: bool`, `_last_range_fetch_time: float`, cached regime
-**Error handling:** Regime defaults to allowing trade if API call fails
-**Notes:** `should_allow_short()` has override patterns (EVENING_STAR, BEARISH_ENGULFING, SHOOTING_STAR) that bypass regime filter. If `morning_range_valid=False`, regime logic returns safe `"RANGE"` instead of using a 0/0 anchor. `_refresh_morning_range_if_needed()` throttled to max once per 5 minutes. MID_MARKET cold start (bot started after 9:45) fetches range immediately via REST — never reads from empty WS cache.
+**State it owns:** `morning_high/low`, `daily_circuit_touched_set`, `morning_range_valid`
+**Notes:** **[Phase 51]** G3: Session-permanent circuit hitter blacklist. G7: Time gate logic (pre-10AM, lunch-hour, and post-15:10 blocks).
 
 ---
 
@@ -504,13 +473,13 @@ Thread Safety:
 ---
 
 ### htf_confluence.py
-**Role:** Higher-Time-Frame confluence checks — 15-minute Lower High structure confirmation.
-**Key Classes:** <!-- AUDIT NOTE: verify -->
-**Key Functions:** (HTF check)
+**Role:** Higher-Time-Frame confluence checks — 15-minute structure confirmation and VWAP extensions.
+**Key Classes:** `HTFAnalyzer`
+**Key Functions:** `check_htf_structure()`, `check_vwap_extension()`
 **Imports from project:** None
-**Called by:** `analyzer.py` (`_finalize_signal`)
+**Called by:** `analyzer.py` (G9)
 **Calls into:** Fyers REST (15m candle history)
-**Notes:** 7789 bytes.
+**Notes:** **[Phase 51]** G9 rebuilt: removed bullish candle requirement; added 1.5SD VWAP extension + volume fade checks for HTF confirmation.
 
 ---
 
@@ -992,25 +961,19 @@ Impact: This was the singular reason for 2 months of zero trade execution.
 
 | Gate | ID | Location | What It Checks | Fail Behaviour |
 |------|----|----------|----------------|----------------|
-| G1 | PROXIMITY_AND_GAIN | analyzer.py | check_setup() → gmanalyst.check_constraints() |
-|    | Checks:                                                                              |
-|    | 1. trend_gain >= 5.0% OR max_gain_pct (day_high vs open) >= 7.0%                   |
-|    | 2. trend_gain <= 15.0% (circuit risk ceiling)                                        |
-|    | 3. dist_from_high = (day_high - ltp) / day_high * 100 <= 2.5%                       |
-|    |    (3.5% if max_gain_pct > 10.0%)                                                    |
-|    | NOTE: Primary rejection cause is rule 3 (proximity), NOT rule 1/2 (gain range).     |
-|    | Stocks failing G1 as "GAINCONSTRAINTS" are almost always too far from their high.    |
-| RVOL Validity | G2 | `analyzer.py / check_setup()` | ≥20 min since market open when `RVOL_VALIDITY_GATE_ENABLED` | grl.record(REJECTED) |
-| Circuit Guard | G3 | `analyzer.py / check_setup()` | Not near upper circuit | grl.record(REJECTED) |
-| Momentum | G4 | `analyzer.py / check_setup()` | VWAP slope not too steep | grl.record(REJECTED) |
-| Exhaustion at Stretch | G5 | `analyzer.py / check_setup()` | gain 9–14.5%, new high, vol_fade < 0.65, close > VAH | grl.record(REJECTED) |
-| Pro Confluence | G6 | `analyzer.py / check_setup()` | DPOC + OI divergence + tape signals | grl.record(REJECTED) |
-| Market Regime | G7 | `analyzer.py / check_setup()` | NIFTY regime allows short | grl.record(REJECTED) |
-| Signal Manager | G8 | `analyzer.py / check_setup()` | Daily limit (5) + 45-min cooldown + loss pause | grl.record(REJECTED) |
-| HTF Confluence | **G9** | `analyzer.py / check_setup()` | 15m Lower High structure (REST 15m candles) | grl.record(REJECTED) |
-| Cooldown Spacing | G10 | `focus_engine.py` | Inter-signal minimum gap | grl.record(REJECTED) |
-| Capital Availability | G11 | `focus_engine.py` | `capital_manager.can_afford()` | grl.record(REJECTED) |
-| Pre-Entry Conviction | G12 | `focus_engine.py` | LTP broke trigger / invalidated / timeout | grl.record(REJECTED or SUPPRESSED or SIGNAL_FIRED) |
+| G1 | SCANNER_QUALITY | analyzer.py | 45-candle minimum, 9% gain floor, quality checks | grl.record(REJECTED) |
+| G2 | RVOL_VALIDITY | analyzer.py | ≥20 min since market open | grl.record(REJECTED) |
+| G3 | CIRCUIT_GUARD | analyzer.py | Session-permanent circuit hitter blacklist | grl.record(REJECTED) |
+| G4 | MOMENTUM | analyzer.py | VWAP slope FLAT (<0.05), no parabolic spikes | grl.record(REJECTED) |
+| G5 | EXHAUSTION | analyzer.py | 9–14.5% gain, VAH relative ATR, MEDIUM pattern | grl.record(REJECTED) |
+| G6 | PRO_CONFLUENCE| analyzer.py | Tiered scoring ≥2 (DPOC/OI/Tape), no auto-pass | grl.record(REJECTED) |
+| G7 | TIME_GATE | analyzer.py | Pre-10AM, Lunch (12-1PM), Post-15:10 blocks | grl.record(REJECTED) |
+| G8 | SIGNAL_LIMIT | analyzer.py | Max 5/day, 45-min cooldown, win-rate pause | grl.record(REJECTED) |
+| G9 | HTF_STRUCTURE | analyzer.py | 1.5SD VWAP extension + Vol Fade (rebuilt) | grl.record(REJECTED) |
+| G10 | ENTRY_CONFIRM | focus_engine.py | Two-tick trigger, 0.4% spread CAUTIOUS, tick offset | grl.record(REJECTED) |
+| G11 | TIMEOUT | focus_engine.py | Dynamic expiry (3-15m), Above-High invalidation | grl.record(REJECTED) |
+| G12 | PRICE_STABILITY| focus_engine.py | Signal_high * 1.002 tight buffer invalidate | grl.record(REJECTED) |
+| G13 | OUTCOME_LOG | signal_manager.py| Trade Outcome Recording (Win/Loss Tracking) | grl.record(LOGGED) |
 
 Gates execute in order. First failure terminates evaluation immediately and records to `GateResultLogger`.
 
@@ -1029,10 +992,11 @@ Gates execute in order. First failure terminates evaluation immediately and reco
 
 | State | Transition Trigger | SL Position | File | Log |
 |-------|--------------------|-------------|------|-----|
-| `INITIAL` | Entry fill confirmed | `setup_high + SCALPER_STOP_TICK_BUFFER (12 ticks)` | `scalper_risk_calculator.py` | `SL set @ {price}` |
-| `BREAKEVEN` | Price moves `SCALPER_BREAKEVEN_TRIGGER_PCT=0.3%` in favor | Moved to entry price | `scalper_position_manager.py` | `BREAKEVEN: SL → {entry}` |
-| `TRAILING` | Price continues in favor beyond breakeven | Trails by 0.2% (0.15% after TP1, 0.1% after TP2) | `scalper_position_manager.py` | `TRAILING SL → {price}` |
-| `HARD_STOP` | SL-M order fills at broker | Position force-closed | `order_manager.monitor_hard_stop_status()` | `Hard stop triggered` |
+| `INITIAL` | Entry fill confirmed | `max(ATR * 0.5, 3 * tick)` buffer above high | `order_manager.py` | `SL set @ {price}` |
+| `BREAKEVEN` | TP1 Hit (40% qty) | Moved to Entry Price | `focus_engine.py` | `TP1 Hit: SL → BREAKEVEV` |
+| `TP1_LEVEL` | TP2 Hit (40% qty) | Moved to TP1 Price | `focus_engine.py` | `TP2 Hit: SL → TP1` |
+| `TRAILING` | TP3 Runner (20% qty) | Trails by ATR * 0.5 | `focus_engine.py` | `TRAILING SL → {price}` |
+| `HARD_STOP` | SL-M order fills | Position force-closed | `order_manager.py` | `Hard stop filled` |
 
 > **Note:** `USE_SCALPER_RISK_MANAGEMENT=False` — the scalper SL state machine is feature-flagged off. Active production SL uses `TradeManager.update_stop_loss()`.
 
@@ -1042,12 +1006,12 @@ Gates execute in order. First failure terminates evaluation immediately and reco
 
 | Exit Path | Trigger | Exit Size | Config Key | File / Method | Transport |
 |-----------|---------|-----------|-----------|---------------|-----------|
-| TP1 | +1.5% from entry | 50% of position | `SCALPER_TP1_PCT=0.015` | `trade_manager.close_partial_position()` | REST |
-| TP2 | +2.5% from entry | 25% more (75% total closed) | `SCALPER_TP2_PCT=0.025` | `trade_manager.close_partial_position()` | REST |
-| TP3 | +3.5% from entry | All remaining | `SCALPER_TP3_PCT=0.035` | `trade_manager.close_partial_position()` | REST |
-| EOD_SQUAREOFF | 15:10 IST (hard wall) | All open positions | `SQUARE_OFF_TIME=15:10` | `trade_manager.close_all_positions()` via `eod_scheduler` | REST |
-| SOFT_STOP | Discretionary engine: regime reversal or OF deterioration (score ≥2) | Full exit | `DISCRETIONARY_CONFIG.soft_stop_pct=0.5%` | `discretionary_engine.py` → `order_manager.safe_exit()` | REST |
-| EMERGENCY | Telegram `/emergency` command | All positions immediately | — | `telegram_bot.py` → `trade_manager.emergency_exit()` | REST |
+| TP1 | +1.5x ATR | 40% of position | `TP1_ATR_MULT` | `order_manager.close_partial_position()` | REST |
+| TP2 | +2.5x ATR | 40% more (80% total) | `TP2_ATR_MULT` | `order_manager.close_partial_position()` | REST |
+| TP3 | +3.5x ATR | 20% remaining (Runner) | `TP3_ATR_MULT` | `order_manager.safe_exit()` | REST |
+| EOD_SQUAREOFF | 15:10 IST (hard wall) | All open positions | `SQUARE_OFF_TIME` | `trade_manager.close_all_positions()` | REST |
+| CAUTIOUS | Spread > 0.4% | 50% Size, 30% tight TP | `P51_G10_SPREAD_MAX_PCT` | `order_manager.enter_position()` | REST |
+| EMERGENCY | `/emergency` | All positions | — | `trade_manager.emergency_exit()` | REST |
 
 Exit fill confirmation for all paths: **Order WebSocket** `on_order_update()` → `order_manager` processes fill, releases capital, updates DB.
 
@@ -1805,26 +1769,8 @@ PREVIOUSLY BROKEN (before 2026-03-04):
 
 ## SECTION 21 — Incident Log
 
-### 2026-03-04 — P0 Incident: Zero Trades Since January 2026
+## Phase 51 — Gate Quality Hardening (07 Mar 2026)
+26 targeted fixes across G1–G13. Key features: 45-candle history minimum, 9% scanner floor, session-permanent circuit hitter blacklist (G3), tiered scoring G6 (≥2), HTF logic rebuilt (G9), two-tick confirmation (G10), dynamic timeouts (G11), and ATR-based SL/TP scaling.
 
-Duration: ~45 trading days with zero trade execution
-Root cause: Missing await on async enter_position() call
-Detection: Manual log review showing 3,500+ coroutine crashes per session
-
-Bugs Fixed:
-#  | File                      | Description                                    | Severity
-1  | focus_engine.py L305      | Missing await on enter_position()              | P0
-2  | scanner.py L132           | Dangling to_date variable in quality check     | P0
-3a | focus_engine.py           | No can_signal() guard before execution         | P0
-3b | focus_engine.py           | Slot burned before order confirmation          | P0
-3c | focus_engine.py           | Silent exception swallow, no Telegram alert    | P0
-4  | signal_manager.py         | Missing threading.Lock() on list ops           | P1
-5  | focus_engine.py + main.py | No stale signal flush at 9:45 boundary         | P1
-R1 | focus_engine.py           | return instead of continue in signal loop      | P0
-R2 | focus_engine.py           | get_event_loop() crash in Python 3.12 thread   | P0
-R3 | focus_engine.py           | Blocking REST call in async monitor loop       | P1
-B2 | focus_engine.py + main.py | Validation monitor fires after EOD 15:10       | P0
-B3 | eod_watchdog.py + main.py | Process never terminates cleanly               | P1
-   | fyers_broker_interface.py | disconnect() was a no-op pass statement        | P1
-
-All fixes verified: py_compile clean, pytest 81 passed 1 skipped.
+## Phase 52 — Partial Exit Engine (07 Mar 2026)
+Implemented 40/40/20 TP strategy: TP1 moves SL to breakeven, TP2 moves SL to TP1, TP3 trails with ATR×0.5. Human intervention safety (G13 isolation from `CLOSED_EXTERNALLY` and partial exits), cancel-first `safe_exit()`, and async dispatch fixes for `monitor_hard_stop_status`.

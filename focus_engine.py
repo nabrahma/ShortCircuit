@@ -3,6 +3,7 @@ import logging
 import threading
 import datetime
 import asyncio
+import pytz
 
 from fyers_connect import FyersConnect
 import config
@@ -35,6 +36,9 @@ class FocusEngine:
         
         # Auto-Recovery on Init
         self.attempt_recovery()
+        
+        # Phase 52: Event loop reference for sync thread async dispatch
+        self._event_loop = None
         
     async def get_position_snapshot(self, symbol: str) -> dict:
         """
@@ -71,20 +75,41 @@ class FocusEngine:
             logger.error(f"Cannot validate {symbol}: Missing signal_low")
             return
 
-        # Define Triggers
+        # Define Triggers (Phase 51: G12 Tighter Invalidation)
         # Short Logic: Trigger if Price < Low
         entry_trigger = signal_low
-        # Invalidate if Price > High (Stop Loss hit before entry)
-        invalidation_trigger = signal_data.get('stop_loss', signal_low * 1.01)
+        # G12: Tighter invalidation buffer (signal_high * 1.002)
+        signal_high = signal_data.get('signal_high', signal_low * 1.01)
+        invalidation_trigger = signal_high * config.P51_G12_INVALIDATION_BUFFER_PCT if config.PHASE_51_ENABLED else signal_high * 1.002
+        # Actually P51_G12_INVALIDATION_BUFFER_PCT is 0.002. So 1 + 0.002 = 1.002.
+        invalidation_trigger = signal_high * (1 + config.P51_G12_INVALIDATION_BUFFER_PCT)
+
+        # Phase 51: G11 Dynamic Timeout
+        IST = pytz.timezone('Asia/Kolkata')
+        now_ist = datetime.datetime.now(IST)
+        eod = now_ist.replace(hour=15, minute=5, second=0, microsecond=0)
+        remaining = (eod - now_ist).total_seconds() / 60
+        effective = max(3, min(15, remaining - 2))
+        expires_at = now_ist + datetime.timedelta(minutes=effective)
 
         self.pending_signals[symbol] = {
             'data': signal_data,
             'trigger': entry_trigger,
             'invalidate': invalidation_trigger,
             'timestamp': time.time(),
+            'expires_at': expires_at, # Phase 51 dynamic timeout
             'queued_at': datetime.datetime.now(),  # FIX #5: for stale signal flush at 9:45
             'correlation_id': signal_data.get('correlation_id'),
         }
+        
+        # Phase 51 [G8.3]: Trigger immediate cooldown for this symbol in SignalManager
+        # This prevents other scanner instances (if parallel) from picking it up
+        if hasattr(self, 'analyzer') and self.analyzer:
+            try:
+                self.analyzer.signal_manager.add_pending_signal(symbol)
+            except Exception as e:
+                logger.error(f"[GATE] Failed to set G8.3 cooldown for {symbol}: {e}")
+
         logger.info(f"[GATE] Added {symbol} to Validation Gate. Trigger: < {entry_trigger}")
         
         # Start Background Monitor if not running
@@ -290,11 +315,40 @@ class FocusEngine:
                             details=details or {}
                         ))
                 
+                # ── PHASE 51: G10-G12 HARDEING ──────────────────────────────
                 # A. CHECK TRIGGER (VALIDATION CONFIRMED)
                 # For Short: LTP < Trigger (Signal Low)
                 if ltp < trigger_price:
+                    # G10: Two-tick confirmation
+                    count = pending.get('_breakdown_tick_count', 0) + 1
+                    pending['_breakdown_tick_count'] = count
+                    if count < 2:
+                        continue # Wait for second tick
+                    
+                    # Two ticks confirmed — proceed to spread check (G10.1)
+                    # Fetch full depth for spread check
+                    try:
+                        depth_resp = await asyncio.to_thread(self.fyers.depth, data={"symbol": symbol})
+                        if 'd' in depth_resp and symbol in depth_resp['d']:
+                            depth = depth_resp['d'][symbol]
+                            ask = depth['ask'][0]['price'] if depth['ask'] else ltp
+                            bid = depth['bid'][0]['price'] if depth['bid'] else ltp
+                            spread_pct = (ask - bid) / ltp if ltp > 0 else 0
+                            
+                            if spread_pct > config.P51_G10_MAX_SPREAD_PCT:
+                                logger.warning(f"⚠️ [WIDE SPREAD] {symbol} spread {spread_pct:.4f} > {config.P51_G10_MAX_SPREAD_PCT} | Downgraded to CAUTIOUS")
+                                pending['data']['execution_mode'] = 'CAUTIOUS'
+                            else:
+                                pending['data']['execution_mode'] = pending['data'].get('execution_mode', 'NORMAL')
+                    except Exception as e:
+                        logger.warning(f"Spread check failed (non-fatal): {e}")
 
-                    # ── PRD-008: G10-G12 Recording ──────────────────────────────
+                    # G10.2: Entry Price = signal_low - 1 tick
+                    tick_size = pending['data'].get('tick_size', 0.05)
+                    adjusted_entry = trigger_price - tick_size
+                    pending['data']['adjusted_entry'] = adjusted_entry
+
+                    # ── G10-G12 Recording ──────────────────────────────
                     _gr = pending.get('data', {}).get('_gate_result')
                     if _gr is not None:
                         _gr.g10_pass  = True
@@ -308,6 +362,7 @@ class FocusEngine:
                             'reason': 'GATE12_TRIGGER_BROKEN',
                             'trigger_price': trigger_price,
                             'ltp': ltp,
+                            'entry_price': pending['data'].get('adjusted_entry')
                         }
                     )
 
@@ -490,53 +545,31 @@ class FocusEngine:
                     del self.pending_signals[symbol]
                     continue
                     
-                # B. CHECK INVALIDATION (STOP HIT BEFORE ENTRY)
+                # B. CHECK INVALIDATION / TIMEOUT
                 elif ltp > inval_price:
-                    _queue_validation_update(
-                        outcome='REJECTED',
-                        details={
-                            'reason': 'INVALIDATED_PRE_ENTRY',
-                            'trigger_price': trigger_price,
-                            'invalidation_price': inval_price,
-                            'ltp': ltp,
-                        }
-                    )
-                    # PRD-008: G12 FAIL — invalidated before entry
-                    _gr_inv = pending.get('data', {}).get('_gate_result')
-                    if _gr_inv is not None:
-                        _gr_inv.g12_pass  = False
-                        _gr_inv.g12_value = round(ltp - inval_price, 4)
-                        _gr_inv.verdict   = "REJECTED"
-                        _gr_inv.first_fail_gate   = "G12_INVALIDATED_PRE_ENTRY"
-                        _gr_inv.rejection_reason  = f"LTP {ltp} > invalidation {inval_price} before entry"
-                        get_gate_result_logger().record(_gr_inv)
-                    logger.info(f"🚫 [INVALIDATED] {symbol} hit {inval_price} before entry. Removed.")
+                    logger.info(f"🚫 [INVALIDATED] {symbol} hit G12 tighter buffer {inval_price}")
+                    _queue_validation_update(outcome='REJECTED', details={'reason': 'G12_INVALIDATED_BUFFER', 'ltp': ltp})
                     del self.pending_signals[symbol]
-                    
-                # C. TIMEOUT (configurable, default 15 mins — Phase 41.1)
-                elif (time.time() - timestamp) > (config.VALIDATION_TIMEOUT_MINUTES * 60):
-                    # PRD-008: G12 FAIL — timed out waiting for trigger
-                    _gr_to = pending.get('data', {}).get('_gate_result')
-                    if _gr_to is not None:
-                        _gr_to.g12_pass  = False
-                        _gr_to.g12_value = round(time.time() - timestamp, 1)
-                        _gr_to.verdict   = "REJECTED"
-                        _gr_to.first_fail_gate   = "G12_TIMEOUT"
-                        _gr_to.rejection_reason  = f"Pending > {config.VALIDATION_TIMEOUT_MINUTES}m without trigger. LTP={ltp}"
-                        get_gate_result_logger().record(_gr_to)
-                    _queue_validation_update(
-                        outcome='TIMEOUT',
-                        details={
-                            'reason': 'VALIDATION_TIMEOUT',
-                            'timeout_minutes': config.VALIDATION_TIMEOUT_MINUTES,
-                            'trigger_price': trigger_price,
-                            'invalidation_price': inval_price,
-                            'ltp': ltp,
-                        }
-                    )
-                    timeout_min = config.VALIDATION_TIMEOUT_MINUTES
-                    logger.info(f"⌛ [TIMEOUT] {symbol} pending for >{timeout_min}m. Removed.")
+                    continue
+                
+                # G11: Above-high invalidation (signal_high * 1.005)
+                elif ltp > pending['data'].get('signal_high', trigger_price) * 1.005:
+                    logger.info(f"🚫 [INVALIDATED] {symbol} hit G11 above-high 0.5% buffer")
+                    _queue_validation_update(outcome='REJECTED', details={'reason': 'G11_ABOVE_HIGH_INVALIDATE', 'ltp': ltp})
                     del self.pending_signals[symbol]
+                    continue
+
+                # C. TIMEOUT (Phase 51 G11: Dynamic expires_at)
+                elif datetime.datetime.now(pytz.timezone('Asia/Kolkata')) > pending.get('expires_at', datetime.datetime.now(pytz.timezone('Asia/Kolkata')) + datetime.timedelta(minutes=15)):
+                    logger.info(f"⌛ [TIMEOUT] {symbol} expired at {pending.get('expires_at')}")
+                    _queue_validation_update(outcome='TIMEOUT', details={'reason': 'G11_DYNAMIC_TIMEOUT'})
+                    del self.pending_signals[symbol]
+                    continue
+                
+                # Reset counter if price recovers above low
+                else:
+                    if ltp >= trigger_price:
+                        pending['_breakdown_tick_count'] = 0
                      
             except Exception as e:
                 logger.error(f"Validation Check Error {symbol}: {e}")
@@ -600,25 +633,58 @@ class FocusEngine:
         # Adapt to OrderManager state or Legacy
         entry_price = position_data.get('entry_price', position_data.get('entry', 0))
         sl_price = position_data.get('hard_stop_price', position_data.get('sl', 0))
-        soft_sl = entry_price * (1 + config.DISCRETIONARY_CONFIG['soft_stop_pct']) if 'entry_price' in position_data else sl_price
+        soft_sl = entry_price * (1 + config.DISCRETIONARY_CONFIG['soft_stop_pct'])
+        actual_qty = position_data.get('qty', qty)
+
+        # Phase 52: Compute TP levels from OrderManager
+        tps = {}
+        if (self.order_manager
+                and getattr(config, 'P52_PARTIAL_EXIT_ENABLED', True)
+                and entry_price > 0):
+            try:
+                tps = self.order_manager.compute_take_profits(entry_price, position_data)
+            except Exception as e:
+                logger.warning(f"[P52] compute_take_profits failed for {symbol}: {e}")
 
         self.active_trade = {
-            'symbol': symbol,
-            'entry': entry_price,
-            'sl': sl_price,       # Hard Stop
-            'soft_sl': soft_sl,   # Soft Stop
-            'qty': position_data.get('qty', qty),
-            'status': 'OPEN',
-            'highest_profit': -999,
-            'message_id': message_id,
-            'trade_id': position_data.get('trade_id_str') if isinstance(position_data, dict) and position_data.get('trade_id_str') else (trade_id or f"Trd_{int(time.time())}"),
-            'last_price': entry_price,
-            # Phase 41.3 State
+            'symbol':          symbol,
+            'entry':           entry_price,
+            'sl':              sl_price,
+            'soft_sl':         soft_sl,
+            'qty':             actual_qty,
+            'remaining_qty':   actual_qty,       # Phase 52: tracks open qty
+            'sl_order_id':     position_data.get('sl_id', None),  # Phase 52: for SL modify
+            'status':          'OPEN',
+            'highest_profit':  -999,
+            'message_id':      message_id,
+            'trade_id':        (
+                position_data.get('trade_id_str')
+                if isinstance(position_data, dict) and position_data.get('trade_id_str')
+                else (trade_id or f"Trd_{int(time.time())}")
+            ),
+            'last_price':      entry_price,
+            # Phase 41.3 legacy state (kept for dashboard compatibility)
             'target_extended': False,
-            'current_target': entry_price * (1 - config.DISCRETIONARY_CONFIG['initial_target_pct'])
+            'current_target':  tps.get('tp1', entry_price * 0.985),
+            # Phase 52: Partial exit state
+            'tp1':             tps.get('tp1', 0),
+            'tp2':             tps.get('tp2', 0),
+            'tp3':             tps.get('tp3', 0),
+            'tp1_qty_pct':     tps.get('tp1_qty_pct', 0.40),
+            'tp2_qty_pct':     tps.get('tp2_qty_pct', 0.40),
+            'tp3_trail_atr':   tps.get('tp3_trail_atr', 0),
+            'tp1_hit':         False,
+            'tp2_hit':         False,
+            'tp3_hit':         False,
+            'trailing_sl':     None,             # Phase 52: trailing stop for TP3 runner
         }
         
         self.is_running = True
+        logger.info(
+            f"[FOCUS] Started {symbol} entry=₹{entry_price} "
+            f"tp1=₹{tps.get('tp1',0):.2f} tp2=₹{tps.get('tp2',0):.2f} "
+            f"tp3=₹{tps.get('tp3',0):.2f} qty={actual_qty}"
+        )
         
         # Start Loop
         self.thread = threading.Thread(target=self.focus_loop, daemon=True)
@@ -656,15 +722,22 @@ class FocusEngine:
                          self.stop_focus("CLOSED_EXTERNALLY")
                          return
                     
-                    # Check Broker Hard Stop Status
-                    self.order_manager.monitor_hard_stop_status(symbol)
+                    # Phase 52: monitor_hard_stop_status is async — dispatch correctly from sync thread
+                    if self._event_loop:
+                        asyncio.run_coroutine_threadsafe(
+                            self.order_manager.monitor_hard_stop_status(symbol),
+                            self._event_loop
+                        )
 
                 # ── CRITICAL: EOD SQUARE-OFF (15:10) ────────────────
                 now = datetime.datetime.now()
                 if now.hour == 15 and now.minute >= 10:
                     logger.warning(f"⏰ [EOD] Force Closing {symbol} at 15:10")
-                    if self.order_manager:
-                        self.order_manager.safe_exit(symbol, "EOD_SQUARE_OFF")
+                    if self.order_manager and self._event_loop:
+                        asyncio.run_coroutine_threadsafe(
+                            self.order_manager.safe_exit(symbol, "EOD_SQUARE_OFF"),
+                            self._event_loop
+                        )
                     self.stop_focus("EOD")
                     return
 
@@ -676,41 +749,145 @@ class FocusEngine:
                     quote = response['d'][0]
                     qt = quote.get('v', quote)
                     ltp = qt.get('lp')
-                    volume = qt.get('volume')
-                    avg_price = qt.get('avg_price', ltp)
                     
                     self.active_trade['last_price'] = ltp
-                    self.active_trade['volume'] = volume
                     
-                    # Update PnL logic
-                    entry = self.active_trade['entry']
-                    pnl_points = entry - ltp # Short PnL
-                    
-                    # ── INTELLIGENT EXIT LOGIC (Phase 41.3) ──────────
-                    if self.discretionary_engine and self.order_manager:
-                        
-                        # A. Soft Stop Check
-                        soft_sl = self.active_trade['soft_sl']
-                        # Short Logic: Price > Soft SL
-                        if ltp >= soft_sl: 
-                            decision = self.discretionary_engine.evaluate_soft_stop(symbol, self.active_trade)
-                            if decision == 'EXIT':
-                                self.order_manager.safe_exit(symbol, "SOFT_STOP")
+                    # ── PHASE 52: PARTIAL EXIT ENGINE ────────────────────────────
+                    t = self.active_trade
+                    partial_enabled = getattr(config, 'P52_PARTIAL_EXIT_ENABLED', True)
+
+                    if partial_enabled and t.get('tp1') and t['remaining_qty'] > 0:
+                        # ── TP1: Close 40%, move SL to breakeven ─────────────────
+                        if not t['tp1_hit'] and ltp <= t['tp1']:
+                            tp1_qty = max(1, int(t['qty'] * t['tp1_qty_pct']))
+                            logger.info(f"🎯 [TP1] {symbol} hit ₹{t['tp1']:.2f} — closing {tp1_qty} of {t['remaining_qty']}")
+
+                            if self._event_loop:
+                                future = asyncio.run_coroutine_threadsafe(
+                                    self.order_manager.close_partial_position(symbol, tp1_qty, "TP1_HIT"),
+                                    self._event_loop
+                                )
+                                # Wait synchronously for result to avoid state race
+                                result = future.result(timeout=10)
+                            else:
+                                result = {"status": "FAILED", "error": "No event loop"}
+
+                            if result and result.get('status') == 'SUCCESS':
+                                t['tp1_hit'] = True
+                                t['remaining_qty'] -= tp1_qty
+
+                                # Move SL to breakeven (entry price)
+                                if getattr(config, 'P52_BREAKEVEN_AFTER_TP1', True):
+                                    t['sl'] = t['entry']
+                                    if self._event_loop:
+                                        asyncio.run_coroutine_threadsafe(
+                                            self.order_manager.modify_sl_qty(symbol, t['remaining_qty']),
+                                            self._event_loop
+                                        )
+                                    logger.info(f"✅ [TP1] {symbol} SL moved to breakeven ₹{t['entry']:.2f}, remaining qty={t['remaining_qty']}")
+
+                                if self.telegram_bot:
+                                    asyncio.run_coroutine_threadsafe(
+                                        self.telegram_bot.send_alert(
+                                            f"🎯 **TP1 HIT** — `{symbol}`\n"
+                                            f"Closed {tp1_qty} shares @ ₹{t['tp1']:.2f}\n"
+                                            f"SL → Breakeven ₹{t['entry']:.2f}\n"
+                                            f"Remaining: {t['remaining_qty']} shares riding to TP2"
+                                        ),
+                                        self._event_loop
+                                    )
+                            else:
+                                logger.error(f"[TP1] Partial close FAILED for {symbol}: {result}")
+
+                        # ── TP2: Close another 40%, move SL to TP1 level ────────
+                        elif t['tp1_hit'] and not t['tp2_hit'] and t.get('tp2') and ltp <= t['tp2']:
+                            tp2_qty = max(1, int(t['qty'] * t['tp2_qty_pct']))
+                            logger.info(f"🎯 [TP2] {symbol} hit ₹{t['tp2']:.2f} — closing {tp2_qty}")
+
+                            if self._event_loop:
+                                future = asyncio.run_coroutine_threadsafe(
+                                    self.order_manager.close_partial_position(symbol, tp2_qty, "TP2_HIT"),
+                                    self._event_loop
+                                )
+                                result = future.result(timeout=10)
+                            else:
+                                result = {"status": "FAILED"}
+
+                            if result and result.get('status') == 'SUCCESS':
+                                t['tp2_hit'] = True
+                                t['remaining_qty'] -= tp2_qty
+
+                                # Move SL to TP1 level — lock in TP1 profit on remaining
+                                if getattr(config, 'P52_SL_MOVE_AFTER_TP2', True) and t.get('tp1'):
+                                    t['sl'] = t['tp1']
+                                    if self._event_loop:
+                                        asyncio.run_coroutine_threadsafe(
+                                            self.order_manager.modify_sl_qty(symbol, t['remaining_qty']),
+                                            self._event_loop
+                                        )
+                                    logger.info(f"✅ [TP2] {symbol} SL → TP1 level ₹{t['tp1']:.2f}, remaining qty={t['remaining_qty']}")
+
+                                # Initialise trailing SL for TP3 runner
+                                t['trailing_sl'] = ltp + t.get('tp3_trail_atr', ltp * 0.005)
+
+                                if self.telegram_bot:
+                                    asyncio.run_coroutine_threadsafe(
+                                        self.telegram_bot.send_alert(
+                                            f"🎯 **TP2 HIT** — `{symbol}`\n"
+                                            f"Closed {tp2_qty} shares @ ₹{t['tp2']:.2f}\n"
+                                            f"SL → ₹{t['tp1']:.2f} (TP1 lock)\n"
+                                            f"Runner: {t['remaining_qty']} shares, trailing active"
+                                        ),
+                                        self._event_loop
+                                    )
+                            else:
+                                logger.error(f"[TP2] Partial close FAILED for {symbol}: {result}")
+
+                        # ── TP3: Trail remaining 20% ──────────────────────────────
+                        elif t['tp2_hit'] and not t['tp3_hit'] and t['remaining_qty'] > 0:
+                            trail_atr = t.get('tp3_trail_atr', 0)
+                            if trail_atr > 0:
+                                new_trail_sl = ltp + trail_atr   # SHORT: trail SL above price
+                                # Only tighten — never widen the trailing stop
+                                if t['trailing_sl'] is None or new_trail_sl < t['trailing_sl']:
+                                    t['trailing_sl'] = new_trail_sl
+
+                                # If price hits trailing SL → close remaining
+                                if ltp >= t['trailing_sl']:
+                                    logger.info(f"🏁 [TP3 TRAIL EXIT] {symbol} trailing SL hit @ ₹{t['trailing_sl']:.2f}")
+                                    if self.order_manager and self._event_loop:
+                                        asyncio.run_coroutine_threadsafe(
+                                            self.order_manager.safe_exit(symbol, "TP3_TRAIL_STOP"),
+                                            self._event_loop
+                                        )
+                                    t['tp3_hit'] = True
+                                    self.stop_focus("TP3_TRAIL_HIT")
+                                    return
+
+                            # Hard TP3 level as fallback if ATR trail not configured
+                            elif t.get('tp3') and ltp <= t['tp3']:
+                                logger.info(f"🏁 [TP3] {symbol} hit hard level ₹{t['tp3']:.2f} — closing runner")
+                                if self.order_manager and self._event_loop:
+                                    asyncio.run_coroutine_threadsafe(
+                                        self.order_manager.safe_exit(symbol, "TP3_HIT"),
+                                        self._event_loop
+                                    )
+                                t['tp3_hit'] = True
+                                self.stop_focus("TP3_HIT")
                                 return
 
-                        # B. Target Extension Logic
-                        target = self.active_trade['current_target']
-                        # Short: Price <= Target
-                        if ltp <= target:
-                            decision = self.discretionary_engine.evaluate_profit_extension(symbol, self.active_trade)
-                            if decision == 'TAKE_PROFIT':
-                                self.order_manager.safe_exit(symbol, "TARGET_HIT")
+                    # ── SOFT STOP (existing logic — keep for non-partial-exit fallback) ──
+                    elif not partial_enabled and self.discretionary_engine and self.order_manager:
+                        soft_sl = t['soft_sl']
+                        if ltp >= soft_sl:
+                            decision = self.discretionary_engine.evaluate_soft_stop(symbol, t)
+                            if decision == 'EXIT':
+                                if self._event_loop:
+                                    asyncio.run_coroutine_threadsafe(
+                                        self.order_manager.safe_exit(symbol, "SOFT_STOP"),
+                                        self._event_loop
+                                    )
                                 return
-                            elif decision == 'EXTEND':
-                                new_target = entry * (1 - config.DISCRETIONARY_CONFIG['extended_target_pct'])
-                                self.active_trade['current_target'] = new_target
-                                self.active_trade['target_extended'] = True
-                                logger.info(f"🚀 [FOCUS] Target Extended to {new_target}")
 
                     # ── FALLBACK / LEGACY LOGIC ──────────────────────
                     # Keep simplistic trailing if Discretionary Engine not active?
@@ -763,9 +940,18 @@ class FocusEngine:
 
     def stop_focus(self, reason="STOPPED"):
         trade = self.active_trade
+        symbol = trade['symbol'] if trade else None
         self.is_running = False
         self.active_trade = None
-        logger.info(f"Focus Mode Stopped. Reason: {reason}")
+        logger.info(f"[FOCUS] Stop. Reason: {reason}")
+        
+        # Phase 52: Cancel ALL pending orders on any stop
+        # Prevents phantom SL order creating accidental LONG after manual close
+        if symbol and getattr(config, 'P52_CLEANUP_ON_STOP_FOCUS', True):
+            try:
+                self.cleanup_orders(symbol)
+            except Exception as e:
+                logger.error(f"[FOCUS] cleanup_orders failed on stop_focus: {e}")
 
     def sfp_watch_loop(self, trade):
         """

@@ -81,17 +81,24 @@ class GodModeAnalyst:
             
         return structure, z_score_vol
 
-    def check_constraints(self, ltp, day_high, trend_gain, open_price):
+    def check_constraints(self, ltp, day_high, trend_gain, open_price, df=None):
         """
         The "Ethos" Check.
         Phase 13: Pullback Scalper Rules.
+        Phase 51: Hardened with Kill Backdoor and Time-Since-High buffer.
         """
+        import config
+        
+        # 0. Kill Backdoor [G1.2]
+        if config.PHASE_51_ENABLED and config.P51_G1_KILL_BACKDOOR:
+            # Absolute rejection if dropped > 0.5% from day high
+            if ltp < day_high * 0.995:
+                return False, f"Kill Backdoor: Price ₹{ltp:.2f} too far from Day High ₹{day_high:.2f} (>0.5% drop)"
+
         # 1. Trend Strength
-        # LOGIC FIX (Phase 38): Check Day's MAX Gain, not just current gain.
-        # If stock hit +8% earlier, it's a Trend Day, even if it retraced to +3%.
         max_gain_pct = ((day_high - open_price) / open_price) * 100
         
-        is_strong_trend = trend_gain >= 5.0
+        is_strong_trend = trend_gain >= config.SCANNER_GAIN_MIN_PCT
         was_strong_trend = max_gain_pct >= 7.0
         
         if not is_strong_trend and not was_strong_trend:
@@ -100,19 +107,26 @@ class GodModeAnalyst:
         if trend_gain > 15.0:
             return False, f"Gain {trend_gain:.1f}% too high (> 15%) - Circuit Risk"
             
-        # FIX-1: Tightened proximity. Books-backed: enter at the extreme or not at all.
-        # Mathematical basis: 2.5% pullback keeps gain_pct above G5 Gate A threshold (9%)
-        # for any stock with day_high >= 9.5% gain.
         dist_from_high_pct = (day_high - ltp) / day_high * 100
 
-        allowed_dist = 2.5                          # was 4.0
+        allowed_dist = 2.5
         if max_gain_pct > 10.0:
-            allowed_dist = 3.5                      # was 6.0 — slight relaxation only for very strong trend days
-        # REMOVED: elif was_strong_trend: allowed_dist = 6.0  ← deleted entirely
+            allowed_dist = 3.5
 
         if dist_from_high_pct > allowed_dist:
             return False, f"Too far from High ({dist_from_high_pct:.2f}%) > {allowed_dist}%"
             
+        # 2. Time-Since-High Buffer [G1.3]
+        if config.PHASE_51_ENABLED and df is not None and not df.empty:
+            # Find when day high was hit
+            high_idx = df['high'].idxmax()
+            last_idx = df.index[-1]
+            candles_since_high = last_idx - high_idx # Since it's 1min candles
+            
+            max_candles = getattr(config, 'P51_G1_TIME_SINCE_HIGH_CANDLES', 20)
+            if candles_since_high > max_candles:
+                return False, f"G1 Time Gate: {candles_since_high} candles since day high (limit {max_candles})"
+
         return True, "PASSED"
 
     # Phase 19: ATR
@@ -237,18 +251,12 @@ class GodModeAnalyst:
         self,
         candles: list[dict],
         profile,          # ProfileAnalyzer result (dict)
-        gain_pct: float   # current % gain vs prev close
+        gain_pct: float,  # current % gain vs prev close
+        atr: float = 0    # Phase 51: Added ATR for VAH clearance check
     ) -> dict:
         """
         Phase 44.8 — Core edge detector.
-
-        Fires when a stock is:
-          1. Stretched 9–14.5% above prev close (validated sweet spot)
-          2. Making a new intraday high
-          3. On significantly dying volume (vol_fade_ratio < 0.65)
-          4. While price is above VAH (no acceptance at this level)
-
-        Candle pattern is a BONUS — upgrades confidence but never required.
+        Phase 51: Hardened with all-day high, ATR clearance, and late-session rule.
         """
         result = {
             "fired":         False,
@@ -264,6 +272,8 @@ class GodModeAnalyst:
             return result
 
         import config
+        from datetime import datetime
+        import pytz
 
         # ── Gate A: Stretch sweet spot ──────────────────────────────
         # stretch_score = relative stretch above scanner minimum.
@@ -278,12 +288,15 @@ class GodModeAnalyst:
             result["reject_reason"] = f"stretch_too_high:{gain_pct:.2f}%"
             return result
 
-        # ── Gate B: New intraday high ────────────────────────────────
-        recent_high = max(c['high'] for c in candles[-10:])
-        is_new_high  = candles[-1]['high'] >= recent_high * 0.999
-        if not is_new_high:
-            result["reject_reason"] = "no_new_high"
-            return result
+        # ── Gate B: ALL-DAY intraday high [G5.1] ────────────────────
+        if getattr(config, 'P51_G5_GATE_B_USE_ALLDAY_HIGH', False):
+            day_high = max(c['high'] for c in candles)
+            curr_high = candles[-1]['high']
+            is_at_day_high = curr_high >= day_high * 0.9995 # Within 0.05% of absolute high
+            
+            if not is_at_day_high:
+                result["reject_reason"] = f"not_at_day_high (ltp_high:{curr_high} < day_high:{day_high})"
+                return result
 
         # ── Gate C: Volume fading on the new high ───────────────────
         prior_vols = [c['volume'] for c in candles[-6:-1]]
@@ -299,22 +312,24 @@ class GodModeAnalyst:
             result["reject_reason"] = f"volume_not_faded:{vol_fade_ratio:.2f}"
             return result
 
-        # ── Gate D: Price above VAH (no acceptance) ─────────────────
-        if profile is None:
-            # Should never reach here after analyzer.py FIX-3, but guard anyway
-            result["reject_reason"] = "profile_none:vah_unverifiable"
-            result["fired"] = False
-            return result
-
+        # ── Gate D: Price above VAH (ATR clearance) [G5.2] ─────────
         vah = profile.get('vah') if isinstance(profile, dict) else getattr(profile, 'vah', None)
         if vah is None or vah <= 0:
             result["reject_reason"] = "vah_not_computed"
-            result["fired"] = False
             return result
 
-        if candles[-1]['close'] <= vah:
-            result["reject_reason"] = f"price_below_vah:{candles[-1]['close']:.2f}|vah:{vah:.2f}"
+        curr_close = candles[-1]['close']
+        if curr_close <= vah:
+            result["reject_reason"] = f"price_below_vah:{curr_close:.2f}|vah:{vah:.2f}"
             return result
+            
+        # ATR-relative clearance: must be significantly above VAH to prove rejection
+        if getattr(config, 'P51_G5_GATE_D_ATR_CLEARANCE', False) and atr > 0:
+            clearance = curr_close - vah
+            min_clearance = atr * 0.2
+            if clearance < min_clearance:
+                result["reject_reason"] = f"insufficient_vah_clearance:{clearance:.2f} < {min_clearance:.2f} (0.2*ATR)"
+                return result
 
         # ── All gates passed — base signal fires ────────────────────
         result["fired"] = True
@@ -326,6 +341,16 @@ class GodModeAnalyst:
             result["confidence"] = "HIGH"      # volume faded 50–70%
         else:
             result["confidence"] = "MEDIUM"    # volume faded 35–50%
+            
+        # ── Gate E: Late-session EXTREME-only rule [G5.3] ────────────
+        if getattr(config, 'P51_G5_GATE_E_LATE_SESSION_EXTREME_ONLY', False):
+            IST = pytz.timezone('Asia/Kolkata')
+            now_ist = datetime.now(IST).time()
+            if now_ist > datetime.time(14, 30):
+                if result["confidence"] != "EXTREME":
+                    result["fired"] = False
+                    result["reject_reason"] = f"late_session_non_extreme (conf:{result['confidence']})"
+                    return result
 
         # ── Bonus: existing bearish pattern upgrades confidence ──────
         try:

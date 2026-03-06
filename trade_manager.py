@@ -517,6 +517,7 @@ class TradeManager:
             }
             self.fyers.place_order(data=data)
             logger.info(f"[OK] Emergency Exit Placed for {symbol} (qty: {actual_qty})")
+            
         except Exception as e:
             logger.critical(f"[CRIT] EMERGENCY EXIT FAILED for {symbol}: {e}")
         finally:
@@ -665,6 +666,16 @@ class TradeManager:
                     logger.info(f"Squaring off {symbol}: Qty {exit_qty} Side {exit_side}")
                     res = self.fyers.place_order(data=data)
                     logger.info(f"Square-off Response: {res}")
+                    
+                    # Phase 51 [G13]: Record outcome
+                    try:
+                        avg_price = pos.get('avgPrice', 0)
+                        exit_price = pos.get('lp', 0) # Use last price as estimate for PnL
+                        is_win = exit_price < avg_price if exit_price > 0 and avg_price > 0 else False
+                        self.record_trade_outcome(symbol, is_win)
+                    except Exception as e:
+                        logger.error(f"G13 outcome recording failed in square-off: {e}")
+                    
                     closed_count += 1
 
                     # Phase 42: Clean up SL tracking
@@ -681,6 +692,16 @@ class TradeManager:
         except Exception as e:
             logger.error(f"Auto-Square Off Failed: {e}")
             return f"Square Off Error: {e}"
+
+    def record_trade_outcome(self, symbol: str, is_win: bool):
+        """
+        Phase 51 [G13]: Record trade outcome in SignalManager.
+        Updates consecutive loss tracking and global stats.
+        """
+        from signal_manager import get_signal_manager
+        sm = get_signal_manager()
+        sm.record_outcome(symbol, is_win)
+        logger.info(f"G13 Outcome recorded for {symbol}: {'WIN' if is_win else 'LOSS'}")
 
     # ==================================================================
     # SAFETY UTILITIES

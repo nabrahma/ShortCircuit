@@ -141,7 +141,7 @@ class FyersScanner:
                 if not _rvol_valid:
                     logger.warning(f"SKIP {symbol} — RVOL_VALIDITY_GATE: {_mins_open:.1f} min since open — need {config.RVOL_MIN_CANDLES} min for valid RVOL. Skip.")
                     self.quality_reject_counts[symbol] = self.quality_reject_counts.get(symbol, 0) + 1
-                    return False, None
+                    return False, None, None
                 # Candle count: keep as absolute floor for API data integrity only
                 min_candles = 10  # No longer varies by time — cliff-edge removed
             else:
@@ -167,23 +167,39 @@ class FyersScanner:
                     reject_pct = int(zero_vol_ratio*100)
                     logger.warning(f"[SKIP] Quality Reject: {symbol} | Zero Volume: {reject_pct}%")
                     self.quality_reject_counts[symbol] = self.quality_reject_counts.get(symbol, 0) + 1
-                    return False, None
+                    return False, None, None
                     
                 # Return Success AND the Dataframe (Reuse Strategy)
                 cols = ["epoch", "open", "high", "low", "close", "volume"]
                 df = pd.DataFrame(response["candles"], columns=cols)
                 df['datetime'] = pd.to_datetime(df['epoch'], unit='s').dt.tz_localize('UTC').dt.tz_convert('Asia/Kolkata')
-                return True, df
+                
+                # Phase 51: Pre-fetch 15m candles for G9 trend exhaustion
+                df_15m = None
+                try:
+                    data_15m = {
+                        "symbol": symbol, "resolution": "15", "date_format": "1",
+                        "range_from": five_back.strftime("%Y-%m-%d"),
+                        "range_to": today.strftime("%Y-%m-%d"), "cont_flag": "1"
+                    }
+                    resp_15m = self.fyers.history(data=data_15m)
+                    if resp_15m.get('s') == 'ok' and resp_15m.get('candles'):
+                        df_15m = pd.DataFrame(resp_15m['candles'], columns=cols)
+                        df_15m['datetime'] = pd.to_datetime(df_15m['epoch'], unit='s').dt.tz_localize('UTC').dt.tz_convert('Asia/Kolkata')
+                except Exception as e:
+                    logger.warning(f"Failed to fetch 15m candles for {symbol}: {e}")
+                
+                return True, df, df_15m
             
             # Fix #4: Hard block 0-candle data instead of allowing
             candle_count = len(response.get('candles', []))
             logger.warning(f"SKIP {symbol} — Insufficient candle data ({candle_count}). Blocking.")
             self.quality_reject_counts[symbol] = self.quality_reject_counts.get(symbol, 0) + 1
-            return False, None
+            return False, None, None
             
         except Exception as e:
             logger.error(f"Quality Check Error {symbol}: {e}")
-            return True, None  # PASS on error (fail-open)
+            return True, None, None  # PASS on error (fail-open)
 
     def scan_market(self):
         """
@@ -323,7 +339,18 @@ class FyersScanner:
                     gain   = abs(quote.get('ch_oc', 0))
                     oi     = quote.get('oi', 0)
 
-                    if gain >= 6.0 and gain <= 18.0 and volume >= 100_000 and ltp >= config.SCANNER_MIN_LTP:
+                    if gain >= 9.0 and gain <= 18.0 and volume >= 100_000 and ltp >= config.SCANNER_MIN_LTP:
+                        # Phase 51: Intraday Run Filter (G2.3)
+                        if config.PHASE_51_ENABLED:
+                            # Reject if symbol opened < 7% gain today (gap-up < 7%)
+                            pc = quote.get('pc', 0)
+                            open_p = quote.get('open', 0)
+                            if pc > 0 and open_p > 0:
+                                gap_pct = (open_p - pc) / pc * 100
+                                if gap_pct < 7.0:
+                                    logger.debug(f"REJECT {symbol} [G2.3]: Weak Gap-up ({gap_pct:.1f}% < 7%)")
+                                    continue
+                        
                         if self.quality_reject_counts.get(symbol, 0) >= 3:
                             logger.debug(f"BLACKLIST {symbol} — Quality rejected 3x today, skipping.")
                             continue
@@ -380,7 +407,16 @@ class FyersScanner:
                         if ltp is None or volume is None or change_p is None:
                             continue
 
-                        if 6.0 <= change_p <= 18.0 and volume > 100000 and ltp > 5:
+                        if 9.0 <= change_p <= 18.0 and volume > 100000 and ltp > config.SCANNER_MIN_LTP:
+                            # Phase 51: Intraday Run Filter (G2.3 - REST fallback)
+                            # Quotes API response usually has pc/open in 'v' dict
+                            pc = quote_data.get('pc', 0)
+                            open_p = quote_data.get('o', 0)
+                            if pc > 0 and open_p > 0:
+                                gap_pct = (open_p - pc) / pc * 100
+                                if gap_pct < 7.0:
+                                    logger.debug(f"REJECT {symbol} [G2.3]: Weak Gap-up ({gap_pct:.1f}% < 7%)")
+                                    continue
 
                             if self.quality_reject_counts.get(symbol, 0) >= 3:
                                 logger.debug(f"BLACKLIST {symbol} — Quality rejected 3x today, skipping history fetch.")
@@ -438,30 +474,32 @@ class FyersScanner:
         # Phase B: Parallel history + quality check
         filtered_candidates = []
         max_workers = getattr(config, 'SCANNER_PARALLEL_WORKERS', 3)
+        candidates_map = {c['symbol']: c for c in pre_candidates}
 
-        def fetch_quality(candidate):
-            """Fetch history + quality for a single candidate."""
-            return self.check_chart_quality(candidate['symbol'])
+        def fetch_quality(symbol):
+            """Fetch history + quality for a single symbol."""
+            return self.check_chart_quality(symbol)
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {executor.submit(fetch_quality, c): c for c in pre_candidates}
+            futures = {executor.submit(fetch_quality, c['symbol']): c['symbol'] for c in pre_candidates}
 
             for future in as_completed(futures):
-                candidate = futures[future]
+                symbol = futures[future]
                 try:
-                    is_good, history_df = future.result(timeout=5)
+                    is_good, df, df_15m = future.result(timeout=10)
                     if is_good:
-                        candidate['history_df'] = history_df
+                        c = candidates_map[symbol]
+                        c['history_df'] = df
+                        c['history_df_15m'] = df_15m # Phase 51
+                        
                         logger.info(
-                            f"[CANDIDATE] {candidate['symbol']} | "
-                            f"Gain: {candidate['change']}% | "
-                            f"Tick: {candidate['tick_size']} | OI: {candidate['oi']}"
+                            f"[CANDIDATE] {c['symbol']} | "
+                            f"Gain: {c['change']}% | "
+                            f"Tick: {c['tick_size']} | OI: {c['oi']}"
                         )
-                        filtered_candidates.append(candidate)
-                    else:
-                        logger.info(f"[SKIP] {candidate['symbol']} (Poor Microstructure)")
+                        filtered_candidates.append(c)
                 except Exception as e:
-                    logger.error(f"Quality check failed for {candidate['symbol']}: {e}")
+                    logger.error(f"Error in parallel quality check for {symbol}: {e}")
 
         # Sort by Change % Descending
         filtered_candidates.sort(key=lambda x: x['change'], reverse=True)

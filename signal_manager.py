@@ -86,11 +86,11 @@ class SignalManager:
             
             # Check 3: Per-symbol cooldown
             if symbol in self.last_signal_time:
-                time_diff = (now - self.last_signal_time[symbol]).total_seconds() / 60
-                if time_diff < self.cooldown_minutes:
-                    remaining = self.cooldown_minutes - time_diff
+                unlock_at = self.last_signal_time[symbol]
+                if now < unlock_at:
+                    remaining = (unlock_at - now).total_seconds() / 60
                     self.stats['blocked_cooldown'] += 1
-                    return False, f"Cooldown: {symbol} signaled {time_diff:.0f}m ago (wait {remaining:.0f}m)"
+                    return False, f"Cooldown: {symbol} blocked for {remaining:.1f}m"
             
             return True, "OK"
     
@@ -104,6 +104,7 @@ class SignalManager:
             stop_loss: Stop loss price
             pattern: Pattern name
         """
+        import config
         with self._lock:
             self._reset_if_new_day()
             now = datetime.now()
@@ -118,10 +119,29 @@ class SignalManager:
             }
             
             self.signals_today.append(signal_record)
-            self.last_signal_time[symbol] = now
+            
+            # G8.1: Per-symbol cooldown (Standard)
+            cooldown = self.cooldown_minutes
+            if config.PHASE_51_ENABLED:
+                cooldown = max(cooldown, config.P51_G8_COOLDOWN_ON_SIGNAL_ADD)
+                
+            self.last_signal_time[symbol] = now + timedelta(minutes=cooldown)
             self.stats['signals_sent'] += 1
             
-            logger.info(f"Signal recorded: {symbol} @ {entry_price} (#{len(self.signals_today)} today)")
+            logger.info(f"Signal recorded: {symbol} @ {entry_price} (#{len(self.signals_today)} today). Cooldown set: {cooldown}m")
+
+    def add_pending_signal(self, symbol: str):
+        """
+        Phase 51 [G8.3]: Set cooldown immediately when signal is added to FocusEngine.
+        Prevents other scanners from picking up the same symbol.
+        """
+        import config
+        with self._lock:
+            self._reset_if_new_day()
+            now = datetime.now()
+            cooldown = config.P51_G8_COOLDOWN_ON_SIGNAL_ADD if config.PHASE_51_ENABLED else 30
+            self.last_signal_time[symbol] = now + timedelta(minutes=cooldown)
+            logger.info(f"G8.3 Cooldown set for {symbol}: {cooldown} minutes (Pending Signal added)")
 
     def record_execution_failure(
         self,

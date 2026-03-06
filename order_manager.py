@@ -15,6 +15,7 @@ import math
 import uuid
 from datetime import datetime, timedelta
 from typing import Dict, Optional, Any
+import config
 from fyers_broker_interface import FyersBrokerInterface
 
 
@@ -44,12 +45,14 @@ class OrderManager:
         broker: FyersBrokerInterface,
         telegram_bot,
         db=None,
-        capital_manager=None
+        capital_manager=None,
+        trade_manager=None
     ):
         self.broker  = broker
         self.telegram = telegram_bot
         self.db      = db
         self.capital = capital_manager
+        self.trade_manager = trade_manager
 
         self.active_positions: Dict[str, Any] = {}
         self.position_locks:   Dict[str, asyncio.Lock] = {}
@@ -85,6 +88,14 @@ class OrderManager:
         del self._exec_cooldowns[symbol]
         return False, 0
 
+    def _set_exec_cooldown(self, symbol: str, reason: str, seconds: int = 900):
+        """Phase 44.6: Block symbol from new entries after local logic failure."""
+        unblock_at = datetime.utcnow() + timedelta(seconds=seconds)
+        self._exec_cooldowns[symbol] = unblock_at
+        logger.warning(
+            f"⏳ [COOLDOWN] {symbol} blocked for {seconds}s | Reason: {reason} | Until: {unblock_at.strftime('%H:%M:%S')}"
+        )
+
     @staticmethod
     def _round_sl_to_tick(price: float, side: str, tick: float = 0.05) -> float:
         """
@@ -108,6 +119,49 @@ class OrderManager:
         else:                # LONG trade — SL is below entry
             rounded = math.floor(price / tick) * tick
         return round(rounded, 2)
+
+    def compute_stop_loss(self, ltp: float, signal: dict) -> float:
+        """Phase 51: ATR-based SL calculation."""
+        atr    = signal.get('atr', 0)
+        tick   = signal.get('tick_size', 0.05)
+        # PRD: max(atr * 0.5, 3 * tick_size) — using config constants
+        buffer = max(atr * getattr(config, 'P51_SL_ATR_MULTIPLIER', 0.5),
+                     tick * getattr(config, 'P51_SL_MIN_TICK_BUFFER', 3))
+        
+        # For SHORT trades, SL is above entry/high
+        signal_high = signal.get('signal_high', ltp * 1.01)
+        sl_price = signal_high + buffer
+        return self._round_sl_to_tick(sl_price, 'SELL', tick)
+
+    def compute_take_profits(self, entry: float, signal: dict) -> dict:
+        """Phase 51: 40/40/20 Target Split."""
+        atr = signal.get('atr', 0)
+        if atr == 0:
+            return {
+                'tp1': entry * 0.985, 'tp1_qty_pct': 0.40,
+                'tp2': entry * 0.975, 'tp2_qty_pct': 0.40,
+                'tp3': entry * 0.965, 'tp3_trail_atr': 0.05
+            }
+
+        tp1_mult = getattr(config, 'P51_TP1_ATR_MULT', 1.5)
+        tp2_mult = getattr(config, 'P51_TP2_ATR_MULT', 2.5)
+        tp3_mult = getattr(config, 'P51_TP3_ATR_MULT', 3.5)
+
+        if signal.get('execution_mode') == 'CAUTIOUS':
+            # Tighter TP for wide spread
+            tp1_mult *= 0.7  # e.g. 1.5 -> 1.05
+            tp2_mult *= 0.7  # e.g. 2.5 -> 1.75
+            tp3_mult *= 0.7  # e.g. 3.5 -> 2.45
+
+        tp1 = entry - atr * tp1_mult
+        tp2 = entry - atr * tp2_mult
+        tp3 = entry - atr * tp3_mult
+
+        return {
+            'tp1': tp1, 'tp1_qty_pct': 0.40,
+            'tp2': tp2, 'tp2_qty_pct': 0.40,
+            'tp3': tp3, 'tp3_trail_atr': atr * getattr(config, 'P51_TP3_TRAIL_ATR_MULT', 1.0)
+        }
 
     async def _verify_fill_via_rest(self, order_id: str) -> Optional[float]:
         """
@@ -152,9 +206,7 @@ class OrderManager:
         send_alert: bool = False,
     ) -> None:
         """Shared close-path. Cleans state, releases capital, logs DB."""
-        self.active_positions.pop(symbol, None)
-        self.hard_stops.pop(symbol, None)
-        self.exit_in_progress.pop(symbol, None)
+        # State cleanup (Move to END to allow outcome calculation)
 
         # FIX 5: use async release_slot (re-syncs Fyers margin after close)
         if self.capital:
@@ -176,6 +228,29 @@ class OrderManager:
                 )
             except Exception as e:
                 logger.error(f"[CLOSE] DB close log failed for {symbol}: {e}")
+
+        # Phase 51 [G13]: Record outcome in SignalManager for loss tracking
+        try:
+            pos = self.active_positions.get(symbol)
+            if pos:
+                entry_price = pos.get('entry_price', 0)
+                # For SHORT trades, exit_price < entry_price IS A WIN
+                is_win = exit_price < entry_price if exit_price > 0 and entry_price > 0 else False
+                
+                if self.trade_manager:
+                    self.trade_manager.record_trade_outcome(symbol, is_win)
+                else:
+                    # Fallback to direct call if trade_manager not injected
+                    from signal_manager import get_signal_manager
+                    get_signal_manager().record_outcome(symbol, is_win)
+                    logger.info(f"G13 Outcome recorded for {symbol} (direct): {'WIN' if is_win else 'LOSS'}")
+        except Exception as e:
+            logger.error(f"[CLOSE] G13 record failed: {e}")
+
+        # Final state cleanup
+        self.active_positions.pop(symbol, None)
+        self.hard_stops.pop(symbol, None)
+        self.exit_in_progress.pop(symbol, None)
 
         if send_alert and self.telegram and hasattr(self.telegram, 'send_alert'):
             try:
@@ -385,6 +460,14 @@ class OrderManager:
                 margin_req = required_capital / 5.0
                 logger.warning(f"[SIZING] Capital manager not injected — using fallback ₹{buying_power}")
 
+            # PRD: Spread > 0.4% -> CAUTIOUS execution (reduced size)
+            if signal.get('execution_mode') == 'CAUTIOUS':
+                old_qty = qty
+                qty = int(math.floor(qty * 0.5))
+                required_capital *= 0.5
+                margin_req *= 0.5
+                logger.warning(f"⚠️ [CAUTIOUS SIZE] {symbol} qty reduced from {old_qty} to {qty} (50%)")
+
             # ── Qty Zero Guard ────────────────────────────────────────────
             if qty == 0:
                 real_margin = self.capital._real_margin if self.capital else 0
@@ -474,18 +557,12 @@ class OrderManager:
                 if self.capital:
                     await self.capital.acquire_slot(symbol)
 
-                # ── Step 3: Place SL-M Immediately ───────────────────────
-                sl_pct     = 0.02
-                raw_sl     = (
-                    ltp * (1 + sl_pct) if side == 'SELL'
-                    else ltp * (1 - sl_pct)
-                )
-                stop_price = self._round_sl_to_tick(raw_sl, side)
+                # ── FIX 4: ATR-Based SL ───────────────────────────────────
+                stop_price = self.compute_stop_loss(ltp, signal)
                 sl_side    = 'BUY' if side == 'SELL' else 'SELL'
 
                 logger.info(
-                    f"[SL-CALC] {symbol} raw_sl=₹{raw_sl:.4f} → "
-                    f"tick_rounded=₹{stop_price:.2f} (tick=0.05)"
+                    f"[SL-CALC] {symbol} ATR-based stop_price=₹{stop_price:.2f} (tick=0.05)"
                 )
 
                 try:
@@ -550,6 +627,8 @@ class OrderManager:
                     'entry_time': datetime.now(),
                     'entry_price': ltp,
                     'stop_loss':  stop_price,
+                    # Phase 51: G13 Targets for trade_manager monitoring
+                    'tp_targets': self.compute_take_profits(ltp, signal)
                 }
                 self.active_positions[symbol] = pos_state
 
@@ -634,6 +713,23 @@ class OrderManager:
                     return False
 
                 logger.info(f"🔻 [EXIT] Initiating Safe Exit for {symbol} ({reason})")
+                
+                # Phase 52: Cancel all pending orders BEFORE placing exit order
+                # Prevents phantom SL from executing AFTER position is closed
+                try:
+                    loop = asyncio.get_event_loop()
+                    rest = getattr(self.broker, 'rest_client', None)
+                    if rest:
+                        ob = await loop.run_in_executor(None, rest.orderbook)
+                        if isinstance(ob, dict) and ob.get('s') == 'ok':
+                            for o in ob.get('orderBook', []):
+                                if (o.get('symbol') == symbol
+                                        and o.get('status') == FYERS_ORDER_STATUS_PENDING):
+                                    await self.broker.cancel_order(o['id'])
+                                    logger.info(f"[SAFE_EXIT] Cancelled pending order {o['id']} for {symbol}")
+                except Exception as e:
+                    logger.warning(f"[SAFE_EXIT] Order cleanup failed (non-fatal): {e}")
+
                 pos['status'] = 'CLOSING'
 
                 # STEP 1: CANCEL SL FIRST
@@ -697,6 +793,101 @@ class OrderManager:
                 return False
             finally:
                 self.exit_in_progress[symbol] = False
+
+    async def close_partial_position(self, symbol: str, quantity: int, reason: str) -> dict:
+        """
+        Phase 52: Closes `quantity` shares of an open short position via market BUY order.
+        Returns: {"status": "SUCCESS", "order_id": str, "filled_qty": int}
+              or {"status": "FAILED", "error": str}
+        
+        CRITICAL: Must NEVER call _finalize_closed_position() (G13 isolation).
+        """
+        lock = self._get_lock(symbol)
+        async with lock:
+            try:
+                if symbol not in self.active_positions:
+                    return {"status": "FAILED", "error": f"{symbol} not active"}
+
+                pos = self.active_positions[symbol]
+                if pos['qty'] < quantity:
+                    return {"status": "FAILED", "error": f"Insufficient qty: {pos['qty']} < {quantity}"}
+
+                logger.info(f"🔻 [PARTIAL EXIT] Closing {quantity} shares of {symbol} ({reason})")
+                
+                exit_side = 'BUY' if pos['side'] == 'SHORT' else 'SELL'
+                exit_id = await self.broker.place_order(
+                    symbol=symbol,
+                    side=exit_side,
+                    qty=quantity,
+                    order_type='MARKET'
+                )
+                
+                # Wait for fill (15s)
+                filled = await self.broker.wait_for_fill(exit_id, timeout=15.0)
+                if filled:
+                    logger.info(f"✅ Partial Fill: {symbol} ×{quantity}")
+                    # Update internal qty
+                    pos['qty'] -= quantity
+                    # NOTE: _finalize_closed_position is NOT called here.
+                    return {"status": "SUCCESS", "order_id": exit_id, "filled_qty": quantity}
+                else:
+                    return {"status": "FAILED", "error": "Fill timeout"}
+
+            except Exception as e:
+                logger.error(f"❌ [PARTIAL EXIT] Error: {e}")
+                return {"status": "FAILED", "error": str(e)}
+
+    async def modify_sl_qty(self, symbol: str, new_qty: int) -> bool:
+        """
+        Phase 52: After partial close, reduce the SL-M order qty to match remaining position.
+        Searches pending orderbook for symbol's SL order and modifies qty.
+        Returns True if modified, False if not found or failed.
+        """
+        try:
+            loop = asyncio.get_event_loop()
+            rest = getattr(self.broker, 'rest_client', None)
+            if not rest:
+                logger.error(f"[SL_QTY] No rest_client for {symbol}")
+                return False
+
+            # Run blocking REST call in thread
+            orderbook = await loop.run_in_executor(None, rest.orderbook)
+            if not isinstance(orderbook, dict) or orderbook.get('s') != 'ok':
+                return False
+
+            for order in orderbook.get('orderBook', []):
+                if (order.get('symbol') == symbol
+                        and order.get('status') == FYERS_ORDER_STATUS_PENDING
+                        and order.get('side') == 1):   # side=1 = BUY (our SL for a SHORT)
+                    order_id = order['id']
+                    tick = 0.05
+                    stop_price = order.get('stopPrice', 0)
+                    limit_price = round(stop_price * 1.005 / tick) * tick  # 0.5% above trigger
+
+                    modify_data = {
+                        "id":         order_id,
+                        "qty":        new_qty,
+                        "type":       4,          # SL-M
+                        "limitPrice": round(limit_price, 2),
+                        "stopPrice":  stop_price,
+                    }
+                    resp = await loop.run_in_executor(
+                        None,
+                        lambda: rest.modify_order(data=modify_data)
+                    )
+                    if resp and resp.get('s') == 'ok':
+                        logger.info(f"[SL_QTY] {symbol} SL qty updated → {new_qty}")
+                        return True
+                    else:
+                        logger.error(f"[SL_QTY] modify failed for {symbol}: {resp}")
+                        return False
+
+            logger.warning(f"[SL_QTY] No pending BUY SL order found for {symbol}")
+            return False
+
+        except Exception as e:
+            logger.error(f"[SL_QTY] Exception for {symbol}: {e}")
+            return False
 
     async def _emergency_exit(self, symbol: str, qty: int, side: str):
         try:
