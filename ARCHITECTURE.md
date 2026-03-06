@@ -1,5 +1,7 @@
 # ShortCircuit — Architecture Reference
-**Version:** Post-Phase 44.8.9 + PRD v3.0 | **Last Updated:** 2026-03-05
+**Version:** Phase 44.9.4 — SL tick rounding enforced, adopt_orphan idempotent + DB-backed,
+GateResultLogger buildrows implemented, _COLUMN_SPEC aligned to 36-col schema.
+ | **Last Updated:** 2026-03-06
 
 ---
 
@@ -9,7 +11,7 @@ ShortCircuit is a fully automated, event-driven algorithmic trading bot for NSE 
 
 The system infrastructure is: Python 3.10+ asyncio, Fyers API v3 (REST for quote batches and order submission; WebSocket for real-time tick data and order fill events), PostgreSQL + asyncpg for trade journaling, and python-telegram-bot (PTB) v20+ for the operator interface. The operator has no web UI — all signals, trade alerts, live P&L, commands (`/auto on`, `/status`, `/positions`), and EOD summaries flow exclusively through Telegram.
 
-The concurrency model is a **single asyncio event loop** with a `TaskGroup` launching four concurrent tasks: `trading_loop`, `telegram_bot`, `reconciliation`, and `eod_scheduler`, plus the new `eod_watchdog` (Bug 2A fix). All tasks share a single `asyncio.Event` called `shutdown_event`. When any component sets this event, every `while not shutdown_event.is_set()` loop exits cleanly. The maximum signal limit per day is **5**, enforced by `SignalManager` with a 45-minute per-symbol cooldown. A consecutive-loss pause (3 losses) also halts new signals for the rest of the session.
+The concurrency model is a **single asyncio event loop** with a `TaskGroup` launching four concurrent tasks: `trading_loop`, `telegram_bot`, `reconciliation`, and `eod_scheduler`, plus the new `eod_watchdog` (Bug 2A fix). All tasks share a single `asyncio.Event` called `shutdown_event`. When any component sets this event, every `while not shutdown_event.is_set()` loop exits cleanly. The maximum signal limit per day is **5**, enforced by `SignalManager` with a 45-minute per-symbol cooldown. A consecutive-loss pause (3 losses) also halts new signals for the rest of the session. **[Phase 44.9.2 PRD-5]** SL tick-size rounding (`_round_sl_to_tick`) and capital release safety nets prevent capital lockouts from Fyers tick-size rejections. **[Phase 44.9.3 PRD-6]** Full manual trade lifecycle coverage: `adopt_orphan()` in `ReconciliationEngine` detects manual entries within 6 seconds, places a tick-rounded emergency SL, acquires the capital slot, and logs to DB — preventing infinite re-adoption loops. Manual exits detected via phantom handler which calls `_finalize_closed_position()` and sets `_db_dirty=True`.
 
 ---
 
@@ -57,13 +59,13 @@ The concurrency model is a **single asyncio event loop** with a `TaskGroup` laun
 ### order_manager.py
 **Role:** Async order lifecycle manager — entry, SL placement, WebSocket fill detection, safe exit, capital allocation/release, and DB journaling. Primary execution path for all live trades.
 **Key Classes:** `OrderManager`
-**Key Functions:** None (all methods on `OrderManager`)
+**Key Functions:** `_round_sl_to_tick(price, side, tick=0.05)` (static — rounds SL trigger price to nearest valid Fyers tick boundary; ceil for SHORT/SELL, floor for LONG/BUY; prevents Fyers code=-50 StopPrice rejection)
 **Imports from project:** `fyers_broker_interface.FyersBrokerInterface`
-**Called by:** `focus_engine.py` (`check_pending_signals` → `order_manager.enter_position`), `telegram_bot.py` (manual exit commands), `main.py` (construction + injection)
+**Called by:** `focus_engine.py` (`check_pending_signals` → `order_manager.enter_position`), `telegram_bot.py` (manual exit commands), `main.py` (construction + injection), `reconciliation.py` (`_finalize_closed_position` called from phantom handler and `adopt_orphan`)
 **Calls into:** `fyers_broker_interface.py`, `database.py`, `capital_manager.py`, `telegram_bot.py` (alerts)
-**State it owns:** `positions: dict[str, dict]` (open positions keyed by symbol), `pending_orders: dict[str, str]` (order_id→symbol), per-symbol `asyncio.Lock` objects
-**Error handling:** `enter_position` wraps REST call; on `code -50` or rejection, logs `ERROR` + sends Telegram failure alert with full payload; capital is **not** deducted until fill confirmed; `safe_exit` has WebSocket race condition protection via per-symbol locks
-**Notes:** `FYERS_ORDER_STATUS_TRADED = 2` constant used to detect fill from WS event. [P0 FIX] — previously never instantiated; `focus_engine.order_manager` was `None`.
+**State it owns:** `active_positions: dict[str, dict]` (open positions keyed by symbol), `position_locks: dict[str, asyncio.Lock]` (per-symbol locks), `exit_in_progress: dict[str, bool]`, `hard_stops: dict[str, str]` (symbol→sl_order_id), `_exec_cooldowns: dict[str, datetime]` (symbol→unblock_at, 15-min execution failure cooldown)
+**Error handling:** `enter_position`: entry order and SL order each have their own separate try/except blocks — SL failures cannot be mislabeled as entry failures. SL failure path always does: emergency_exit + capital.release_slot() + set_exec_cooldown + SL-specific Telegram alert. Outer except block includes `capital.release_slot()` safety net when `not capital.is_slot_free` (catches any exception thrown after fill but before SL placement). Capital is never deducted until fill is confirmed via WebSocket. `safe_exit` has WebSocket race condition protection via per-symbol asyncio locks.
+**Notes:** `FYERS_ORDER_STATUS_TRADED = 2` constant used to detect fill from WS event. [P0 FIX] — previously never instantiated; `focus_engine.order_manager` was `None`. **[Phase 44.6]** `compute_qty()` via `CapitalManager.compute_qty()` — full Fyers margin utilization; `acquire_slot()` called after confirmed fill (was missing entirely); fill timeout 30s → 15s with REST verification fallback; execution failure cooldown 15-min block per symbol; `_finalize_closed_position()` calls async `release_slot(broker)`. **[PRD-5 / Phase 44.9.2]** `_round_sl_to_tick()` static method added — all SL trigger prices are now rounded to nearest 0.05 tick before placement (math.ceil for SHORT, math.floor for LONG). SL placement wrapped in its own try/except separate from entry order except block. Capital release safety net added to outer except. Fixes live bug: Fyers code=-50 StopPrice not a multiple of tick size 0.0500, triggered for ~60% of LTP values where `ltp * 1.02` does not naturally land on a 0.05 boundary. `import math` already present in top-level imports.
 
 ---
 
@@ -202,15 +204,15 @@ Current behaviour:
 ---
 
 ### reconciliation.py
-**Role:** HFT reconciliation engine — zero-cost when flat (pure WebSocket cache check), cache-driven when live. Detects orphaned, phantom, and mismatched positions between DB and broker.
+**Role:** HFT reconciliation engine — zero-cost when flat (pure WebSocket cache check), cache-driven when live. Detects orphaned, phantom, and mismatched positions between DB and broker. Handles full manual trade lifecycle: entry detection (orphan adoption), exit detection (phantom cleanup), and capital sync for both.
 **Key Classes:** `ReconciliationEngine`
-**Key Functions:** None (all methods)
+**Key Functions:** `adopt_orphan(broker_pos: dict)` — adopts a manually-entered broker position: places tick-rounded emergency SL, registers in `order_manager.active_positions`, logs to DB, sets `_db_dirty=True`, acquires capital slot (or emits TWO POSITIONS OPEN critical alert if slot occupied)
 **Imports from project:** `database.DatabaseManager`, `fyers_broker_interface.FyersBrokerInterface`
 **Called by:** `main.py` (`reconciliation_engine.run(shutdown_event)` in TaskGroup; `_cleanup_runtime` calls `stop()`)
-**Calls into:** `fyers_broker_interface.py`, `database.py`, `telegram_bot.py` (alerts)
-**State it owns:** `_db_positions: dict`, `_db_dirty: bool`, `_has_open_positions: bool`, `_shutdown_event: asyncio.Event`, `running: bool`
-**Error handling:** [Bug 2B FIX] — `stop()` now logs structured messages; `run()` uses `_interruptible_sleep()` instead of bare `asyncio.sleep()`; `_cleanup_runtime()` wraps `stop()` in `asyncio.wait_for(..., timeout=10.0)`; DB query already has 1.5s timeout
-**Notes:** Market hours interval: 6s. Off-hours with positions: 30s. Fully flat off-hours: 300s. Dirty flag set by `TradeManager.mark_dirty()` on trade open/close.
+**Calls into:** `fyers_broker_interface.py`, `database.py`, `telegram_bot.py` (alerts), `order_manager._finalize_closed_position()` (phantom handler), `capital_manager.acquire_slot()` / `release_slot()` (orphan adoption and phantom cleanup)
+**State it owns:** `_db_positions: dict`, `_db_dirty: bool`, `_has_open_positions: bool`, `_shutdown_event: asyncio.Event`, `running: bool`, `capital: CapitalManager` (injected), `order_manager: OrderManager` (injected)
+**Error handling:** [Bug 2B FIX] — `stop()` now logs structured messages; `run()` uses `_interruptible_sleep()` instead of bare `asyncio.sleep()`; `_cleanup_runtime()` wraps `stop()` in `asyncio.wait_for(..., timeout=10.0)`; DB query already has 1.5s timeout. `adopt_orphan()` has idempotency guard at top (symbol-in-active_positions check) AND in `_handle_divergence()` ORPHANS loop — two concurrent reconcile cycles cannot double-adopt the same position.
+**Notes:** Market hours interval: 6s. Off-hours with positions: 30s. Fully flat off-hours: 300s. Dirty flag set by `TradeManager.mark_dirty()` on trade open/close. **[Phase 44.6]** `capital_manager` and `order_manager` injected at construction. **[PRD-5 / Phase 44.9.2]** Phantom handler (`_handle_divergence` PHANTOMS block) rewritten: now calls `order_manager._finalize_closed_position(reason='MANUAL_CLOSE_DETECTED')` instead of manual dict cleanup — ensures `db.log_trade_exit()` is called so DB position state changes OPEN→CLOSED. Capital release condition changed from `capital.active_symbol == sym` to `not capital.is_slot_free` (single-position bot: any phantom = slot must be free; old symbol-match could silently skip release). `_db_dirty = True` set after every phantom processed — forces fresh DB read next cycle, terminating the infinite phantom detection loop that would otherwise fire every 6s. Telegram alert updated: "GHOST POSITION CLEARED" → "MANUAL CLOSE DETECTED" with explicit PnL-not-tracked warning. **[PRD-6 / Phase 44.9.3]** `adopt_orphan()` fully rewritten. Three gaps closed: (1) GAP-1 critical: `adopt_orphan()` now calls `db.log_trade_entry()` and sets `_db_dirty=True` after adoption — without this, every 6-second cycle re-detected the same orphan and placed ~600 SL orders/hour; (2) GAP-2: idempotency guards added in both `_handle_divergence()` ORPHANS loop and inside `adopt_orphan()` itself — protects against concurrent reconcile cycles; (3) GAP-3: when capital slot is occupied (bot trade open) and manual trade detected simultaneously, previously logged WARNING only — now emits CRITICAL Telegram alert "TWO POSITIONS OPEN" with both symbol names and recommended action. `adopt_orphan()` SL price uses same tick-rounding logic as `_round_sl_to_tick()` (math.ceil for SHORT, math.floor for LONG, tick=0.05). `import math` at top-level imports.
 
 ---
 
@@ -241,15 +243,15 @@ Current behaviour:
 ---
 
 ### capital_manager.py
-**Role:** Capital tracker with 5× intraday leverage — tracks buying power, prevents orders when insufficient, allocates/releases per position.
+**Role:** Live-synced capital tracker — source of truth is Fyers GET /funds (available_margin), never a hardcoded base_capital. Enforces single-position architecture via slot acquisition/release. 5× intraday leverage applied to real margin from Fyers.
 **Key Classes:** `CapitalManager`
-**Key Functions:** None (all methods)
+**Key Functions:** `sync(broker)` — pulls actual available_margin from Fyers /funds API and updates `_real_margin`; `compute_qty(symbol, ltp)` — computes maximum qty for full margin utilization with 2% safety buffer, returns `(qty, cost, margin_required)`; `acquire_slot(symbol)` — locks capital slot after confirmed fill, raises RuntimeError if slot already occupied; `release_slot(broker=None)` — releases slot after SL/TP/manual exit, calls `sync(broker)` outside lock to refresh margin for next trade
 **Imports from project:** None
-**Called by:** `order_manager.py`, `trade_manager.py`, `telegram_bot.py` (status display), `main.py` (construction)
-**Calls into:** Nothing
-**State it owns:** `base_capital=₹1800`, `leverage=5.0`, `total_buying_power=₹9000`, `available: float`, `positions: dict[str, float]`
-**Error handling:** Double-allocation guard (logs warning if symbol already allocated); double-release guard
-**Notes:** `get_status()` returns `{'available': float, 'total_buying_power': float, ...}`. `available` represents buying power (₹9000 minus allocated), not base capital.
+**Called by:** `order_manager.py` (`compute_qty`, `acquire_slot`, `release_slot`, `is_slot_free`, `get_slot_status`), `reconciliation.py` (`acquire_slot`, `release_slot`, `is_slot_free`, `active_symbol`), `telegram_bot.py` (`get_slot_status` for /status display), `main.py` (construction + `sync()` at startup)
+**Calls into:** `fyers_broker_interface.py` (via `broker.get_funds()` in `sync()`), nothing else
+**State it owns:** `_real_margin: float` (always from Fyers, never hardcoded), `_position_active: bool`, `_active_symbol: Optional[str]`, `_last_sync: Optional[datetime]`, `leverage: float` (default 5.0), `_lock: asyncio.Lock`
+**Error handling:** `sync()` keeps last value on Fyers API failure (does not crash); `acquire_slot()` raises `RuntimeError` if slot occupied — caller must check `is_slot_free` first; `release_slot()` is idempotent (sets already-False to False, harmless). `_parse_fyers_funds()` handles 3 Fyers response shapes: `fund_limit` list (v3 standard), `equity` dict, and flat dict.
+**Notes:** **[Phase 44.6 full rewrite — replaces hardcoded base_capital architecture]** `_real_margin` is live from Fyers /funds `id=2 "Available Balance"` entry. `buying_power = _real_margin * leverage`. `is_slot_free` property: `not _position_active`. `active_symbol` property: `_active_symbol`. `compute_qty()` applies 2% safety buffer (`safety_cap = _real_margin * 0.98`) and walks down qty until `margin_req <= safety_cap`. `acquire_slot()` protected by `asyncio.Lock` — thread-safe for concurrent coroutines. `release_slot()` calls `sync(broker)` OUTSIDE the lock to avoid deadlock while getting fresh margin for next trade. `sync()` schedule: session start, after every confirmed fill, after every position close (SL/TP/manual), every 5 minutes in health monitor heartbeat. `get_slot_status()` returns rich dict used by Telegram /status command. Legacy compatibility: `get_status()`, `can_afford()`, `allocate()` (DEPRECATED, logs warning), `release()` (DEPRECATED, logs warning) kept for backward compat — do not use in new code.
 
 ---
 
@@ -949,22 +951,23 @@ Impact: This was the singular reason for 2 months of zero trade execution.
 ### PHASE 4 — ORDER EXECUTION
 **File:** `order_manager.py` — `OrderManager.enter_position(signal)`
 **Transport:** REST for submission; WebSocket for fill confirmation
+**[Updated: Phase 44.6 + PRD-5]**
 
 | Step | Action |
 |------|--------|
-| 4.1 | `capital_manager.can_afford(symbol, ltp * qty)` — buying power check |
-| 4.2 | Quantity: `math.floor(capital_manager.available / ltp)` |
-| 4.3 | `broker.place_order(...)` — REST POST: SELL, INTRADAY, MARKET type |
-| 4.4 | `order_id` returned; added to `pending_orders` dict |
-| 4.5 | SL-M order placed immediately via second REST call |
-| 4.6 | `capital_manager.allocate(symbol, cost)` called (capital reserved) |
-| 4.7 | `db_manager.log_trade_entry(data)` — atomic write to `orders` + `positions` tables |
-| 4.8 | REST returns immediately — **do not block** |
-| 4.9 | Order WebSocket fires `on_order_update()` when broker status = 2 (TRADED) |
-| 4.10 | `order_manager` matches `order_id`, updates position with `avg_filled_price` |
-| 4.11 | Telegram: execution confirmation + pre-execution payload logged |
-| 4.12 | `focus_engine.start_focus(symbol, position_data)` — `active_trade` set |
-| 4.13 | Telegram live dashboard starts (2s refresh loop via `_dashboard_refresh_loop`) |
+| 4.1 | Auto mode gate: block if `telegram.is_auto_mode() == False` |
+| 4.2 | LTP fetch: from signal dict or `broker.get_ltp(symbol)` fallback; abort if LTP=0 (5-min cooldown) |
+| 4.3 | Sizing: `capital_manager.compute_qty(symbol, ltp)` → `(qty, cost, margin_req)` using real Fyers margin × 5× leverage with 2% safety buffer. Abort + alert if qty=0 |
+| 4.4 | `broker.place_order(symbol, side, qty, MARKET)` — REST POST entry order, returns `entry_id` |
+| 4.5 | Telegram: ENTRY ORDER PLACED alert with qty, cost, order_id |
+| 4.6 | `broker.wait_for_fill(entry_id, timeout=15.0)` — WebSocket fill detection, 15s timeout |
+| 4.7 | If fill timeout: attempt cancel → if cancel says "not a pending order" → REST verify fill (`_verify_fill_via_rest`) → if confirmed filled, use REST fill price. If genuinely unfilled: 20-min cooldown, return None |
+| 4.8 | Fill confirmed: `capital_manager.acquire_slot(symbol)` — capital slot LOCKED (single-position gate now enforced) |
+| 4.9 | SL price: `raw_sl = ltp * (1 ± sl_pct)` → `_round_sl_to_tick(raw_sl, side)` → tick-rounded to 0.05 boundary (ceil for SHORT, floor for LONG). Prevents Fyers code=-50 |
+| 4.10 | SL placement in its own `try/except`: `broker.place_order(SL_MARKET, trigger=stop_price)`. On exception OR None return: emergency_exit + release_slot + 15-min cooldown + SL-specific Telegram alert. Return None. (SL errors never fall through to outer except) |
+| 4.11 | `active_positions[symbol]` registered with full state dict: qty, side, entry_id, sl_id, status=OPEN, entry_price, stop_loss |
+| 4.12 | `db_manager.log_trade_entry(data)` — atomic write to `orders` + `positions` tables |
+| 4.13 | Outer `except` safety net: if exception fires after fill (e.g. DB error), `capital.release_slot()` called if `not is_slot_free` — ensures capital is never permanently locked by unexpected exceptions |
 
 ### PHASE 5 — POSITION MANAGEMENT
 **File:** `focus_engine.py` — `focus_loop()`
