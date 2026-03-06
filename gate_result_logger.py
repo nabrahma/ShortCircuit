@@ -354,7 +354,8 @@ class GateResultLogger:
     # Matches exact positional order of _INSERT_SQL parameters $1–$36
     _COLUMN_SPEC = {
         # $1–$4: identity (handled natively)
-        5:  (float,  True),    # nifty_level
+        5:  (str,    True),    # nifty_regime ($5)
+        6:  (float,  True),    # nifty_level ($6)
         # $7,$9,$11,...: booleans — fine as-is
         8:  (float,  True),    # g1_value  NUMERIC
         10: (float,  True),    # g2_value  NUMERIC
@@ -366,11 +367,30 @@ class GateResultLogger:
         22: (float,  True),    # g8_value  NUMERIC
         24: (str,    True),    # g9_value  ← ROOT CAUSE: was NUMERIC in schema, now VARCHAR
         26: (float,  True),    # g10_value NUMERIC
-        28: (float,  True),    # g11_value NUMERIC/VARCHAR
+        28: (str,    True),    # g11_value VARCHAR
         30: (float,  True),    # g12_value NUMERIC
         35: (float,  True),    # entry_price
         36: (int,    True),    # qty
     }
+
+    def buildrows(self, records: List[GateResult]) -> List[Tuple]:
+        """PRD-009: Convert dataclasses to DB-ready tuples."""
+        rows = []
+        for r in records:
+            row = (
+                r.evaluated_at.date(), r.scan_id, r.evaluated_at, r.symbol,
+                r.nifty_regime, _to_num(r.nifty_level),
+                r.g1_pass, _to_num(r.g1_value), r.g2_pass, _to_num(r.g2_value),
+                r.g3_pass, _to_num(r.g3_value), r.g4_pass, _to_num(r.g4_value),
+                r.g5_pass, _to_num(r.g5_value), r.g6_pass, r.g6_value,
+                r.g7_pass, r.g7_value,          r.g8_pass, _to_num(r.g8_value),
+                r.g9_pass, r.g9_value,          r.g10_pass, _to_num(r.g10_value),
+                r.g11_pass, r.g11_value,        r.g12_pass, _to_num(r.g12_value),
+                r.verdict, r.first_fail_gate, gr.rejection_reason if (gr := r) else "",
+                r.data_tier, _to_num(r.entry_price), r.qty
+            )
+            rows.append(row)
+        return rows
 
     def _sanitize_row(self, row: tuple) -> tuple:
         """
@@ -420,7 +440,7 @@ class GateResultLogger:
         if not pending:
             return 0
 
-        raw_rows  = self._build_rows(pending)
+        raw_rows  = self.buildrows(pending)
         safe_rows = [self._sanitize_row(r) for r in raw_rows]   # PRD-3: sanitize before insert
 
         conn = None

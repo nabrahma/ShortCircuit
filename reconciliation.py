@@ -347,18 +347,39 @@ class ReconciliationEngine:
             # Without this, every reconcile cycle re-detects the same orphan.
             if self.order_manager and self.order_manager.db:
                 try:
+                    logger.info("[ADOPT-DB] Using ordermanager.db path (primary)")
                     await self.order_manager.db.log_trade_entry({
                         'symbol':      symbol,
                         'direction':   side,
                         'qty':         qty,
                         'entry_price': avg_price,
+                        'order_id':    'MANUAL_ENTRY',
+                        'sl_id':       sl_id,
+                        'source':      'ORPHAN_RECOVERY',
+                        'session_date': date.today(),
                     })
                     logger.info(f"[ADOPT] DB entry logged for {symbol} (state=OPEN)")
                 except Exception as e:
                     logger.error(
-                        f"[ADOPT] DB log failed for {symbol}: {e} — "
+                        f"[ADOPT-DB] ordermanager.db path FAILED: {e} — "
                         f"orphan may be re-detected next cycle"
                     )
+            elif self.db_manager:
+                try:
+                    logger.info("[ADOPT-DB] Using self.db_manager path (fallback)")
+                    await self.db_manager.log_trade_entry({
+                        'symbol':      symbol,
+                        'direction':   side,
+                        'qty':         qty,
+                        'entry_price': avg_price,
+                        'order_id':    'MANUAL_ENTRY',
+                        'sl_id':       sl_id,
+                        'source':      'ORPHAN_RECOVERY',
+                        'session_date': date.today(),
+                    })
+                    logger.info(f"[ADOPT] DB entry logged for {symbol} (state=OPEN) via db_manager.")
+                except Exception as e:
+                    logger.error(f"[ADOPT-DB] self.db_manager path FAILED: {e}")
             elif self.db:
                 # Fallback: use reconciliation engine's own db reference
                 try:
