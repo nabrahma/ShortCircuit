@@ -19,6 +19,8 @@ __pycache__/
 *.pyo
 .pytest_cache/
 .venv/
+.agents/
+.swarm/
 
 # ── Logs (machine-specific, not code) ─────────────────────────
 logs/
