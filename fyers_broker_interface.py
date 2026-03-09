@@ -430,27 +430,37 @@ class FyersBrokerInterface:
             symbol = message.get('symbol') or message.get('n')
             if symbol and hasattr(self, '_ws_subscribed_symbols_set') and symbol in self._ws_subscribed_symbols_set:
                 with self._quote_cache_lock:
-                    ltp = message.get('ltp', 0)
-                    prev_close = message.get('prev_close_price', message.get('pc', 0))
-                    ch_oc = message.get('ch_oc', 0)
-                    if ch_oc == 0 and prev_close > 0:
+                    prev_entry = self._quote_cache.get(symbol)
+                    
+                    # Merge incoming tick data with prev_entry fallbacks
+                    ltp = message.get('ltp', prev_entry.last_price if prev_entry else 0)
+                    volume = message.get('vol_traded_today', message.get('v', prev_entry.volume if prev_entry else 0))
+                    oi = message.get('oi', prev_entry.oi if prev_entry else 0)
+                    bid = message.get('bid', prev_entry.bid if prev_entry else 0)
+                    ask = message.get('ask', prev_entry.ask if prev_entry else 0)
+                    open_price = message.get('open_price', message.get('o', prev_entry.open_price if prev_entry else 0))
+                    high_price = message.get('high_price', message.get('h', prev_entry.high_price if prev_entry else 0))
+                    prev_close = message.get('prev_close_price', message.get('pc', prev_entry.prev_close if prev_entry else 0))
+                    ch_oc = message.get('ch_oc', message.get('chp', prev_entry.ch_oc if prev_entry else 0))
+
+                    # Re-calculate ch_oc manually if it evaluates to 0 but prev_close > 0 and ltp > 0
+                    if message.get('ch_oc', message.get('chp', 0)) == 0 and prev_close > 0 and ltp > 0:
                         ch_oc = ((ltp - prev_close) / prev_close) * 100
 
                     tick_count = 1
-                    prev_entry = self._quote_cache.get(symbol)
                     if prev_entry and prev_entry.source == CacheEntrySource.WS_TICK:
                         tick_count = prev_entry.tick_count + 1
 
                     self._quote_cache[symbol] = CacheEntry(
                         last_price=ltp,
-                        volume=message.get('vol_traded_today', message.get('v', 0)),
+                        volume=volume,
                         ch_oc=ch_oc,
-                        oi=message.get('oi', 0),
-                        bid=message.get('bid', 0),
-                        ask=message.get('ask', 0),
-                        open_price=message.get('open_price', message.get('o', 0)),
-                        high_price=message.get('high_price', message.get('h', 0)),
-                        prev_close=message.get('prev_close_price', message.get('pc', 0)),
+                        oi=oi,
+                        bid=bid,
+                        ask=ask,
+                        open_price=open_price,
+                        high_price=high_price,
+                        prev_close=prev_close,
                         last_time=time.time(),
                         source=CacheEntrySource.WS_TICK,
                         tick_count=tick_count,
