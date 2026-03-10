@@ -81,19 +81,33 @@ class GodModeAnalyst:
             
         return structure, z_score_vol
 
-    def check_constraints(self, ltp, day_high, trend_gain, open_price, df=None):
+    def check_constraints(self, ltp, day_high, trend_gain, open_price, df=None, atr: float = 0.0):
         """
         The "Ethos" Check.
         Phase 13: Pullback Scalper Rules.
         Phase 51: Hardened with Kill Backdoor and Time-Since-High buffer.
+        Phase 54: ATR-relative Kill Backdoor; dead distance block removed.
         """
         import config
         
-        # 0. Kill Backdoor [G1.2]
+        # 0. Kill Backdoor [G1.2] — ATR-relative threshold
         if config.PHASE_51_ENABLED and config.P51_G1_KILL_BACKDOOR:
-            # Absolute rejection if dropped > 0.5% from day high
-            if ltp < day_high * 0.995:
-                return False, f"Kill Backdoor: Price ₹{ltp:.2f} too far from Day High ₹{day_high:.2f} (>0.5% drop)"
+            use_atr = getattr(config, 'P51_G1_KILL_BACKDOOR_USE_ATR', False)
+            fixed_pct = getattr(config, 'P51_G1_KILL_BACKDOOR_FIXED_PCT', 0.01)
+            atr_mult = getattr(config, 'P51_G1_KILL_BACKDOOR_ATR_MULT', 0.3)
+
+            if use_atr and atr > 0 and day_high > 0:
+                atr_pct = atr / day_high
+                threshold_pct = max(fixed_pct, atr_mult * atr_pct)
+            else:
+                threshold_pct = fixed_pct  # 1.0% safe floor
+
+            if ltp < day_high * (1 - threshold_pct):
+                return False, (
+                    f"[G1_REJECT] Kill Backdoor: ₹{ltp:.2f} is "
+                    f"{threshold_pct * 100:.1f}% below day high ₹{day_high:.2f} "
+                    f"(ATR={atr:.2f}, threshold={threshold_pct*100:.2f}%)"
+                )
 
         # 1. Trend Strength
         max_gain_pct = ((day_high - open_price) / open_price) * 100
@@ -106,15 +120,6 @@ class GodModeAnalyst:
             
         if trend_gain > 15.0:
             return False, f"Gain {trend_gain:.1f}% too high (> 15%) - Circuit Risk"
-            
-        dist_from_high_pct = (day_high - ltp) / day_high * 100
-
-        allowed_dist = 2.5
-        if max_gain_pct > 10.0:
-            allowed_dist = 3.5
-
-        if dist_from_high_pct > allowed_dist:
-            return False, f"Too far from High ({dist_from_high_pct:.2f}%) > {allowed_dist}%"
             
         # 2. Time-Since-High Buffer [G1.3]
         if config.PHASE_51_ENABLED and df is not None and not df.empty:

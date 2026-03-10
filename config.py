@@ -268,7 +268,14 @@ PHASE_51_ENABLED = True
 
 # G1: Constraints & Time-Since-High
 P51_G1_TIME_SINCE_HIGH_CANDLES = 20
-P51_G1_KILL_BACKDOOR = True # Reject if ltp < day_high - 0.5% (Section 2.2)
+P51_G1_KILL_BACKDOOR = True # Reject if ltp < day_high - threshold (Section 2.2)
+
+# G1: Kill Backdoor — ATR-relative threshold
+# If P51_G1_KILL_BACKDOOR_USE_ATR is True, threshold = max(FIXED_PCT, ATR_MULT × ATR%).
+# If False (or ATR unavailable), falls back to FIXED_PCT alone.
+P51_G1_KILL_BACKDOOR_FIXED_PCT: float = 0.01   # 1.0% fixed floor (was hardcoded 0.005)
+P51_G1_KILL_BACKDOOR_ATR_MULT:  float = 0.3    # 0.3 × ATR as % of day_high
+P51_G1_KILL_BACKDOOR_USE_ATR:   bool  = True   # True = ATR-relative mode (recommended)
 
 # G2: Data Quality
 P51_G2_MIN_TICKS_60M = 100
@@ -278,7 +285,12 @@ P51_G3_CIRCUIT_TOUCH_TIMEOUT_MINUTES = 60
 
 # G4: Sustained Momentum
 P51_G4_RVOL_THRESHOLD = 5.0
-P51_G4_SLOPE_MIN = 0.5 # Degrees or placeholder for logic
+# Unit: basis points of VWAP per 1-min candle over 30-candle regression window.
+# 3.0 bp/min = stock rising ~0.9% in last 30 min → acceptable to short.
+# Above 3.0 = stock actively surging (freight train) → DO NOT SHORT.
+# Reference: own codebase labels <5 bp/min as "FLAT" in god_mode_logic.py:48.
+# Literature: Brooks/Minervini/Weinstein consensus places "too strong" at ≥3.3 bp/min.
+P51_G4_SLOPE_MIN = 3.0  # was 0.5 — recalibrated 2026-03-10
 
 # G5: Exhaustion Stretch
 P51_G5_GATE_B_USE_ALLDAY_HIGH = True

@@ -340,17 +340,6 @@ class FyersScanner:
                     oi     = quote.get('oi', 0)
 
                     if gain >= 9.0 and gain <= 18.0 and volume >= 100_000 and ltp >= config.SCANNER_MIN_LTP:
-                        # Phase 51: Intraday Run Filter (G2.3)
-                        if config.PHASE_51_ENABLED:
-                            # Reject if symbol opened < 7% gain today (gap-up < 7%)
-                            pc = quote.get('pc', 0)
-                            open_p = quote.get('open', 0)
-                            if pc > 0 and open_p > 0:
-                                gap_pct = (open_p - pc) / pc * 100
-                                if gap_pct < 7.0:
-                                    logger.debug(f"REJECT {symbol} [G2.3]: Weak Gap-up ({gap_pct:.1f}% < 7%)")
-                                    continue
-                        
                         if self.quality_reject_counts.get(symbol, 0) >= 3:
                             logger.debug(f"BLACKLIST {symbol} — Quality rejected 3x today, skipping.")
                             continue
@@ -408,16 +397,6 @@ class FyersScanner:
                             continue
 
                         if 9.0 <= change_p <= 18.0 and volume > 100000 and ltp > config.SCANNER_MIN_LTP:
-                            # Phase 51: Intraday Run Filter (G2.3 - REST fallback)
-                            # Quotes API response usually has pc/open in 'v' dict
-                            pc = quote_data.get('pc', 0)
-                            open_p = quote_data.get('o', 0)
-                            if pc > 0 and open_p > 0:
-                                gap_pct = (open_p - pc) / pc * 100
-                                if gap_pct < 7.0:
-                                    logger.debug(f"REJECT {symbol} [G2.3]: Weak Gap-up ({gap_pct:.1f}% < 7%)")
-                                    continue
-
                             if self.quality_reject_counts.get(symbol, 0) >= 3:
                                 logger.debug(f"BLACKLIST {symbol} — Quality rejected 3x today, skipping history fetch.")
                                 continue

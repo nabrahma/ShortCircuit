@@ -164,9 +164,12 @@ class FyersAnalyzer:
         day_high = df['high'].max()
         open_price = df.iloc[0]['open']
         gain_pct = ((ltp - open_price) / open_price) * 100
+
+        # Phase 54: ATR computed early — needed by G1 Kill Backdoor (ATR-relative)
+        atr = self.gm_analyst.calculate_atr(df)
         
         # ── G1: Gain range / hard constraints ───────────────────────
-        ok, msg = self.gm_analyst.check_constraints(ltp, day_high, gain_pct, open_price, df=df)
+        ok, msg = self.gm_analyst.check_constraints(ltp, day_high, gain_pct, open_price, df=df, atr=atr)
         gr.g1_pass = ok
         gr.g1_value = round(gain_pct, 2)
         if not ok:
@@ -246,7 +249,7 @@ class FyersAnalyzer:
             return None
 
         # ── G5: Gate 5 — Exhaustion at Stretch ──────────────────────
-        atr = self.gm_analyst.calculate_atr(df)
+        # atr already computed before G1 — reused here for G5
         exhaustion = self.gm_analyst.is_exhaustion_at_stretch(
             candles=df.to_dict('records'),
             profile=profile,
@@ -698,8 +701,11 @@ class FyersAnalyzer:
         open_price = df.iloc[0]['open']
         gain_pct   = ((ltp - open_price) / open_price) * 100
 
+        # Phase 54: ATR computed early — needed by G1 Kill Backdoor (ATR-relative)
+        atr = self.gm_analyst.calculate_atr(df)
+
         # ── G1: Gain constraints ───────────────────────────────────────
-        ok, msg = self.gm_analyst.check_constraints(ltp, day_high, gain_pct, open_price)
+        ok, msg = self.gm_analyst.check_constraints(ltp, day_high, gain_pct, open_price, df=df, atr=atr)
         gr.g1_pass  = ok
         gr.g1_value = round(gain_pct, 2)
         if not ok:
