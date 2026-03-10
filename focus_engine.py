@@ -552,12 +552,9 @@ class FocusEngine:
                     del self.pending_signals[symbol]
                     continue
                 
-                # G11: Above-high invalidation (signal_high * 1.005)
-                elif ltp > pending['data'].get('signal_high', trigger_price) * 1.005:
-                    logger.info(f"🚫 [INVALIDATED] {symbol} hit G11 above-high 0.5% buffer")
-                    _queue_validation_update(outcome='REJECTED', details={'reason': 'G11_ABOVE_HIGH_INVALIDATE', 'ltp': ltp})
-                    del self.pending_signals[symbol]
-                    continue
+                # G11 above-high invalidation handled by G12 (inval_price = signal_high * 1.002).
+                # G12 fires at 0.2% above signal_high; this 0.5% check is therefore unreachable.
+                # G11 timeout path (below) is the only active G11 logic.
 
                 # C. TIMEOUT (Phase 51 G11: Dynamic expires_at)
                 elif datetime.datetime.now(pytz.timezone('Asia/Kolkata')) > pending.get('expires_at', datetime.datetime.now(pytz.timezone('Asia/Kolkata')) + datetime.timedelta(minutes=15)):

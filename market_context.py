@@ -321,7 +321,7 @@ class MarketContext:
         Returns:
             tuple: (phase, recommendation)
         """
-        now = datetime.now().time()
+        now = datetime.now(IST).time()    # IST-explicit — safe on any server timezone
         
         if now < time(10, 0):
             return "OPENING", "Avoid - Opening volatility"

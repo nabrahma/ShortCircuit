@@ -319,6 +319,32 @@ P51_G11_MIN_REMAINING_MINUTES = 15
 # G12: Invalidation Buffer
 P51_G12_INVALIDATION_BUFFER_PCT = 0.002 # 0.2%
 
+# ============================================================================
+# PHASE 55 — GATE PRECISION HARDENING
+# ============================================================================
+
+# G5 Gate B: All-day high proximity tolerance
+# Murphy: "A 2-5 tick violation of a key level is normal noise."
+# 0.05% (old) = 2 ticks on most NSE stocks = too strict.
+# 0.3% = institutional "close enough" zone.
+P55_G5_GATE_B_DAY_HIGH_TOLERANCE: float = 0.003  # 0.3%
+
+# G5 Gate C: Volume fade lookback window
+# Wyckoff: compare to the CLIMAX candle, not a 5-bar trailing average.
+# 15 candles captures the volume surge; 5 candles was only measuring
+# already-normalised volume, making fade_ratio artificially high.
+P55_G5_VOL_FADE_LOOKBACK: int = 15  # was hardcoded 5
+
+# G6 RSI Divergence: Minimum lookback candles
+# Murphy/Wilder: bearish RSI divergence requires 20-30 bars minimum.
+# 10 candles (old) = 10 minutes = pure noise.
+P55_G6_RSI_DIVERGENCE_WINDOW: int = 25  # was hardcoded 10
+
+# G9 HTF: Use proper pivot swing high detection (vs raw candle comparison)
+# Murphy: "A Lower High is a swing high that terminated below the prior swing high."
+# Raw adjacent candle comparison produces false Lower High signals in uptrends.
+P55_G9_USE_PIVOT_HIGH_DETECTION: bool = True
+
 # G13: Risk & Reward (Phase 51 Hardening)
 P51_SL_ATR_MULTIPLIER = 0.5
 P51_SL_MIN_TICK_BUFFER = 3

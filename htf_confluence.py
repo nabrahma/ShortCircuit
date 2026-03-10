@@ -114,6 +114,20 @@ class HTFConfluence:
         
         is_sufficient = count >= 5
         return count, is_sufficient
+
+    def _find_swing_highs(self, df: pd.DataFrame, window: int = 10) -> list:
+        """
+        Returns list of (index, price) for confirmed pivot swing highs.
+        A pivot high at index i requires: df['h'][i] > df['h'][i-1] AND df['h'][i] > df['h'][i+1].
+        Only looks at last 'window' candles to avoid stale pivots.
+        Murphy: 'A Lower High is a swing high that terminated below the prior swing high.'
+        """
+        highs = []
+        series = df['h'].iloc[-window:].reset_index(drop=True)
+        for i in range(1, len(series) - 1):
+            if series.iloc[i] > series.iloc[i - 1] and series.iloc[i] > series.iloc[i + 1]:
+                highs.append((i, float(series.iloc[i])))
+        return highs
     
     def check_trend_exhaustion(self, symbol, df_15m=None):
         """
@@ -134,12 +148,31 @@ class HTFConfluence:
             return True, "Insufficient HTF for G9 — PASS (Fail-Open)"
 
         # ── Step 1: 15m Pivot Structure ───────────────────────────
-        # (Using logic from check_15m_structure but inlined for perf/context)
-        recent_highs = df['h'].iloc[-3:].values
-        last_high = recent_highs[-1]
-        prev_high = recent_highs[-2]
-        has_weakness = last_high < prev_high
-        weakness_msg = f"15m LH ({last_high:.2f} < {prev_high:.2f})" if has_weakness else "15m HH/Equal"
+        import config as _cfg
+        use_pivot = getattr(_cfg, 'P55_G9_USE_PIVOT_HIGH_DETECTION', True)
+
+        if use_pivot:
+            swing_highs = self._find_swing_highs(df, window=10)
+            if len(swing_highs) >= 2:
+                last_pivot = swing_highs[-1][1]
+                prev_pivot = swing_highs[-2][1]
+                has_weakness = last_pivot < prev_pivot
+                weakness_msg = (
+                    f"15m Pivot LH ({last_pivot:.2f} < {prev_pivot:.2f})"
+                    if has_weakness else
+                    f"15m Pivot HH ({last_pivot:.2f} >= {prev_pivot:.2f})"
+                )
+            else:
+                # Fewer than 2 confirmed swing pivots in last 10 candles → insufficient structure
+                has_weakness = False
+                weakness_msg = "Insufficient pivot history (< 2 pivots in 10 bars)"
+        else:
+            # Legacy raw candle comparison (backward compat — flag P55_G9_USE_PIVOT_HIGH_DETECTION=False)
+            recent_highs = df['h'].iloc[-3:].values
+            last_high    = recent_highs[-1]
+            prev_high    = recent_highs[-2]
+            has_weakness = last_high < prev_high
+            weakness_msg = f"15m LH ({last_high:.2f} < {prev_high:.2f})" if has_weakness else "15m HH/Equal"
 
         # ── Step 2: Consecutive 5m Bullish Count ──────────────────
         bullish_count, is_sufficient = self.count_consecutive_bullish(symbol)

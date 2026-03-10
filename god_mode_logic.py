@@ -272,13 +272,15 @@ class GodModeAnalyst:
             "reject_reason": ""
         }
 
-        if len(candles) < 10:
-            result["reject_reason"] = "insufficient_candles"
-            return result
-
         import config
         from datetime import datetime
         import pytz
+
+        # Guard must accommodate lookback(15) + 1 current candle + 1 safety buffer = 17
+        _vol_lookback = getattr(config, 'P55_G5_VOL_FADE_LOOKBACK', 15)
+        if len(candles) < (_vol_lookback + 2):
+            result["reject_reason"] = f"insufficient_candles (need {_vol_lookback + 2}, got {len(candles)})"
+            return result
 
         # ── Gate A: Stretch sweet spot ──────────────────────────────
         # stretch_score = relative stretch above scanner minimum.
@@ -297,14 +299,16 @@ class GodModeAnalyst:
         if getattr(config, 'P51_G5_GATE_B_USE_ALLDAY_HIGH', False):
             day_high = max(c['high'] for c in candles)
             curr_high = candles[-1]['high']
-            is_at_day_high = curr_high >= day_high * 0.9995 # Within 0.05% of absolute high
+            tolerance = getattr(config, 'P55_G5_GATE_B_DAY_HIGH_TOLERANCE', 0.003)
+            is_at_day_high = curr_high >= day_high * (1 - tolerance)
             
             if not is_at_day_high:
                 result["reject_reason"] = f"not_at_day_high (ltp_high:{curr_high} < day_high:{day_high})"
                 return result
 
         # ── Gate C: Volume fading on the new high ───────────────────
-        prior_vols = [c['volume'] for c in candles[-6:-1]]
+        _vol_lookback = getattr(config, 'P55_G5_VOL_FADE_LOOKBACK', 15)
+        prior_vols = [c['volume'] for c in candles[-(_vol_lookback + 1):-1]]
         avg_prior_vol = sum(prior_vols) / len(prior_vols) if prior_vols else 0
         if avg_prior_vol == 0:
             result["reject_reason"] = "zero_prior_volume"
@@ -425,8 +429,10 @@ class GodModeAnalyst:
            rs = gain/loss
            rsi_series = 100 - (100/(1+rs))
            
-           recent_rsi = rsi_series.iloc[-10:]
-           recent_price = df['close'].iloc[-10:]
+           import config as _cfg_rsi
+           _rsi_window = getattr(_cfg_rsi, 'P55_G6_RSI_DIVERGENCE_WINDOW', 25)
+           recent_rsi = rsi_series.iloc[-_rsi_window:]
+           recent_price = df['close'].iloc[-_rsi_window:]
            
            # Check Price trend
            p_start, p_end = recent_price.iloc[0], recent_price.iloc[-1]
