@@ -257,7 +257,8 @@ class GodModeAnalyst:
         candles: list[dict],
         profile,          # ProfileAnalyzer result (dict)
         gain_pct: float,  # current % gain vs prev close
-        atr: float = 0    # Phase 51: Added ATR for VAH clearance check
+        atr: float = 0,   # Phase 51: Added ATR for VAH clearance check
+        vwap_sd: float = 0 # Phase 57: vwap_sd for Absorption/Z-Process
     ) -> dict:
         """
         Phase 44.8 — Core edge detector.
@@ -317,8 +318,22 @@ class GodModeAnalyst:
         vol_fade_ratio = round(candles[-1]['volume'] / avg_prior_vol, 3)
         result["vol_fade_ratio"] = vol_fade_ratio
 
-        if vol_fade_ratio > 0.65:
-            result["reject_reason"] = f"volume_not_faded:{vol_fade_ratio:.2f}"
+        # Phase 57: Z-Process Threshold Relaxation (Guo-Zhang Model)
+        # Murphy/Guo-Zhang: At extreme extensions, institutional absorption creates "Dojis with massive volume"
+        # We relax the fade if we see a narrow body (Absorption) at extreme SD.
+        max_fade = 0.65
+        curr_candle = candles[-1]
+        body = abs(curr_candle['close'] - curr_candle['open'])
+        body_pct = body / curr_candle['close'] if curr_candle['close'] > 0 else 0
+        
+        z_thresh = getattr(config, 'P57_G5_Z_EXTREME_THRESHOLD', 3.3)
+        if vwap_sd > z_thresh and body_pct < 0.0005:
+            relaxation = getattr(config, 'P57_G5_Z_FADE_RELAXATION', 0.95)
+            max_fade = relaxation
+            # logger.info(f"  G5 ABSORP RELAXATION: {vol_fade_ratio:.2f} <= {max_fade} allowed via Z-Process @ {vwap_sd:.1f}SD")
+
+        if vol_fade_ratio > max_fade:
+            result["reject_reason"] = f"volume_not_faded:{vol_fade_ratio:.2f} (max:{max_fade})"
             return result
 
         # ── Gate D: Price above VAH (ATR clearance) [G5.2] ─────────
@@ -354,8 +369,9 @@ class GodModeAnalyst:
         # ── Gate E: Late-session EXTREME-only rule [G5.3] ────────────
         if getattr(config, 'P51_G5_GATE_E_LATE_SESSION_EXTREME_ONLY', False):
             IST = pytz.timezone('Asia/Kolkata')
+            from datetime import datetime, time
             now_ist = datetime.now(IST).time()
-            if now_ist > datetime.time(14, 30):
+            if now_ist > time(14, 30):
                 if result["confidence"] != "EXTREME":
                     result["fired"] = False
                     result["reject_reason"] = f"late_session_non_extreme (conf:{result['confidence']})"

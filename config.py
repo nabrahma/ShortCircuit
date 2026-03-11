@@ -298,6 +298,15 @@ P51_G5_GATE_D_ATR_CLEARANCE = True
 P51_G5_GATE_E_LATE_SESSION_EXTREME_ONLY = True
 P51_G5_ATR_EXTREME_STRETCH_MULT = 3.5
 
+# ============================================================================
+# PHASE 57: MEAN REVERSION OPTIMIZATION (Guo-Zhang Model)
+# ============================================================================
+P57_G4_SLOPE_DECAY_ENABLED: bool = True
+P57_G4_DIVERGENCE_SD: float = 1.5      # Murphy: Momentum divergence needs price extension
+
+P57_G5_Z_EXTREME_THRESHOLD: float = 3.3 # Guo-Zhang: Absorption threshold
+P57_G5_Z_FADE_RELAXATION: float = 0.95   # Allow higher vol if price stalled at extreme
+
 # G7: Time Gate
 P51_G7_TIME_GATE_ENABLED = True
 

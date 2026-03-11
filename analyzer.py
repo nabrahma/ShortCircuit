@@ -168,6 +168,10 @@ class FyersAnalyzer:
         # Phase 54: ATR computed early — needed by G1 Kill Backdoor (ATR-relative)
         atr = self.gm_analyst.calculate_atr(df)
         
+        # Phase 57: vwap_sd (Z-Score) moved to top to support G4 Slope Decay & G5 Absorption logic
+        vwap_sd = self.gm_analyst.calculate_vwap_bands(prev_df)
+        is_extended = vwap_sd > 2.0
+        
         # ── G1: Gain range / hard constraints ───────────────────────
         ok, msg = self.gm_analyst.check_constraints(ltp, day_high, gain_pct, open_price, df=df, atr=atr)
         gr.g1_pass = ok
@@ -207,15 +211,17 @@ class FyersAnalyzer:
             grl.record(gr)
             return None
 
-        # ── G4: Momentum safeguard ───────────────────────────────────
-        slope, _ = self.gm_analyst.calculate_vwap_slope(df.iloc[-30:])
-        momentum_blocked = self._is_momentum_too_strong(df, slope, symbol)
+        # ── G4: Momentum safeguard (Phase 57: Slope Decay Optimization) ─────
+        slope_now, _  = self.gm_analyst.calculate_vwap_slope(df.iloc[-30:])
+        slope_prev, _ = self.gm_analyst.calculate_vwap_slope(df.iloc[-31:-1])
+        
+        momentum_blocked = self._is_momentum_too_strong(df, slope_now, slope_prev, vwap_sd, symbol)
         gr.g4_pass = not momentum_blocked
-        gr.g4_value = round(slope, 3)
+        gr.g4_value = round(slope_now, 3)
         if momentum_blocked:
             gr.verdict = "REJECTED"
             gr.first_fail_gate = "G4_MOMENTUM"
-            gr.rejection_reason = f"Momentum too strong (slope={slope:.2f})"
+            gr.rejection_reason = f"Momentum too strong (slope={slope_now:.2f})"
             grl.record(gr)
             return None
 
@@ -254,7 +260,8 @@ class FyersAnalyzer:
             candles=df.to_dict('records'),
             profile=profile,
             gain_pct=gain_pct,
-            atr=atr
+            atr=atr,
+            vwap_sd=vwap_sd
         )
         gr.g5_pass = exhaustion["fired"]
         gr.g5_value = round(exhaustion.get("stretch_score", 0), 3)
@@ -292,11 +299,10 @@ class FyersAnalyzer:
         )
 
         # ── G6: Tiered Scoring ──────────────────────────────────────
-        vwap_sd = self.gm_analyst.calculate_vwap_bands(prev_df)
-        is_extended = vwap_sd > 2.0
+        # vwap_sd already computed at top of check_setup
 
         valid_signal, pro_conf_msgs = self._check_pro_confluence(
-            symbol, df, prev_df, slope, is_extended, vwap_sd,
+            symbol, df, prev_df, slope_now, is_extended, vwap_sd,
             pattern_desc, depth_data, ltp, oi, signal_meta
         )
         
@@ -361,7 +367,7 @@ class FyersAnalyzer:
         # All analyzer gates passed — attach gate result to signal for focus_engine
         gr.verdict = "ANALYZER_PASS"   # Partial — focus_engine will finalize
         finalized = self._finalize_signal(
-            symbol, ltp, df, pattern_desc, slope, "", signal_meta
+            symbol, ltp, df, pattern_desc, slope_now, "", signal_meta
         )
         if finalized:
             finalized['_gate_result'] = gr   # Pass GateResult object to focus_engine
@@ -418,7 +424,7 @@ class FyersAnalyzer:
             
         return False
 
-    def _is_momentum_too_strong(self, df: pd.DataFrame, slope: float, symbol: str) -> bool:
+    def _is_momentum_too_strong(self, df: pd.DataFrame, slope_now: float, slope_prev: float, vwap_sd: float, symbol: str) -> bool:
         """Checks if momentum is too strong to short."""
         try:
             recent_vols = df['volume'].iloc[-20:-1]
@@ -426,17 +432,24 @@ class FyersAnalyzer:
             curr_v = df['volume'].iloc[-1]
             rvol_now = curr_v / avg_v if avg_v > 0 else 0
 
-            # FIX-2: OR condition. Either alone is sufficient to block.
             # Phase 51: Using config thresholds
             rvol_thresh = config.P51_G4_RVOL_THRESHOLD if config.PHASE_51_ENABLED else 5.0
-            slope_thresh = config.P51_G4_SLOPE_MIN if config.PHASE_51_ENABLED else 60.0 # Wait, PRD says 0.5?
-            # Existing was 60 (Degrees? No, basis points). I'll use P51_G4_SLOPE_MIN.
+            slope_thresh = config.P51_G4_SLOPE_MIN if config.PHASE_51_ENABLED else 3.0
             
             if rvol_now > rvol_thresh:
                 logger.warning(f"  MOMENTUM BLOCK {symbol} RVOL {rvol_now:.1f}x (> {rvol_thresh}x threshold)")
                 return True
-            if slope > slope_thresh:
-                logger.warning(f"  MOMENTUM BLOCK {symbol} Slope {slope:.1f} (> {slope_thresh} threshold)")
+            
+            if slope_now > slope_thresh:
+                # Phase 57: Slope Decay Check (Murphy Divergence)
+                # If momentum is slowing down (slope_now < slope_prev) and price is extended, allow.
+                if getattr(config, 'P57_G4_SLOPE_DECAY_ENABLED', False):
+                    div_thresh = getattr(config, 'P57_G4_DIVERGENCE_SD', 1.5)
+                    if slope_now < slope_prev and vwap_sd > div_thresh:
+                        logger.info(f"  MOMENTUM ALLOW {symbol} via Slope Decay: {slope_now:.2f} < {slope_prev:.2f} @ {vwap_sd:.1f}SD")
+                        return False
+
+                logger.warning(f"  MOMENTUM BLOCK {symbol} Slope {slope_now:.1f} (> {slope_thresh} threshold)")
                 return True
 
         except Exception:
@@ -704,6 +717,10 @@ class FyersAnalyzer:
         # Phase 54: ATR computed early — needed by G1 Kill Backdoor (ATR-relative)
         atr = self.gm_analyst.calculate_atr(df)
 
+        # Phase 57: vwap_sd (Z-Score) moved to top to support G4 Slope Decay & G6 logic
+        vwap_sd = self.gm_analyst.calculate_vwap_bands(prev_df)
+        is_extended = vwap_sd > 2.0
+
         # ── G1: Gain constraints ───────────────────────────────────────
         ok, msg = self.gm_analyst.check_constraints(ltp, day_high, gain_pct, open_price, df=df, atr=atr)
         gr.g1_pass  = ok
@@ -734,15 +751,17 @@ class FyersAnalyzer:
             grl.record(gr)
             return None
 
-        # ── G4: Momentum Safeguard ─────────────────────────────────────
-        slope, _ = self.gm_analyst.calculate_vwap_slope(df.iloc[-30:])
-        momentum_blocked = self._is_momentum_too_strong(df, slope, symbol)
+        # ── G4: Momentum Safeguard (Phase 57: Slope Decay Optimization) ─────
+        slope_now, _  = self.gm_analyst.calculate_vwap_slope(df.iloc[-30:])
+        slope_prev, _ = self.gm_analyst.calculate_vwap_slope(df.iloc[-31:-1])
+
+        momentum_blocked = self._is_momentum_too_strong(df, slope_now, slope_prev, vwap_sd, symbol)
         gr.g4_pass  = not momentum_blocked
-        gr.g4_value = round(slope, 3)
+        gr.g4_value = round(slope_now, 3)
         if momentum_blocked:
             gr.verdict = "REJECTED"
             gr.first_fail_gate  = "G4_MOMENTUM"
-            gr.rejection_reason = f"Momentum too strong (slope={slope:.2f})"
+            gr.rejection_reason = f"Momentum too strong (slope={slope_now:.2f})"
             grl.record(gr)
             return None
 
@@ -761,12 +780,11 @@ class FyersAnalyzer:
         gr.g5_pass = True
 
         # ── G6: Pro Confluence ─────────────────────────────────────────
-        vwap_sd     = self.gm_analyst.calculate_vwap_bands(prev_df)
-        is_extended = vwap_sd > 2.0
+        # vwap_sd already computed at top
         edge_desc   = " + ".join(e['trigger'] for e in edge_payload['edges'])
 
         valid_signal, pro_conf_msgs = self._check_pro_confluence(
-            symbol, df, prev_df, slope, is_extended, vwap_sd,
+            symbol, df, prev_df, slope_now, is_extended, vwap_sd,
             edge_desc, depth_data, ltp, oi
         )
         gr.g6_pass  = valid_signal
@@ -811,7 +829,7 @@ class FyersAnalyzer:
 
         # ── Finalize ───────────────────────────────────────────────────
         gr.verdict = "ANALYZER_PASS"
-        base_signal = self._finalize_signal(symbol, ltp, df, edge_desc, slope, "", {})
+        base_signal = self._finalize_signal(symbol, ltp, df, edge_desc, slope_now, "", {})
         if base_signal is None:
             # _finalize_signal only fails on exceptions now — but guard anyway
             gr.verdict = "DATA_ERROR"

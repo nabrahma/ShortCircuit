@@ -1,6 +1,6 @@
 # ShortCircuit — Architecture Reference
-**Version:** Phase 57 — Lunch Block Removal
- | **Last Updated:** 2026-03-11
+**Version:** Phase 57 — Mean Reversion Optimization
+ | **Last Updated:** 2026-03-12
 
 ---
 
