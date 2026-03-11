@@ -353,9 +353,9 @@ class MarketContext:
         if phase == "OPENING":
             return False, f"BLOCKED: {phase} - No signals before 10:00 AM (opening volatility)"
         
-        # Also block during lunch chop (low volume = false signals)
-        if phase == "LUNCH":
-            return False, f"BLOCKED: {phase} - No signals during lunch (12:00-13:00)"
+        # Phase 57: Lunch block disabled per USER request (12:00-13:00)
+        # if phase == "LUNCH":
+        #     return False, f"BLOCKED: {phase} - No signals during lunch (12:00-13:00)"
         
         # Phase 51: G7 EOD Cutoff
         if config.PHASE_51_ENABLED and config.P51_G7_TIME_GATE_ENABLED:
