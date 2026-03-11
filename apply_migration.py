@@ -14,9 +14,11 @@ def load_env():
                     key, val = line.split("=", 1)
                     os.environ[key] = val
 
-async def apply_migration():
+import sys
+
+async def apply_migration(file_path: str):
     load_env()
-    print("🚀 Applying Migration: v42_1_0_postgresql.sql")
+    print(f"🚀 Applying Migration: {os.path.basename(file_path)}")
     try:
         # Connect to DB
         conn = await asyncpg.connect(
@@ -24,12 +26,12 @@ async def apply_migration():
             password=os.environ.get("DB_PASSWORD", "password"),
             database=os.environ.get("DB_NAME", "shortcircuit_trading"),
             host=os.environ.get("DB_HOST", "localhost"),
-            port=os.environ.get("DB_PORT", 5432)
+            port=os.environ.get("DB_PORT", "5432")
         )
         print("✅ Connected to Database")
         
         # Read SQL
-        with open("d:/For coding/ShortCircuit/migrations/v42_1_0_postgresql.sql", "r") as f:
+        with open(file_path, "r") as f:
             sql = f.read()
             
         # Execute
@@ -41,4 +43,12 @@ async def apply_migration():
         print(f"❌ Migration Failed: {e}")
 
 if __name__ == "__main__":
-    asyncio.run(apply_migration())
+    if len(sys.argv) < 2:
+        print("Usage: python apply_migration.py <path_to_sql_file>")
+        sys.exit(1)
+    
+    target_file = sys.argv[1]
+    if not os.path.isabs(target_file):
+        target_file = os.path.join("d:/For coding/ShortCircuit", target_file)
+        
+    asyncio.run(apply_migration(target_file))

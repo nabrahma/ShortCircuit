@@ -1,6 +1,6 @@
 # ShortCircuit — Architecture Reference
-**Version:** Phase 52 — Partial Exit Engine & Human Intervention Safety
- | **Last Updated:** 2026-03-07
+**Version:** Phase 56 — Schema Expansion for Audit Trail
+ | **Last Updated:** 2026-03-117
 
 ---
 

@@ -362,12 +362,12 @@ class GateResultLogger:
         12: (float,  True),    # g3_value  NUMERIC
         14: (float,  True),    # g4_value  NUMERIC
         16: (float,  True),    # g5_value  NUMERIC
-        18: (str,    True),    # g6_value  VARCHAR
-        20: (str,    True),    # g7_value  VARCHAR
+        18: (str,    True),    # g6_value  VARCHAR(100)
+        20: (str,    True),    # g7_value  VARCHAR(100)
         22: (float,  True),    # g8_value  NUMERIC
-        24: (str,    True),    # g9_value  ← ROOT CAUSE: was NUMERIC in schema, now VARCHAR
+        24: (str,    True),    # g9_value  VARCHAR(200)
         26: (float,  True),    # g10_value NUMERIC
-        28: (str,    True),    # g11_value VARCHAR
+        28: (str,    True),    # g11_value VARCHAR(100)
         30: (float,  True),    # g12_value NUMERIC
         35: (float,  True),    # entry_price
         36: (int,    True),    # qty
