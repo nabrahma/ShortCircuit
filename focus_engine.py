@@ -329,10 +329,6 @@ class FocusEngine:
                         ltp = last_candle[4]
                         pending['last_evaluated_minute'] = current_minute
                         
-                        # Bypass G10 two-tick for close-based entry (the close IS the confirmation)
-                        if ltp < trigger_price:
-                            pending['_breakdown_tick_count'] = 1 # Becomes 2 in the logic below
-                            
                         logger.info(f"[GATE] {symbol} Minute-End Close: ₹{ltp} (Trigger: ₹{trigger_price}, Inval: ₹{inval_price})")
                     else:
                         continue 
@@ -362,11 +358,8 @@ class FocusEngine:
                 # A. CHECK TRIGGER (VALIDATION CONFIRMED)
                 # For Short: LTP < Trigger (Signal Low)
                 if ltp < trigger_price:
-                    # G10: Two-tick confirmation
-                    count = pending.get('_breakdown_tick_count', 0) + 1
-                    pending['_breakdown_tick_count'] = count
-                    if count < 2:
-                        continue # Wait for second tick
+                    # G10: Two-tick confirmation REMOVED (Phase 58)
+                    # Proceed directly to spread check (G10.1)
                     
                     # Two ticks confirmed — proceed to spread check (G10.1)
                     # Fetch full depth for spread check
@@ -606,10 +599,9 @@ class FocusEngine:
                     del self.pending_signals[symbol]
                     continue
                 
-                # Reset counter if price recovers above low
+                # No further action needed if within range
                 else:
-                    if ltp >= trigger_price:
-                        pending['_breakdown_tick_count'] = 0
+                    pass
                      
             except Exception as e:
                 logger.error(f"Validation Check Error {symbol}: {e}")
