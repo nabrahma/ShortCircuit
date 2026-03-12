@@ -215,7 +215,7 @@ class FyersAnalyzer:
         slope_now, _  = self.gm_analyst.calculate_vwap_slope(df.iloc[-30:])
         slope_prev, _ = self.gm_analyst.calculate_vwap_slope(df.iloc[-31:-1])
         
-        momentum_blocked = self._is_momentum_too_strong(df, slope_now, slope_prev, vwap_sd, symbol)
+        momentum_blocked = self._is_momentum_too_strong(df, slope_now, slope_prev, vwap_sd, symbol, gain_pct)
         gr.g4_pass = not momentum_blocked
         gr.g4_value = round(slope_now, 3)
         if momentum_blocked:
@@ -424,7 +424,7 @@ class FyersAnalyzer:
             
         return False
 
-    def _is_momentum_too_strong(self, df: pd.DataFrame, slope_now: float, slope_prev: float, vwap_sd: float, symbol: str) -> bool:
+    def _is_momentum_too_strong(self, df: pd.DataFrame, slope_now: float, slope_prev: float, vwap_sd: float, symbol: str, gain_pct: float = 0.0) -> bool:
         """Checks if momentum is too strong to short."""
         try:
             recent_vols = df['volume'].iloc[-20:-1]
@@ -445,8 +445,12 @@ class FyersAnalyzer:
                 # If momentum is slowing down (slope_now < slope_prev) and price is extended, allow.
                 if getattr(config, 'P57_G4_SLOPE_DECAY_ENABLED', False):
                     div_thresh = getattr(config, 'P57_G4_DIVERGENCE_SD', 1.5)
-                    if slope_now < slope_prev and vwap_sd > div_thresh:
-                        logger.info(f"  MOMENTUM ALLOW {symbol} via Slope Decay: {slope_now:.2f} < {slope_prev:.2f} @ {vwap_sd:.1f}SD")
+                    
+                    # Phase 60: Structural Extension Fallback (Gain > 10%)
+                    is_structurally_extended = gain_pct > getattr(config, 'P60_G4_STRUCTURAL_FALLBACK_GAIN', 10.0)
+                    
+                    if slope_now < slope_prev and (vwap_sd > div_thresh or is_structurally_extended):
+                        logger.info(f"✅ [MOMENTUM DECAY] {symbol} allowed via Structural Fallback (Gain={gain_pct:.1f}%)")
                         return False
 
                 logger.warning(f"  MOMENTUM BLOCK {symbol} Slope {slope_now:.1f} (> {slope_thresh} threshold)")
@@ -755,7 +759,7 @@ class FyersAnalyzer:
         slope_now, _  = self.gm_analyst.calculate_vwap_slope(df.iloc[-30:])
         slope_prev, _ = self.gm_analyst.calculate_vwap_slope(df.iloc[-31:-1])
 
-        momentum_blocked = self._is_momentum_too_strong(df, slope_now, slope_prev, vwap_sd, symbol)
+        momentum_blocked = self._is_momentum_too_strong(df, slope_now, slope_prev, vwap_sd, symbol, gain_pct)
         gr.g4_pass  = not momentum_blocked
         gr.g4_value = round(slope_now, 3)
         if momentum_blocked:

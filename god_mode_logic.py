@@ -287,6 +287,8 @@ class GodModeAnalyst:
         from datetime import datetime
         import pytz
 
+        pattern = "NORMAL"
+
         # Guard must accommodate lookback(15) + 1 current candle + 1 safety buffer = 17
         _vol_lookback = getattr(config, 'P55_G5_VOL_FADE_LOOKBACK', 15)
         if len(candles) < (_vol_lookback + 2):
@@ -328,29 +330,50 @@ class GodModeAnalyst:
         vol_fade_ratio = round(candles[-1]['volume'] / avg_prior_vol, 3)
         result["vol_fade_ratio"] = vol_fade_ratio
 
-        # Phase 57: Z-Process Threshold Relaxation (Guo-Zhang Model)
-        max_fade = 0.65
-        curr_candle = candles[-1]
-        body = abs(curr_candle['close'] - curr_candle['open'])
-        body_pct = body / curr_candle['close'] if curr_candle['close'] > 0 else 0
+        # ── PHASE 60: SPEAR OF EXHAUSTION (Volume Climax) [G5.4] ──────
+        curr_c = candles[-1]
+        prev_c = candles[-2]
         
-        z_thresh = getattr(config, 'P57_G5_Z_EXTREME_THRESHOLD', 3.3)
-        if vwap_sd > z_thresh and body_pct < 0.0005:
-            relaxation = getattr(config, 'P57_G5_Z_FADE_RELAXATION', 0.95)
-            max_fade = relaxation
+        is_new_high = curr_c['high'] > prev_c['high']
+        is_rejection_close = curr_c['close'] < (curr_c['high'] + curr_c['low']) / 2
+        
+        vol_climax_mult = getattr(config, 'P60_G5_SPEAR_VOL_CLIMAX_MULT', 3.0)
+        is_vol_climax = curr_c['volume'] > (avg_prior_vol * vol_climax_mult)
+        
+        if is_new_high and is_rejection_close and is_vol_climax:
+            result["fired"] = True
+            result["confidence"] = "EXTREME"
+            pattern = "SPEAR_OF_EXHAUSTION"
+            logger.info(f"🔥 [SPEAR] Climax Vol Detected: {vol_fade_ratio}x")
+            # We don't return yet — we want to compute patterns and VAH checks too.
+            # But we bypass the MAX_FADE check below.
+            max_fade = 99.0 # Effectively bypass
+
+        # Phase 57: Z-Process Threshold Relaxation (Guo-Zhang Model)
+        elif vwap_sd > getattr(config, 'P57_G5_Z_EXTREME_THRESHOLD', 3.3): # Body check removed for simplicity or keep it? PRD didn't mention changing it.
+            # Keep existing relaxation logic
+            max_fade = 0.65
+            curr_candle = candles[-1]
+            body = abs(curr_candle['close'] - curr_candle['open'])
+            body_pct = body / curr_candle['close'] if curr_candle['close'] > 0 else 0
+            if body_pct < 0.0005:
+                max_fade = getattr(config, 'P57_G5_Z_FADE_RELAXATION', 0.95)
+        else:
+            max_fade = 0.65
 
         if vol_fade_ratio > max_fade:
             result["reject_reason"] = f"volume_not_faded:{vol_fade_ratio:.2f} (max:{max_fade})"
             return result
 
         # ── Pattern Discovery (Phase 59: Moved up for VAH Rejection bypass) ─────────
-        pattern = "NORMAL"
         try:
             import pandas as pd
             bonus_candles = candles[-20:] if len(candles) >= 20 else candles
             df_slice = pd.DataFrame(bonus_candles)
             vah_val = profile.get('vah') if isinstance(profile, dict) else getattr(profile, 'vah', None)
-            pattern, z_score = self.detect_structure_advanced(df_slice, vah=vah_val)
+            adv_pattern, z_score = self.detect_structure_advanced(df_slice, vah=vah_val)
+            if adv_pattern != "NORMAL":
+                pattern = adv_pattern
         except Exception:
             pass
 
@@ -385,7 +408,9 @@ class GodModeAnalyst:
 
         # ── Confidence tier ─────────────────────────────────────────
         # Base confidence from volume fade
-        if vol_fade_ratio < 0.30:
+        if pattern == "SPEAR_OF_EXHAUSTION":
+            conf_tier = 3 # Base EXTREME for Spear
+        elif vol_fade_ratio < 0.30:
             conf_tier = 3 # EXTREME
         elif vol_fade_ratio < 0.50:
             conf_tier = 2 # HIGH
@@ -393,7 +418,7 @@ class GodModeAnalyst:
             conf_tier = 1 # MEDIUM
             
         # Upgrade tier for patterns
-        if pattern in ("BEARISH_ENGULFING", "SHOOTING_STAR", "EVENING_STAR", "VOLUME_TRAP", "ABSORPTION_DOJI"):
+        if pattern in ("BEARISH_ENGULFING", "SHOOTING_STAR", "EVENING_STAR", "VOLUME_TRAP", "ABSORPTION_DOJI", "SPEAR_OF_EXHAUSTION"):
             conf_tier += 1
         
         # ── PHASE 59: SESSION-PHASE CONFLUENCE ──────────────────────

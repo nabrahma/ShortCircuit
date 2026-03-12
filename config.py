@@ -321,6 +321,10 @@ P51_G9_VWAP_SD_EXTREME = 1.5
 # PHASE 58: G12 VALIDATION HARDENING
 P58_G12_USE_CANDLE_CLOSE: bool = True
 
+# PHASE 60: MATHEMATICAL HARDENING
+P60_G4_STRUCTURAL_FALLBACK_GAIN: float = 10.0  # 10% absolute gain floor
+P60_G5_SPEAR_VOL_CLIMAX_MULT:    float = 3.0   # 3x Volume Climax
+
 # G10: Spread & Confirmation
 P51_G10_MAX_SPREAD_PCT = 0.004 # 0.4% (PRD: Downgrade to CAUTIOUS, not block)
 P51_G10_TICK_OFFSET = 2 # Execute 2 ticks better than current LTP
