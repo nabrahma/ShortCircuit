@@ -163,11 +163,12 @@ class GodModeAnalyst:
             return 1.0 # Fallback default
 
     # Phase 21: Advanced Reversal Patterns
-    def detect_structure_advanced(self, df):
+    def detect_structure_advanced(self, df, vah: float = None):
         """
         Expanded Reversal Logic:
         1. Single Candle (Shooting Star, Doji)
         2. Multi-Candle (Bearish Engulfing, Evening Star)
+        3. Auction Theory (VAH Rejection/Look Above & Fail)
         """
         if df.empty or len(df) < 3: return "NORMAL", 0
         
@@ -175,6 +176,15 @@ class GodModeAnalyst:
         c1 = df.iloc[-3] # 2 candles ago
         c2 = df.iloc[-2] # Prev candle
         c3 = df.iloc[-1] # Current candle (Closed)
+
+        # Pattern 0: VAH_REJECTION (Auction Theory: Look Above & Fail) - Phase 59 
+        # Logic: Price probed above VAH in the last 3 candles but current candle closes back inside.
+        if vah and vah > 0:
+            poked_above = df['high'].iloc[-3:].max() > (vah * 1.0005) # Significant probe
+            closed_back_in = c3['close'] < (vah * 0.9995) # Acceptance back into balance
+            if poked_above and closed_back_in:
+                # We return this immediately as it takes precedence over normal patterns for Auction logic
+                return "VAH_REJECTION", 0.0 # Confidence handled by Z-Score below if needed
         
         # Helper: Get Body/Range
         def get_candle_stats(row):
@@ -319,8 +329,6 @@ class GodModeAnalyst:
         result["vol_fade_ratio"] = vol_fade_ratio
 
         # Phase 57: Z-Process Threshold Relaxation (Guo-Zhang Model)
-        # Murphy/Guo-Zhang: At extreme extensions, institutional absorption creates "Dojis with massive volume"
-        # We relax the fade if we see a narrow body (Absorption) at extreme SD.
         max_fade = 0.65
         curr_candle = candles[-1]
         body = abs(curr_candle['close'] - curr_candle['open'])
@@ -330,11 +338,21 @@ class GodModeAnalyst:
         if vwap_sd > z_thresh and body_pct < 0.0005:
             relaxation = getattr(config, 'P57_G5_Z_FADE_RELAXATION', 0.95)
             max_fade = relaxation
-            # logger.info(f"  G5 ABSORP RELAXATION: {vol_fade_ratio:.2f} <= {max_fade} allowed via Z-Process @ {vwap_sd:.1f}SD")
 
         if vol_fade_ratio > max_fade:
             result["reject_reason"] = f"volume_not_faded:{vol_fade_ratio:.2f} (max:{max_fade})"
             return result
+
+        # ── Pattern Discovery (Phase 59: Moved up for VAH Rejection bypass) ─────────
+        pattern = "NORMAL"
+        try:
+            import pandas as pd
+            bonus_candles = candles[-20:] if len(candles) >= 20 else candles
+            df_slice = pd.DataFrame(bonus_candles)
+            vah_val = profile.get('vah') if isinstance(profile, dict) else getattr(profile, 'vah', None)
+            pattern, z_score = self.detect_structure_advanced(df_slice, vah=vah_val)
+        except Exception:
+            pass
 
         # ── Gate D: Price above VAH (ATR clearance) [G5.2] ─────────
         vah = profile.get('vah') if isinstance(profile, dict) else getattr(profile, 'vah', None)
@@ -343,59 +361,60 @@ class GodModeAnalyst:
             return result
 
         curr_close = candles[-1]['close']
-        if curr_close <= vah:
-            result["reject_reason"] = f"price_below_vah:{curr_close:.2f}|vah:{vah:.2f}"
-            return result
-            
-        # ATR-relative clearance: must be significantly above VAH to prove rejection
-        if getattr(config, 'P51_G5_GATE_D_ATR_CLEARANCE', False) and atr > 0:
-            clearance = curr_close - vah
-            min_clearance = atr * 0.2
-            if clearance < min_clearance:
-                result["reject_reason"] = f"insufficient_vah_clearance:{clearance:.2f} < {min_clearance:.2f} (0.2*ATR)"
+        
+        # ── PHASE 59: VAH REJECTION BYPASS ──────────────────────────
+        # If we have a "Look Above & Fail" pattern, we allow the close to be BELOW VAH.
+        is_vah_rejection = (pattern == "VAH_REJECTION")
+        
+        if not is_vah_rejection:
+            if curr_close <= vah:
+                result["reject_reason"] = f"price_below_vah:{curr_close:.2f}|vah:{vah:.2f}"
                 return result
+                
+            # ATR-relative clearance: must be significantly above VAH to prove rejection
+            if getattr(config, 'P51_G5_GATE_D_ATR_CLEARANCE', False) and atr > 0:
+                clearance = curr_close - vah
+                min_clearance = atr * 0.2
+                if clearance < min_clearance:
+                    result["reject_reason"] = f"insufficient_vah_clearance:{clearance:.2f} < {min_clearance:.2f} (0.2*ATR)"
+                    return result
 
         # ── All gates passed — base signal fires ────────────────────
         result["fired"] = True
+        result["pattern_bonus"] = pattern
 
-        # ── Confidence tier from volume fade severity ────────────────
+        # ── Confidence tier ─────────────────────────────────────────
+        # Base confidence from volume fade
         if vol_fade_ratio < 0.30:
-            result["confidence"] = "EXTREME"   # volume collapsed >70%
+            conf_tier = 3 # EXTREME
         elif vol_fade_ratio < 0.50:
-            result["confidence"] = "HIGH"      # volume faded 50–70%
+            conf_tier = 2 # HIGH
         else:
-            result["confidence"] = "MEDIUM"    # volume faded 35–50%
+            conf_tier = 1 # MEDIUM
             
+        # Upgrade tier for patterns
+        if pattern in ("BEARISH_ENGULFING", "SHOOTING_STAR", "EVENING_STAR", "VOLUME_TRAP", "ABSORPTION_DOJI"):
+            conf_tier += 1
+        
+        # ── PHASE 59: SESSION-PHASE CONFLUENCE ──────────────────────
+        # "Holy Grail": VAH Rejection + Stretched (>2.2 SD) after 10:45 AM
+        IST = pytz.timezone('Asia/Kolkata')
+        from datetime import datetime, time
+        now_ist = datetime.now(IST).time()
+        
+        if is_vah_rejection and vwap_sd > 2.2 and now_ist > time(10, 45):
+            conf_tier = 4 # MAX_CONVICTION
+            
+        tiers = {1: "MEDIUM", 2: "HIGH", 3: "EXTREME", 4: "MAX_CONVICTION"}
+        result["confidence"] = tiers.get(min(conf_tier, 4), "MEDIUM")
+
         # ── Gate E: Late-session EXTREME-only rule [G5.3] ────────────
         if getattr(config, 'P51_G5_GATE_E_LATE_SESSION_EXTREME_ONLY', False):
-            IST = pytz.timezone('Asia/Kolkata')
-            from datetime import datetime, time
-            now_ist = datetime.now(IST).time()
             if now_ist > time(14, 30):
-                if result["confidence"] != "EXTREME":
+                if conf_tier < 3: # Not EXTREME or MAX
                     result["fired"] = False
                     result["reject_reason"] = f"late_session_non_extreme (conf:{result['confidence']})"
                     return result
-
-        # ── Bonus: existing bearish pattern upgrades confidence ──────
-        try:
-            # FIX-4: Pass last 20 candles for statistically valid z_score in detect_structure_advanced.
-            # detect_structure_advanced needs iloc[-20:-1] for avg_vol → requires at least 21 rows in df.
-            # candles[-3:] gave only 3 rows → z_score was computed on 2 points (meaningless).
-            import pandas as pd
-            bonus_candles = candles[-20:] if len(candles) >= 20 else candles
-            df_slice = pd.DataFrame(bonus_candles)
-            pattern, z_score = self.detect_structure_advanced(df_slice)
-            if pattern in ("BEARISH_ENGULFING", "SHOOTING_STAR",
-                           "EVENING_STAR", "VOLUME_TRAP", "ABSORPTION_DOJI"):
-                result["pattern_bonus"] = pattern
-                # Upgrade one tier
-                if result["confidence"] == "MEDIUM":
-                    result["confidence"] = "HIGH"
-                elif result["confidence"] == "HIGH":
-                    result["confidence"] = "EXTREME"
-        except Exception:
-            pass  # pattern bonus is optional — never crash here
 
         return result
 

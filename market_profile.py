@@ -9,75 +9,57 @@ class ProfileAnalyzer:
     def __init__(self):
         pass
         
-    def calculate_tpo_profile(self, df, price_step=None):
+    def calculate_market_profile(self, df, price_step=None, mode='VOLUME'):
         """
-        Calculates a TPO-like profile using 1-minute time blocks.
-        Each 1-min candle contributes to the "Time at Price" count.
+        Calculates Market Profile.
+        Modes: 
+        - 'TPO': Time-at-Price (Frequency of closes in bins)
+        - 'VOLUME': Volume-at-Price (Sum of volumes in bins)
         """
         if df is None or df.empty: return None
         
         try:
-            # 1. Determine Price Bins (Tick Size)
+            # 1. Determine Price Bins
             min_p = df['low'].min()
             max_p = df['high'].max()
             
-            # Auto-calc step (e.g. 0.05 or based on range)
             if price_step is None:
                 price_range = max_p - min_p
-                # If range is small, use 0.05. If large (Type 20000), use 1.0.
                 if price_range < 5: price_step = 0.05
                 elif price_range < 100: price_step = 0.10
                 elif price_range < 1000: price_step = 0.50
                 else: price_step = 1.0
             
-            # Create Bins
-            # We want bins covering Min to Max
             bins = np.arange(min_p, max_p + price_step, price_step)
             
-            # 2. Build TPO Counts (Time Distribution)
-            # Iterate through candles and increment count for all bins touched by High-Low range.
-            # This is "True" TPO (Range coverage).
-            
-            # Faster Vectorized approach?
-            # Creating a histogram for every candle is slow.
-            # Pivot approach:
-            
-            # Initialize TPO map
-            tpo_counts = np.zeros(len(bins) - 1)
-            
-            # Loop (optimization: vectorized binning not trivial for ranges)
-            # Approximation: Use Close price for simplified TPO, or Low/High/Close.
-            # "Pro" TPO uses the full range.
-            
-            # Let's start with a simpler yet effective approach:
-            # Count closes in bins (Time at Price)
-            # This is effectively a Frequency Distribution of time.
-            
-            # Using 'close' as the TPO marker
-            counts, bin_edges = np.histogram(df['close'], bins=bins)
-            
+            # 2. Build Profile
+            if mode == 'VOLUME':
+                # Use np.histogram with weights for Volume Profile
+                counts, bin_edges = np.histogram(df['close'], bins=bins, weights=df['volume'])
+                label_prefix = "v" # vPOC, vVAH
+            else:
+                # Standard TPO (Frequency)
+                counts, bin_edges = np.histogram(df['close'], bins=bins)
+                label_prefix = "" # POC, VAH
+
             # 3. Calculate Value Area (70%)
-            total_tpo = counts.sum()
-            limit = total_tpo * 0.70
+            total_val = counts.sum()
+            if total_val == 0: return None
+            limit = total_val * 0.70
             
             # Find POC (Mode)
             poc_idx = np.argmax(counts)
             poc_price = (bin_edges[poc_idx] + bin_edges[poc_idx+1]) / 2
             
             # Value Area Algorithm: Start at POC and expand out
-            # We expand up/down greedily or symmetrically? 
-            # Standard Market Profile expands by adding the larger neighboring TPO count.
-            
-            current_tpo = counts[poc_idx]
+            current_total = counts[poc_idx]
             up_idx = poc_idx + 1
             dn_idx = poc_idx - 1
             
-            # Bounds
             low_bound = dn_idx
             high_bound = up_idx
             
-            while current_tpo < limit:
-                # Check Bounds
+            while current_total < limit:
                 can_go_up = up_idx < len(counts)
                 can_go_down = dn_idx >= 0
                 
@@ -87,36 +69,37 @@ class ProfileAnalyzer:
                 up_val = counts[up_idx] if can_go_up else -1
                 dn_val = counts[dn_idx] if can_go_down else -1
                 
-                # Decision
-                # 1. If we can't go one way, force the other
                 if not can_go_down:
-                    current_tpo += up_val
+                    current_total += up_val
                     high_bound = up_idx
                     up_idx += 1
                 elif not can_go_up:
-                    current_tpo += dn_val
+                    current_total += dn_val
                     low_bound = dn_idx
                     dn_idx -= 1
-                # 2. Compare Values (Prefer UP on ties to ensure progress)
                 elif up_val >= dn_val:
-                    current_tpo += up_val
+                    current_total += up_val
                     high_bound = up_idx
                     up_idx += 1
                 else:
-                    current_tpo += dn_val
+                    current_total += dn_val
                     low_bound = dn_idx
                     dn_idx -= 1
                     
             val = bin_edges[max(0, low_bound)]
-            vah = bin_edges[min(len(bin_edges)-1, high_bound + 1)] # +1 to get upper edge
+            vah = bin_edges[min(len(bin_edges)-1, high_bound + 1)]
             
             return {
-                'poc': poc_price,
-                'vah': vah,
-                'val': val,
+                f'{label_prefix}poc': poc_price,
+                f'{label_prefix}vah': vah,
+                f'{label_prefix}val': val,
+                'poc': poc_price, # compatibility
+                'vah': vah,       # compatibility
+                'val': val,       # compatibility
                 'counts': counts,
                 'bins': bin_edges,
-                'total_tpo': total_tpo
+                'total_value': total_val,
+                'mode': mode
             }
             
         except Exception as e:
@@ -134,11 +117,11 @@ class ProfileAnalyzer:
         # Calculate Profile excluding the last few candles (Developing Struct)?
         # No, usually we trade against the Developing Structure of the day.
         
-        profile = self.calculate_tpo_profile(df)
+        profile = self.calculate_market_profile(df, mode='VOLUME')
         if not profile: return False, "Profile Error"
         
-        vah = profile['vah']
-        poc = profile['poc']
+        vah = profile['vvah']
+        poc = profile['vpoc']
         
         # Logic:
         # Check last 3 candles for the "Probe & Fail" pattern.
@@ -189,7 +172,7 @@ class ProfileAnalyzer:
         Calculates the Point of Control (POC) for the given dataframe.
         Used to track dPOC migration.
         """
-        profile = self.calculate_tpo_profile(df)
+        profile = self.calculate_market_profile(df, mode='VOLUME')
         if profile:
-            return profile['poc']
+            return profile['vpoc']
         return 0

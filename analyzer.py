@@ -239,7 +239,7 @@ class FyersAnalyzer:
         signal_meta = {}
         profile = None
         try:
-            profile = self.profile_analyzer.calculate_tpo_profile(df)
+            profile = self.profile_analyzer.calculate_market_profile(df, mode='VOLUME')
         except Exception as e:
             logger.warning(f"Profile computation error for {symbol}: {e}")
 

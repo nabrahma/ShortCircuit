@@ -1,12 +1,12 @@
 # ShortCircuit — Architecture Reference
-**Version:** Phase 58 — G12 Candle-Close Validation
+**Version:** Phase 59 — Auction Rejection & Volume Profile
  | **Last Updated:** 2026-03-12
 
 ---
 
 ## SECTION 1 — System Overview
 
-ShortCircuit is a fully automated, event-driven algorithmic trading bot for NSE (Indian National Stock Exchange) equities, operating intraday-only (all positions closed by 15:10 IST). It implements a short-selling momentum reversal strategy, detecting and trading against institutional exhaustion at intraday highs. The strategy core is the **GOD MODE signal**: a multi-factor gate that requires simultaneous confirmation of exhaustion at stretch (9–14.5% intraday gain + new high + vol_fade < 0.65 + above VAH), RVOL spike (≥3×), volume-profile deviation (LTP vs. POC divergence), order-flow evidence (Trapped Longs, absorption), and Higher-Time-Frame structure (15m Lower High). Bearish patterns are bonus confidence scorers. A separate 12-gate validation framework monitors price in real-time and only fires execution when LTP breaks the entry trigger.
+ShortCircuit is a fully automated, event-driven algorithmic trading bot for NSE (Indian National Stock Exchange) equities, operating intraday-only (all positions closed by 15:10 IST). It implements a short-selling momentum reversal strategy, detecting and trading against institutional exhaustion at intraday highs. The strategy core is the **GOD MODE signal**: a multi-factor gate that requires simultaneous confirmation of exhaustion at stretch (9–14.5% intraday gain + new high + vol_fade < 0.65 + above/rejected VAH), RVOL spike (≥3×), volume-profile deviation (LTP vs. vPoC divergence), order-flow evidence (Trapped Longs, absorption), and Higher-Time-Frame structure (15m Lower High). **[Phase 59]** Implemented Auction Theory "Look Above & Fail" setup, using Volume-Weighted POC/VAH for INSTITUTIONAL fair-value detection. Bearish patterns are bonus confidence scorers. A separate 12-gate validation framework monitors price in real-time and only fires execution when LTP or a candle close breaks the entry trigger.
 
 The system infrastructure is: Python 3.10+ asyncio, Fyers API v3 (REST for quote batches and order submission; WebSocket for real-time tick data and order fill events), PostgreSQL + asyncpg for trade journaling, and python-telegram-bot (PTB) v20+ for the operator interface. The operator has no web UI — all signals, trade alerts, live P&L, commands (`/auto on`, `/status`, `/positions`), and EOD summaries flow exclusively through Telegram.
 
@@ -316,7 +316,7 @@ Current behaviour:
 **Calls into:** `pandas`, `numpy`
 **State it owns:** None (stateless)
 **Error handling:** None explicit — division-by-zero guards in VWAP calculation
-**Notes:** `scipy.stats.linregress` import is commented out. VWAP slope < 0.05 = FLAT (reversion setup), > 0.1 = TRENDING. `is_exhaustion_at_stretch` computes the primary Phase 44.8 trading edge.
+**Notes:** `scipy.stats.linregress` import is commented out. VWAP slope < 0.05 = FLAT (reversion setup), > 0.1 = TRENDING. `is_exhaustion_at_stretch` computes the primary Phase 44.8 trading edge. **[Phase 59]** Added `VAH_REJECTION` auction pattern detection and Holy Grail confluence logic.
 
 ---
 
@@ -485,12 +485,11 @@ Current behaviour:
 
 ### market_profile.py
 **Role:** Market Profile / Value Area calculation — VAH, VAL, POC from 1-minute OHLCV data.
-**Key Classes:** `ProfileAnalyzer`
-**Key Functions:** (profile calculation)
+**Key Functions:** `calculate_market_profile(mode='VOLUME')`, `check_profile_rejection()`, `get_developing_poc()`
 **Imports from project:** None
 **Called by:** `analyzer.py`
 **Calls into:** `pandas`, `numpy`
-**Notes:** 7446 bytes.
+**Notes:** **[Phase 59]** Upgraded to Volume-Weighted Profile. Defaults to `VOLUME` mode (vPoC/vVAH/vVAL) for institutional fair value.
 
 ---
 
