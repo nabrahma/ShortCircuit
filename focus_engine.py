@@ -100,6 +100,7 @@ class FocusEngine:
             'expires_at': expires_at, # Phase 51 dynamic timeout
             'queued_at': datetime.datetime.now(),  # FIX #5: for stale signal flush at 9:45
             'correlation_id': signal_data.get('correlation_id'),
+            'last_evaluated_minute': None, # Phase 58: for candle-close validation
         }
         
         # Phase 51 [G8.3]: Trigger immediate cooldown for this symbol in SignalManager
@@ -290,15 +291,57 @@ class FocusEngine:
         
         for symbol, pending in current_pending:
             try:
-                # 1. Fetch LTP (sync call → run in thread to avoid blocking event loop)
-                data = {"symbols": symbol}
-                resp = await asyncio.to_thread(self.fyers.quotes, data=data)
-                if 'd' not in resp or not resp['d']: continue
-                
-                ltp = resp['d'][0]['v']['lp']
-                
                 trigger_price = pending['trigger']
                 inval_price = pending['invalidate']
+                
+                # ── PHASE 58: G12 CANDLE-CLOSE VALIDATION ───────────────────
+                use_close = getattr(config, 'P58_G12_USE_CANDLE_CLOSE', False)
+                IST = pytz.timezone('Asia/Kolkata')
+                now_ist = datetime.datetime.now(IST)
+                
+                if use_close:
+                    current_minute = now_ist.replace(second=0, microsecond=0)
+                    last_eval = pending.get('last_evaluated_minute')
+                    
+                    if last_eval is not None and current_minute <= last_eval:
+                        continue # Already evaluated this minute boundary
+                    
+                    # New minute boundary reached - attempt to fetch last closed candle
+                    today = now_ist.strftime("%Y-%m-%d")
+                    hist_data = {
+                        "symbol": symbol,
+                        "resolution": "1",
+                        "date_format": "1",
+                        "range_from": today,
+                        "range_to": today,
+                        "cont_flag": "1"
+                    }
+                    hist_resp = await asyncio.to_thread(self.fyers.history, data=hist_data)
+                    if hist_resp.get('s') == 'ok' and hist_resp.get('candles'):
+                        last_candle = hist_resp['candles'][-1]
+                        
+                        # Verify this is actually the candle that just closed
+                        # (timestamp should be current_minute - 1 min)
+                        expected_ts = int(current_minute.timestamp()) - 60
+                        if last_candle[0] < expected_ts:
+                            continue # Wait for Fyers to post the candle
+                        
+                        ltp = last_candle[4]
+                        pending['last_evaluated_minute'] = current_minute
+                        
+                        # Bypass G10 two-tick for close-based entry (the close IS the confirmation)
+                        if ltp < trigger_price:
+                            pending['_breakdown_tick_count'] = 1 # Becomes 2 in the logic below
+                            
+                        logger.info(f"[GATE] {symbol} Minute-End Close: ₹{ltp} (Trigger: ₹{trigger_price}, Inval: ₹{inval_price})")
+                    else:
+                        continue 
+                else:
+                    # Legacy LTP-touch logic
+                    data = {"symbols": symbol}
+                    resp = await asyncio.to_thread(self.fyers.quotes, data=data)
+                    if 'd' not in resp or not resp['d']: continue
+                    ltp = resp['d'][0]['v']['lp']
                 timestamp = pending['timestamp']
 
                 def _queue_validation_update(outcome, details=None):

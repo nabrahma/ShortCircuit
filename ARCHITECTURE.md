@@ -1,5 +1,5 @@
 # ShortCircuit — Architecture Reference
-**Version:** Phase 57 — Mean Reversion Optimization
+**Version:** Phase 58 — G12 Candle-Close Validation
  | **Last Updated:** 2026-03-12
 
 ---

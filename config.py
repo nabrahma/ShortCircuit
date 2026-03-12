@@ -318,6 +318,9 @@ P51_G8_COOLDOWN_ON_SIGNAL_ADD = True # G8.3 immediate trigger
 # G9: VWAP SD Extension
 P51_G9_VWAP_SD_EXTREME = 1.5
 
+# PHASE 58: G12 VALIDATION HARDENING
+P58_G12_USE_CANDLE_CLOSE: bool = True
+
 # G10: Spread & Confirmation
 P51_G10_MAX_SPREAD_PCT = 0.004 # 0.4% (PRD: Downgrade to CAUTIOUS, not block)
 P51_G10_TICK_OFFSET = 2 # Execute 2 ticks better than current LTP

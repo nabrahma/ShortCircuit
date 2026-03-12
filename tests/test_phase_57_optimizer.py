@@ -80,6 +80,7 @@ def test_absorption_relaxation(analyzer):
     config.G5_STRETCH_LOW_PCT = 9.0
     config.G5_STRETCH_HIGH_PCT = 15.0
     config.P51_G5_GATE_B_USE_ALLDAY_HIGH = False # bypass Gate B for simplicity
+    config.P51_G5_GATE_E_LATE_SESSION_EXTREME_ONLY = False # bypass late session rule
     
     # Mock Gate D (profile)
     # It checks profile['vah']. We need ltp > vah.
