@@ -50,7 +50,6 @@ class MarketContext:
         self._circuit_touched_today = set() # Phase 51: G3 Blacklist (Session-permanent)
         self._circuit_blacklist_date = datetime.now(IST).date()
 
-        
         if self._morning_high:
             logger.info(f"✅ Market Context Initialized with Morning Range: {self._morning_low} - {self._morning_high}")
             logger.info(f"   Index: {self.nifty_symbol}")
@@ -170,17 +169,26 @@ class MarketContext:
             "[MarketContext] ⚠️ Morning range unavailable — range-dependent checks are bypassed."
         )
 
+    # ── Phase 61: G7 Consolidation & Caching ────────────────────
     
-    def _get_index_data(self, symbol=None):
-        """Fetch intraday data for the index."""
-        if symbol is None:
-            symbol = self.nifty_symbol
-            
-        today = datetime.now().strftime("%Y-%m-%d")
+    def _get_index_data_cached(self, symbol=None):
+        """Fetch index candles with a 5-minute TTL cache."""
+        if symbol is None: symbol = self.nifty_symbol
         
+        now = _time.time()
+        if not hasattr(self, '_index_cache'):
+            self._index_cache = {}
+            self._index_cache_time = {}
+            
+        # Cache hit?
+        if symbol in self._index_cache and (now - self._index_cache_time.get(symbol, 0)) < 300:
+            return self._index_cache[symbol]
+            
+        # Cache miss
+        today = datetime.now(IST).strftime("%Y-%m-%d")
         data = {
             "symbol": symbol,
-            "resolution": "5",  # 5-minute for smoother regime detection
+            "resolution": "5",
             "date_format": "1",
             "range_from": today,
             "range_to": today,
@@ -190,191 +198,62 @@ class MarketContext:
         try:
             response = self.fyers.history(data=data)
             if response.get('s') == 'ok' and response.get('candles'):
+                self._index_cache[symbol] = response['candles']
+                self._index_cache_time[symbol] = now
                 return response['candles']
         except Exception as e:
-            logger.error(f"Failed to fetch index data: {e}")
+            logger.error(f"Failed to fetch index data for {symbol}: {e}")
         
-        return None
-    
-    def _calculate_morning_range(self, candles):
-        """
-        Calculate morning range (09:15 - 09:45 IST) from provided candles.
-        This establishes the reference for trend detection.
-        """
-        if not candles:
-            return None, None, None
-        
-        # Filter candles from 09:15 to 09:45 IST.
-        morning_candles = []
-        for c in candles:
-            ts = datetime.fromtimestamp(c[0], tz=timezone.utc).astimezone(IST)
-            if time(9, 15) <= ts.time() <= time(9, 45):
-                morning_candles.append(c)
-        
-        if not morning_candles:
-            return None, None, None
-        
-        morning_high = max(c[2] for c in morning_candles)  # c[2] = high
-        morning_low = min(c[3] for c in morning_candles)   # c[3] = low
-        morning_range = morning_high - morning_low
-        
-        return morning_high, morning_low, morning_range
-    
-    def get_market_regime(self):
-        """
-        Determine if it's a TREND DAY or RANGE DAY.
-        
-        Returns:
-            tuple: (regime, message)
-                - regime: "TREND_UP", "TREND_DOWN", or "RANGE"
-                - message: Explanation for logging
-        """
-        candles = self._get_index_data(self.nifty_symbol)
-        
-        if not candles:
-            logger.warning("Could not fetch Nifty data, assuming RANGE")
-            return "RANGE", "No index data available"
-        
-        # Ensure morning range for this session is sourced from REST.
-        self._refresh_morning_range_if_needed()
-        if not self.morning_range_valid:
-            return "RANGE", "Morning range unavailable (range-dependent gates bypassed)"
-        
-        # Get current price
-        current_close = candles[-1][4]  # c[4] = close
-        
-        # ── PHASE 41.3: DYNAMIC THRESHOLDS ────────────────────
-        conf = config.MARKET_REGIME_CONFIG
-        
-        # Calculate deviation from morning range
-        # Only focusing on TREND UP for blocking shorts
-        move_pct = (current_close - self._morning_high) / self._morning_high
-        
-        new_regime = "RANGE"
-        msg = f"NIFTY in RANGE ({self._morning_low:.0f} - {self._morning_high:.0f})"
-        
-        # 1. STRONG TREND (>1.0%) -> Immediate Block
-        if move_pct > conf['strong_trend_threshold']:
-            new_regime = "TREND_UP"
-            msg = f"STRONG TREND UP (+{move_pct:.2%}) > 1.0%"
-            
-        # 2. MODERATE TREND (>0.5%) -> Check Duration
-        elif move_pct > conf['moderate_trend_threshold']:
-            if self.last_regime == "TREND_UP":
-                # Check momentum decay
-                duration = (datetime.now() - self.regime_change_time).seconds / 60 if self.regime_change_time else 0
-                if duration > conf['momentum_decay_minutes'] and move_pct < 0.008:
-                     new_regime = "RANGE"
-                     msg = "TREND UP -> RANGE (Decaying Momentum)"
-                else:
-                    new_regime = "TREND_UP"
-                    msg = f"SUSTAINED TREND UP (+{move_pct:.2%}) > 0.5%"
-            else:
-                # Waiting for confirmation
-                new_regime = "RANGE"
-                msg = f"POTENTIAL TREND (+{move_pct:.2%}) - Waiting confirmation"
-        
-        # 3. DOWN TREND
-        elif current_close < self._morning_low * 0.995: # Simple 0.5% below low
-            new_regime = "TREND_DOWN"
-            msg = "TREND DOWN"
+        return self._index_cache.get(symbol) # Fallback to expired cache if API fails
 
-        # Update State
-        if new_regime != self.last_regime:
-            self.last_regime = new_regime
-            self.regime_change_time = datetime.now()
-            logger.info(f"📊 REGIME CHANGE: {new_regime} | {msg}")
+    def evaluate_g7(self) -> tuple[bool, str]:
+        """
+        Consolidated Gate 7: Market Regime + Time Filters.
+        Replaces legacy should_allow_short and is_favorable_time_for_shorts.
+        Returns: (allowed, reason)
+        """
+        now_ist = datetime.now(IST).time()
+        
+        # 1. TIME GATE: Opening Volatility
+        if now_ist < time(10, 0):
+            return False, "BLOCKED [G7]: Opening Volatility (9:15-10:00)"
             
-        return new_regime, msg
-    
-    def should_allow_short(self, symbol=None, pattern=None, stock_ltp=None):
-        """
-        Phase 41.3: Intelligent Regime Filter with Overrides.
-        """
-        regime, msg = self.get_market_regime()
-        
-        if regime == "TREND_UP":
-            # CHECK OVERRIDES
-            if symbol and pattern and stock_ltp:
-                conf = config.MARKET_REGIME_CONFIG
-                if pattern in conf['override_patterns']:
-                    # Check Divergence: Stock is weak while Market is strong
-                    # Mocking open price since we assume stock_ltp is current
-                    # Ideally we need stock's open/close for % change. 
-                    # Assuming caller might verify divergence?
-                    # For now, just logging the attempt.
-                    return False, f"BLOCKED: {msg} (Override logic requires stock % change data)"
-                    
-                    # NOTE: To implement divergence check properly, we need stock's change %.
-                    # But `should_allow_short` signature in analyzer limits us. 
-                    # Analyzer should handle the divergence check if pattern matches.
-                    # For now, we STRICTLY follow the regime unless caller handles it.
-            
-            return False, f"BLOCKED: {msg} - No shorts on trend-up days"
-        
-        return True, f"OK: {msg}"
-    
-    def get_time_filter(self):
-        """
-        Time-of-day filter based on Volman's session analysis.
-        
-        Returns:
-            tuple: (phase, recommendation)
-        """
-        now = datetime.now(IST).time()    # IST-explicit — safe on any server timezone
-        
-        if now < time(10, 0):
-            return "OPENING", "Avoid - Opening volatility"
-        elif now < time(11, 30):
-            return "TREND_ESTABLISHMENT", "Caution - Let trends establish"
-        elif now < time(13, 0):
-            return "LUNCH", "Avoid - Low volume chop"
-        elif now < time(14, 30):
-            return "AFTERNOON_TREND", "OK - Trend continuation"
-        else:
-            return "EOD_REVERSION", "BEST - Mean reversion works here"
-    
-    def is_favorable_time_for_shorts(self):
-        """
-        Check if current time favors reversal trades.
-        
-        Phase 24.3: Stricter time filter based on Jan 29 analysis.
-        - 09:41 AXISGOLD lost (early morning)
-        - 09:55 GOLDADD lost (early morning)
-        - 10:10 NAHARSPING WON (after 10 AM)
-        
-        Returns:
-            tuple: (favorable, reason)
-        """
-        phase, recommendation = self.get_time_filter()
-        
-        # PHASE 24.3: BLOCK all signals before 10:00 AM
-        # Opening hour has too much volatility - reversals get stopped out
-        if phase == "OPENING":
-            return False, f"BLOCKED: {phase} - No signals before 10:00 AM (opening volatility)"
-        
-        # Phase 57: Lunch block disabled per USER request (12:00-13:00)
-        # if phase == "LUNCH":
-        #     return False, f"BLOCKED: {phase} - No signals during lunch (12:00-13:00)"
-        
-        # Phase 51: G7 EOD Cutoff
+        # 2. TIME GATE: EOD Cutoff
         if config.PHASE_51_ENABLED and config.P51_G7_TIME_GATE_ENABLED:
-            now_ist = datetime.now(IST).time()
             if now_ist >= time(15, 10):
                 return False, "BLOCKED [G7]: EOD Cutoff (after 15:10)"
 
+        # 3. REGIME DETECTION: Nifty Trend
+        candles = self._get_index_data_cached(self.nifty_symbol)
+        if not candles:
+            return True, "ALLOWED [G7]: No index data, bypassing regime"
+            
+        self._refresh_morning_range_if_needed()
+        if not self.morning_range_valid:
+            return True, "ALLOWED [G7]: Morning range unavailable, bypassing regime"
+
+        current_close = candles[-1][4]
+        conf = config.MARKET_REGIME_CONFIG
+        move_pct = (current_close - self._morning_high) / self._morning_high
         
-        # More lenient during afternoon/EOD
-        if phase in ["AFTERNOON_TREND", "EOD_REVERSION"]:
-            return True, f"Time: {phase} - {recommendation}"
-        
-        # TREND_ESTABLISHMENT phase (10:00-11:30): Check market regime
-        regime, _ = self.get_market_regime()
-        
-        if regime == "TREND_UP":
-            return False, f"BLOCKED: {phase} + TREND_UP - Wait for afternoon reversal window"
-        
-        return True, f"Time: {phase} - {recommendation}"
+        # Update Internal Regime State for logging
+        new_regime = "RANGE"
+        if move_pct > conf['strong_trend_threshold']:
+            new_regime = "TREND_UP"
+        elif move_pct < -0.005:
+            new_regime = "TREND_DOWN"
+            
+        if new_regime != self.last_regime:
+            self.last_regime = new_regime
+            self.regime_change_time = datetime.now()
+            logger.info(f"📊 REGIME CHANGE: {new_regime} | Move: {move_pct:.2%}")
+
+        # STRONG TREND (>1.5%) -> Hard Block
+        if move_pct > conf['strong_trend_threshold']:
+            return False, f"BLOCKED [G7]: Strong Trend Up (+{move_pct:.2%})"
+
+        # 4. DEFAULT: Range Day or Trend Down
+        return True, "OK [G7]: Market in Range / Trend Down"
 
     # ── Phase 51: G3 Circuit Hitter Methods ────────────────────
     

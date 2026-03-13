@@ -32,13 +32,14 @@ def test_gain_mismatch_standardization():
     with patch('god_mode_logic.GodModeAnalyst.check_constraints') as mock_check:
         mock_check.return_value = (True, "PASSED")
         
-        # Set config to some high limit to allow 15% but reject 19%
-        with patch('config.RVOL_VALIDITY_GATE_ENABLED', False):
-            # We don't need full check_setup, just the enrichment part
-            # analyzer.check_setup calls self.gm_analyst.check_constraints(ltp, day_high, gain_pct, ...)
+        # 1. Bypass G7 Market Regime
+        with patch('market_context.MarketContext.evaluate_g7') as mock_g7:
+            mock_g7.return_value = (True, "OK - TEST")
             
-            # For simplicity, we directly call the relevant logic inside a mock environment
-            analyzer.check_setup('NSE:ZYDWELL-EQ', ltp=115.0, pre_fetched_df=df)
+            # Set config to some high limit to allow 15% but reject 19%
+            with patch('config.RVOL_VALIDITY_GATE_ENABLED', False):
+                # analyzer.check_setup calls self.gm_analyst.check_constraints(ltp, day_high, gain_pct, ...)
+                analyzer.check_setup('NSE:ZYDWELL-EQ', ltp=115.0, pre_fetched_df=df)
             
             # The 3rd argument to check_constraints should be 15.0
             args, kwargs = mock_check.call_args

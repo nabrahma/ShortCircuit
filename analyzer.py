@@ -112,18 +112,15 @@ class FyersAnalyzer:
         grl = get_gate_result_logger()
         gr = GateResult(symbol=symbol, scan_id=scan_id, data_tier=data_tier)
 
-        # ── G7: Pre-analysis Filters (Time Gate & Regime) ────────────
-        if config.PHASE_51_ENABLED and config.P51_G7_TIME_GATE_ENABLED:
-            allow_short, regime_reason = self.market_context.is_favorable_time_for_shorts()
-        else:
-            allow_short, regime_reason = self._check_filters_detailed(symbol)
+        # ── G7: Market Regime & Time Gate (Consolidated) ────────────
+        allowed, reason = self.market_context.evaluate_g7()
             
-        gr.g7_pass = allow_short
-        gr.g7_value = regime_reason
-        if not allow_short:
+        gr.g7_pass = allowed
+        gr.g7_value = reason
+        if not allowed:
             gr.verdict = "REJECTED"
             gr.first_fail_gate = "G7_REGIME"
-            gr.rejection_reason = f"Market regime blocked: {regime_reason}"
+            gr.rejection_reason = reason
             grl.record(gr)
             return None
 
@@ -178,21 +175,19 @@ class FyersAnalyzer:
 
         day_high = df['high'].max()
         open_price = df.iloc[0]['open']
-        # Fallback to open if PC is missing (e.g. first tick of session)
+        # Baseline: Previous Close (Net Change) or Open Price fallback
         baseline = pc if pc > 0 else open_price
         gain_pct = ((ltp - baseline) / baseline) * 100
 
         if pc == 0:
             logger.debug(f"[ANALYZER] No prev_close for {symbol}, falling back to open-based gain: {gain_pct:.2f}%")
 
-        # Phase 54: ATR computed early — needed by G1 Kill Backdoor (ATR-relative)
+        # ATR & VWAP Context (required for G1-G5)
         atr = self.gm_analyst.calculate_atr(df)
-        
-        # Phase 57: vwap_sd (Z-Score) moved to top to support G4 Slope Decay & G5 Absorption logic
         vwap_sd = self.gm_analyst.calculate_vwap_bands(prev_df)
         is_extended = vwap_sd > 2.0
         
-        # ── G1: Gain range / hard constraints ───────────────────────
+        # ── G1: Constraints & Kill Backdoor ─────────────────────────
         ok, msg = self.gm_analyst.check_constraints(ltp, day_high, gain_pct, open_price, df=df, atr=atr)
         gr.g1_pass = ok
         gr.g1_value = round(gain_pct, 2)
@@ -362,7 +357,7 @@ class FyersAnalyzer:
         # ── G9: HTF Confluence ────────────────────────────────────
         try:
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _htf_exec:
-                _htf_future = _htf_exec.submit(self.htf_confluence.check_trend_exhaustion, symbol, df_15m=df_15m)
+                _htf_future = _htf_exec.submit(self.htf_confluence.check_trend_exhaustion, symbol, df_15m=df_15m, vwap_sd=vwap_sd)
                 try:
                     htf_ok, htf_msg = _htf_future.result(timeout=1.5)
                 except concurrent.futures.TimeoutError:
@@ -696,13 +691,13 @@ class FyersAnalyzer:
         gr = GateResult(symbol=symbol, scan_id=scan_id, data_tier=data_tier)
 
         # ── G7: Market Regime ──────────────────────────────────────────
-        allow_short, regime_reason = self._check_filters_detailed(symbol)
+        allow_short, regime_reason = self.market_context.evaluate_g7()
         gr.g7_pass  = allow_short
         gr.g7_value = regime_reason
         if not allow_short:
             gr.verdict = "REJECTED"
             gr.first_fail_gate = "G7_REGIME"
-            gr.rejection_reason = f"Market regime blocked: {regime_reason}"
+            gr.rejection_reason = regime_reason
             grl.record(gr)
             return None
 
@@ -839,7 +834,7 @@ class FyersAnalyzer:
         # FIX-5: Wrap in 1.5s timeout. REST call for 15m candles can stall scan loop.
         try:
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _htf_exec:
-                _htf_future = _htf_exec.submit(self.htf_confluence.check_trend_exhaustion, symbol)
+                _htf_future = _htf_exec.submit(self.htf_confluence.check_trend_exhaustion, symbol, vwap_sd=vwap_sd)
                 try:
                     htf_ok, htf_msg = _htf_future.result(timeout=1.5)
                 except concurrent.futures.TimeoutError:

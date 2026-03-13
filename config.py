@@ -172,9 +172,7 @@ ENABLE_MARKET_REGIME_OPTIMIZATION = True
 
 # Market Regime Configuration
 MARKET_REGIME_CONFIG = {
-    'strong_trend_threshold': 0.01,  # 1.0%
-    'moderate_trend_threshold': 0.005,  # 0.5%
-    'momentum_decay_minutes': 10,
+    'strong_trend_threshold': 0.015,  # 1.5%
     'override_patterns': ['EVENING_STAR', 'BEARISH_ENGULFING', 'SHOOTING_STAR'],
     'divergence_threshold': -2.0,  # Stock down 2%
 }
@@ -278,7 +276,6 @@ P51_G1_KILL_BACKDOOR_ATR_MULT:  float = 0.3    # 0.3 × ATR as % of day_high
 P51_G1_KILL_BACKDOOR_USE_ATR:   bool  = True   # True = ATR-relative mode (recommended)
 
 # G2: Data Quality
-P51_G2_MIN_TICKS_60M = 100
 
 # G3: Circuit Hitter Blacklist
 P51_G3_CIRCUIT_TOUCH_TIMEOUT_MINUTES = 60
@@ -294,6 +291,8 @@ P51_G4_SLOPE_MIN = 3.0  # was 0.5 — recalibrated 2026-03-10
 
 # G5: Exhaustion Stretch
 P51_G5_GATE_B_USE_ALLDAY_HIGH = True
+P51_G5_GATE_B_FIXED_TOLERANCE = 0.005 # 0.5% floor for noise
+P51_G5_GATE_B_ATR_MULT = 0.2         # 0.2 * ATR scaling
 P51_G5_GATE_D_ATR_CLEARANCE = True
 P51_G5_GATE_E_LATE_SESSION_EXTREME_ONLY = True
 P51_G5_ATR_EXTREME_STRETCH_MULT = 3.5
@@ -315,8 +314,11 @@ P51_G8_DAILY_SIGNAL_CAP = 3
 P51_G8_SIGNAL_COOLDOWN_MINUTES = 45 # G8.1 standard cooldown
 P51_G8_COOLDOWN_ON_SIGNAL_ADD = True # G8.3 immediate trigger
 
-# G9: VWAP SD Extension
-P51_G9_VWAP_SD_EXTREME = 1.5
+# G9: Math-First Momentum Logic (Section 2.5)
+P61_G9_MATH_LOGIC_ENABLED = True
+P61_G9_BYPASS_SD_THRESHOLD = 3.0     # Leung & Li: Extreme stretch = instant pass
+P61_G9_ACCEL_REJECT_THRESHOLD = 2.0  # Reject if move-accel > 2.0% per 15m
+P61_G9_STALL_PASS_THRESHOLD = 1.0    # Allow if move-accel < 1.0% (stall)
 
 # PHASE 58: G12 VALIDATION HARDENING
 P58_G12_USE_CANDLE_CLOSE: bool = True

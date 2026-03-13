@@ -1,5 +1,5 @@
 from datetime import datetime, timedelta, timezone
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from fyers_broker_interface import FyersBrokerInterface
 from market_context import MarketContext
@@ -13,7 +13,9 @@ def _epoch_ist(today, hour, minute):
 
 
 def test_morning_range_mid_market_start():
-    today = datetime.now(IST).date()
+    # Use a fixed date to avoid issues with overnight test runs
+    today_dt = datetime(2024, 3, 1, 10, 30, tzinfo=IST)
+    today = today_dt.date()
 
     candles_1m = [
         [_epoch_ist(today, 9, 15), 100, 105, 99, 103, 1000],
@@ -39,16 +41,24 @@ def test_morning_range_mid_market_start():
             return {"s": "ok", "candles": []}
 
     fake = FakeFyers()
-    mc = MarketContext(fake)
+    
+    # Mock BOTH time and datetime to be consistent
+    with patch('market_context._time.time', return_value=today_dt.timestamp()):
+        with patch('market_context.datetime') as mock_dt:
+            # mock_dt.now(IST) should return today_dt
+            mock_dt.now.return_value = today_dt
+            mock_dt.fromtimestamp = datetime.fromtimestamp
+            mock_dt.combine = datetime.combine
+            
+            mc = MarketContext(fake)
+            allowed, msg = mc.evaluate_g7()
 
-    regime, msg = mc.get_market_regime()
-
-    assert regime in {"RANGE", "TREND_UP", "TREND_DOWN"}
-    assert mc.morning_range_valid is True
-    assert round(mc._morning_high, 2) == 112
-    assert round(mc._morning_low, 2) == 98
-    assert "unavailable" not in msg.lower()
-    assert any(call.get("resolution") == "1" for call in fake.calls)
+            assert isinstance(allowed, bool)
+            assert mc.morning_range_valid is True
+            assert round(mc._morning_high, 2) == 112
+            assert round(mc._morning_low, 2) == 98
+            assert "unavailable" not in msg.lower()
+            assert any(call.get("resolution") == "1" for call in fake.calls)
 
 
 def test_cache_seed_reduces_missing_count():

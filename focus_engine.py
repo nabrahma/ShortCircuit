@@ -84,13 +84,10 @@ class FocusEngine:
         # Actually P51_G12_INVALIDATION_BUFFER_PCT is 0.002. So 1 + 0.002 = 1.002.
         invalidation_trigger = signal_high * (1 + config.P51_G12_INVALIDATION_BUFFER_PCT)
 
-        # Phase 51: G11 Dynamic Timeout
+        # Phase 63: Simplified G11 Fixed Timeout (15 minutes)
         IST = pytz.timezone('Asia/Kolkata')
         now_ist = datetime.datetime.now(IST)
-        eod = now_ist.replace(hour=15, minute=5, second=0, microsecond=0)
-        remaining = (eod - now_ist).total_seconds() / 60
-        effective = max(3, min(15, remaining - 2))
-        expires_at = now_ist + datetime.timedelta(minutes=effective)
+        expires_at = now_ist + datetime.timedelta(minutes=15)
 
         self.pending_signals[symbol] = {
             'data': signal_data,
@@ -358,11 +355,9 @@ class FocusEngine:
                 # A. CHECK TRIGGER (VALIDATION CONFIRMED)
                 # For Short: LTP < Trigger (Signal Low)
                 if ltp < trigger_price:
-                    # G10: Two-tick confirmation REMOVED (Phase 58)
-                    # Proceed directly to spread check (G10.1)
-                    
-                    # Two ticks confirmed — proceed to spread check (G10.1)
-                    # Fetch full depth for spread check
+                    # ── G10.1: Execution Precision (Spread Guard) ───────
+                    # Soft Gate: Downgrades to CAUTIOUS mode if spread is wide.
+                    spread_pct = 0.0
                     try:
                         depth_resp = await asyncio.to_thread(self.fyers.depth, data={"symbol": symbol})
                         if 'd' in depth_resp and symbol in depth_resp['d']:
@@ -377,7 +372,7 @@ class FocusEngine:
                             else:
                                 pending['data']['execution_mode'] = pending['data'].get('execution_mode', 'NORMAL')
                     except Exception as e:
-                        logger.warning(f"Spread check failed (non-fatal): {e}")
+                        logger.warning(f"G10 Spread check failed (non-fatal) for {symbol}: {e}")
 
                     # G10.2: Entry Price = signal_low - 1 tick
                     tick_size = pending['data'].get('tick_size', 0.05)
@@ -588,9 +583,7 @@ class FocusEngine:
                     del self.pending_signals[symbol]
                     continue
                 
-                # G11 above-high invalidation handled by G12 (inval_price = signal_high * 1.002).
-                # G12 fires at 0.2% above signal_high; this 0.5% check is therefore unreachable.
-                # G11 timeout path (below) is the only active G11 logic.
+                # G11/G12 invalidation is handled by the buffer check above.
 
                 # C. TIMEOUT (Phase 51 G11: Dynamic expires_at)
                 elif datetime.datetime.now(pytz.timezone('Asia/Kolkata')) > pending.get('expires_at', datetime.datetime.now(pytz.timezone('Asia/Kolkata')) + datetime.timedelta(minutes=15)):

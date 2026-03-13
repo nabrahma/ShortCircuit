@@ -83,25 +83,23 @@ class GodModeAnalyst:
 
     def check_constraints(self, ltp, day_high, net_gain_pct, open_price, df=None, atr: float = 0.0):
         """
-        The "Ethos" Check.
-        Phase 13: Pullback Scalper Rules.
-        Phase 51: Hardened with Kill Backdoor and Time-Since-High buffer.
-        Phase 54: ATR-relative Kill Backdoor; dead distance block removed.
-        Phase 60.1: Gain standardized to Net Change from Previous Close.
+        G1: Gain & Consistency Constraints.
+        Ensures the stock is structurally overextended but not yet in a confirmed crash.
         """
         import config
         
-        # 0. Kill Backdoor [G1.2] — ATR-relative threshold
-        if config.PHASE_51_ENABLED and config.P51_G1_KILL_BACKDOOR:
+        # 0. G1.2: Kill Backdoor (ATR-relative)
+        # Prevents chasing a move that has already dropped too far from the high.
+        if config.P51_G1_KILL_BACKDOOR:
             use_atr = getattr(config, 'P51_G1_KILL_BACKDOOR_USE_ATR', False)
-            fixed_pct = getattr(config, 'P51_G1_KILL_BACKDOOR_FIXED_PCT', 0.01)
+            fixed_pct = getattr(config, 'P51_G1_KILL_BACKDOOR_FIXED_PCT', 0.015)
             atr_mult = getattr(config, 'P51_G1_KILL_BACKDOOR_ATR_MULT', 0.3)
 
             if use_atr and atr > 0 and day_high > 0:
                 atr_pct = atr / day_high
                 threshold_pct = max(fixed_pct, atr_mult * atr_pct)
             else:
-                threshold_pct = fixed_pct  # 1.0% safe floor
+                threshold_pct = fixed_pct
 
             if ltp < day_high * (1 - threshold_pct):
                 return False, (
@@ -110,25 +108,14 @@ class GodModeAnalyst:
                     f"(ATR={atr:.2f}, threshold={threshold_pct*100:.2f}%)"
                 )
 
-        # 1. Trend Strength
-        # We still use open_price for intraday strength check (True Trend)
-        intraday_max_gain = ((day_high - open_price) / open_price) * 100
-        
-        is_strong_trend = net_gain_pct >= config.SCANNER_GAIN_MIN_PCT
-        was_strong_trend = intraday_max_gain >= 7.0
-        
-        if not is_strong_trend and not was_strong_trend:
-             return False, f"Weak Trend. Net: {net_gain_pct:.1f}%, Intraday Max: {intraday_max_gain:.1f}% (< 7%)"
-            
-        if net_gain_pct > 18.0: # Circuit Guard (Standardized to Net Change)
-            return False, f"Net Change {net_gain_pct:.1f}% too high (> 18%) - Circuit Risk"
-            
-        # 2. Time-Since-High Buffer [G1.3]
-        if config.PHASE_51_ENABLED and df is not None and not df.empty:
-            # Find when day high was hit
+        # 1. G1.3: Time-Since-High Buffer
+        # REVERSION LOGIC: We only trade 'fresh' rejections. 
+        # If a stock has been 'plateauing' at the high for more than 20 minutes, 
+        # it suggests price acceptance, not rejection.
+        if df is not None and not df.empty:
             high_idx = df['high'].idxmax()
             last_idx = df.index[-1]
-            candles_since_high = last_idx - high_idx # Since it's 1min candles
+            candles_since_high = last_idx - high_idx
             
             max_candles = getattr(config, 'P51_G1_TIME_SINCE_HIGH_CANDLES', 20)
             if candles_since_high > max_candles:
@@ -310,15 +297,26 @@ class GodModeAnalyst:
             result["reject_reason"] = f"stretch_too_high:{gain_pct:.2f}%"
             return result
 
-        # ── Gate B: ALL-DAY intraday high [G5.1] ────────────────────
-        if getattr(config, 'P51_G5_GATE_B_USE_ALLDAY_HIGH', False):
+        # ── Gate B: ALL-DAY intraday high (Peak Detection) ──────────
+        # Uses a 'Murphy-Guo Hybrid' tolerance: max of fixed noise-floor or volatility-scaled ATR.
+        if config.P51_G5_GATE_B_USE_ALLDAY_HIGH:
             day_high = max(c['high'] for c in candles)
             curr_high = candles[-1]['high']
-            tolerance = getattr(config, 'P55_G5_GATE_B_DAY_HIGH_TOLERANCE', 0.003)
+            
+            fixed_tol = getattr(config, 'P51_G5_GATE_B_FIXED_TOLERANCE', 0.005) # 0.5% floor
+            atr_mult  = getattr(config, 'P51_G5_GATE_B_ATR_MULT', 0.2)
+            
+            # Compute dynamic tolerance
+            if atr > 0 and day_high > 0:
+                atr_tol_pct = (atr * atr_mult) / day_high
+                tolerance = max(fixed_tol, atr_tol_pct)
+            else:
+                tolerance = fixed_tol
+
             is_at_day_high = curr_high >= day_high * (1 - tolerance)
             
             if not is_at_day_high:
-                result["reject_reason"] = f"not_at_day_high (ltp_high:{curr_high} < day_high:{day_high})"
+                result["reject_reason"] = f"not_at_day_high (ltp_high:{curr_high} < day_high:{day_high} | tol:{tolerance*100:.2f}%)"
                 return result
 
         # ── Gate C: Volume fading on the new high ───────────────────
