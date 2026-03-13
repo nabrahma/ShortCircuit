@@ -161,9 +161,29 @@ class FyersAnalyzer:
         # 3. Technical Calculations & Context
         self._enrich_dataframe(df)
         
+        # Phase 60.1: Standardize Gain Calculation (Net Change from Prev Close)
+        pc = 0
+        try:
+            snapshot = self.fyers.get_quote_cache_snapshot()
+            if symbol in snapshot:
+                entry = snapshot[symbol]
+                pc = entry.get('pc', 0)
+                # Backup: if pc is 0 but ch_oc is present, back-calculate pc
+                if pc == 0 and entry.get('ch_oc', 0) != 0:
+                    ltp_val = entry.get('ltp', ltp)
+                    ch_oc = entry.get('ch_oc')
+                    pc = ltp_val / (1 + (ch_oc / 100))
+        except Exception:
+            pass
+
         day_high = df['high'].max()
         open_price = df.iloc[0]['open']
-        gain_pct = ((ltp - open_price) / open_price) * 100
+        # Fallback to open if PC is missing (e.g. first tick of session)
+        baseline = pc if pc > 0 else open_price
+        gain_pct = ((ltp - baseline) / baseline) * 100
+
+        if pc == 0:
+            logger.debug(f"[ANALYZER] No prev_close for {symbol}, falling back to open-based gain: {gain_pct:.2f}%")
 
         # Phase 54: ATR computed early — needed by G1 Kill Backdoor (ATR-relative)
         atr = self.gm_analyst.calculate_atr(df)
@@ -714,9 +734,19 @@ class FyersAnalyzer:
 
         # ── Enrichment ─────────────────────────────────────────────────
         self._enrich_dataframe(df)
+        # Phase 60.1: Standardize Gain Calculation
+        pc = 0
+        try:
+            snapshot = self.fyers.get_quote_cache_snapshot()
+            if symbol in snapshot:
+                pc = snapshot[symbol].get('pc', 0)
+        except Exception:
+            pass
+
         day_high   = df['high'].max()
         open_price = df.iloc[0]['open']
-        gain_pct   = ((ltp - open_price) / open_price) * 100
+        baseline = pc if pc > 0 else open_price
+        gain_pct = ((ltp - baseline) / baseline) * 100
 
         # Phase 54: ATR computed early — needed by G1 Kill Backdoor (ATR-relative)
         atr = self.gm_analyst.calculate_atr(df)

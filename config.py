@@ -273,7 +273,7 @@ P51_G1_KILL_BACKDOOR = True # Reject if ltp < day_high - threshold (Section 2.2)
 # G1: Kill Backdoor — ATR-relative threshold
 # If P51_G1_KILL_BACKDOOR_USE_ATR is True, threshold = max(FIXED_PCT, ATR_MULT × ATR%).
 # If False (or ATR unavailable), falls back to FIXED_PCT alone.
-P51_G1_KILL_BACKDOOR_FIXED_PCT: float = 0.01   # 1.0% fixed floor (was hardcoded 0.005)
+P51_G1_KILL_BACKDOOR_FIXED_PCT: float = 0.015  # 1.5% fixed floor (increased from 1.0%)
 P51_G1_KILL_BACKDOOR_ATR_MULT:  float = 0.3    # 0.3 × ATR as % of day_high
 P51_G1_KILL_BACKDOOR_USE_ATR:   bool  = True   # True = ATR-relative mode (recommended)
 

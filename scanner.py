@@ -276,7 +276,8 @@ class FyersScanner:
             if fresh_pct >= 0.85:
                 # Pure Tier 1
                 data_tier = "WS_CACHE"
-                all_quotes = fresh
+                # FIX-PRD-007: Use full snapshot (fresh + stale) to avoid missing consolidated stocks
+                all_quotes = snapshot 
 
             elif known_pct >= 0.90:
                 # Tier 2: HYBRID — supplement only stale/missing symbols via REST
@@ -307,6 +308,7 @@ class FyersScanner:
                                     all_quotes[sym] = {
                                         'ltp': ltp, 'volume': volume,
                                         'ch_oc': chp, 'oi': quote_data.get('oi', 0),
+                                        'pc': quote_data.get('pc', quote_data.get('prev_close_price', 0)),
                                         'ts': _time.time(),
                                     }
                     except Exception as e:
@@ -336,7 +338,7 @@ class FyersScanner:
                 for symbol, quote in all_quotes.items():
                     ltp    = quote.get('ltp', 0)
                     volume = quote.get('volume', 0)
-                    gain   = abs(quote.get('ch_oc', 0))
+                    gain   = quote.get('ch_oc', 0)
                     oi     = quote.get('oi', 0)
 
                     if gain >= 9.0 and gain <= 18.0 and volume >= 100_000 and ltp >= config.SCANNER_MIN_LTP:

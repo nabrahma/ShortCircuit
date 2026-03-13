@@ -81,12 +81,13 @@ class GodModeAnalyst:
             
         return structure, z_score_vol
 
-    def check_constraints(self, ltp, day_high, trend_gain, open_price, df=None, atr: float = 0.0):
+    def check_constraints(self, ltp, day_high, net_gain_pct, open_price, df=None, atr: float = 0.0):
         """
         The "Ethos" Check.
         Phase 13: Pullback Scalper Rules.
         Phase 51: Hardened with Kill Backdoor and Time-Since-High buffer.
         Phase 54: ATR-relative Kill Backdoor; dead distance block removed.
+        Phase 60.1: Gain standardized to Net Change from Previous Close.
         """
         import config
         
@@ -110,16 +111,17 @@ class GodModeAnalyst:
                 )
 
         # 1. Trend Strength
-        max_gain_pct = ((day_high - open_price) / open_price) * 100
+        # We still use open_price for intraday strength check (True Trend)
+        intraday_max_gain = ((day_high - open_price) / open_price) * 100
         
-        is_strong_trend = trend_gain >= config.SCANNER_GAIN_MIN_PCT
-        was_strong_trend = max_gain_pct >= 7.0
+        is_strong_trend = net_gain_pct >= config.SCANNER_GAIN_MIN_PCT
+        was_strong_trend = intraday_max_gain >= 7.0
         
         if not is_strong_trend and not was_strong_trend:
-             return False, f"Weak Trend. Curr: {trend_gain:.1f}%, Max: {max_gain_pct:.1f}% (< 7%)"
+             return False, f"Weak Trend. Net: {net_gain_pct:.1f}%, Intraday Max: {intraday_max_gain:.1f}% (< 7%)"
             
-        if trend_gain > 15.0:
-            return False, f"Gain {trend_gain:.1f}% too high (> 15%) - Circuit Risk"
+        if net_gain_pct > 18.0: # Circuit Guard (Standardized to Net Change)
+            return False, f"Net Change {net_gain_pct:.1f}% too high (> 18%) - Circuit Risk"
             
         # 2. Time-Since-High Buffer [G1.3]
         if config.PHASE_51_ENABLED and df is not None and not df.empty:
