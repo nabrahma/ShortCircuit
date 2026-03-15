@@ -186,19 +186,19 @@ from a lesson that cost something to learn. They are not additions. They are cor
 
 | Gate | ID | What It Kills |
 |---|---|---|
-| **G1** | SCANNER_QUALITY | Fewer than 45 candles, gain below 9%, >50% doji or zero-volume candles |
-| **G2** | RVOL_VALIDITY | RVOL checked before 20 minutes of market data exists — invalid math |
+| **G1** | STRUCTURAL_INTEGRITY | Time-since-high > 20 candles, Kill Backdoor (price dropped >1.5% from high) |
+| **G2** | DATA_QUALITY | Fewer than 45 candles (45 mins) of data — makes RVOL unreliable |
 | **G3** | CIRCUIT_GUARD | Session-permanent blacklist: any symbol that touched upper circuit today |
-| **G4** | MOMENTUM | VWAP slope above 0.05 — the move is still in progress, not exhausted |
-| **G5** | EXHAUSTION | Gain outside 9–14.5%, price not above VAH, pattern confidence below MEDIUM |
-| **G6** | PRO_CONFLUENCE | Tiered DPOC/OI/tape scoring below threshold — no auto-passes allowed |
-| **G7** | TIME_GATE | Pre-10:00 AM noise, 12:00–13:00 PM lunch block stagnation |
+| **G4** | MOMENTUM | VWAP slope > 3.0 bp/min or RVOL > 5.0x — freight train guard |
+| **G5** | EXHAUSTION | Gain outside 9–14.5%, price not above VAH, volume fade > 0.65 ratio |
+| **G6** | TIERED_SCORING | Confluence score < 2 (DPOC, OI, Tape, Patterns) — no auto-passes |
+| **G7** | MARKET_REGIME | Pre-10:00 AM, Post-15:10 PM, or Nifty Trend > 1.5% against the move |
 | **G8** | SIGNAL_LIMIT | 3-signal daily cap, 45-min per-symbol cooldown, 3-consecutive-loss pause |
 | **G9** | MATH_PHYSICS | Z-Score Stretch (>3.0) / Momentum Stall / Accel Reject (>2%/15m) |
 | **G10** | EXEC_PRECISION | Spread >0.4% → CAUTIOUS mode (50% qty) |
 | **G11** | FIXED_TIMEOUT | Signals expire after exactly 15 minutes. |
 | **G12** | CANDLE_CLOSE | Rejects intraday wicks. Requires **1-minute candle close** below trigger to enter |
-| **G13** | OUTCOME_LOG | Post-trade result recorded. Three consecutive losses → full session pause |
+| **G13** | OUTCOME_LOG | Post-trade result recorded. Finalizes feedback loop. |
 
 Every rejection at every gate produces a `GateResult` record with the exact failing value,
 the threshold it failed against, and the timestamp. The system cannot be accused of opacity.
@@ -255,9 +255,8 @@ If a 1-minute candle **closes** above the signal high (plus a 0.2% buffer) at an
 
 Confidence tiers: `EXTREME ≥ 5.0` | `HIGH ≥ 3.0` | `MEDIUM ≥ 2.0`
 
-A MEDIUM signal without cross-confluence is rejected at G6.
-A HIGH signal without HTF confirmation is rejected at G9.
-EXTREME confidence does not bypass either.
+A signal with a confluence score < 2 is rejected at G6.
+A signal that fails Momentum Physics is rejected at G9.
 Confidence is a weight, not a passport.
 
 ***
@@ -418,8 +417,8 @@ Every row. Whether the signal fired, timed out, was rejected at G1, or was suppr
 because auto mode was off. 36 columns per row.
 
 ```sql
-verdict IN ('SIGNAL_FIRED', 'REJECTED', 'DATA_ERROR', 'SUPPRESSED')
-first_fail_gate: 'G5_EXHAUSTION', 'G9_HTF_STRUCTURE', 'G12_TIMEOUT', ...
+verdict IN ('SIGNAL_FIRED', 'REJECTED', 'DATA_ERROR', 'SUPPRESSED', 'OBSERVED_NO_CAPITAL')
+first_fail_gate: 'G5_EXHAUSTION', 'G9_MATH_PHYSICS', 'G11_FIXED_TIMEOUT', ...
 rejection_reason: exact human-readable threshold description
 data_tier: 'WS_CACHE' | 'HYBRID' | 'REST_EMERGENCY'
 ```
@@ -451,8 +450,8 @@ The fallback is not a degraded mode. It is the second line of an unbreakable aud
 ```
 Data WebSocket
     ─ Tick feed for all subscribed symbols
-    ─ Gate 12: two consecutive ticks below trigger = execution
-    ─ Gate 12 invalidation: recovery above signal_high × 1.002 cancels the signal
+    ─ Gate 12: 1-minute candle close below trigger = execution
+    ─ Gate 12 invalidation: candle close above signal_high × 1.002 cancels the signal
     ─ Position monitor: SL/TP levels checked on every tick
     ─ Dashboard: 2s P&L refresh, broker-verified LTP
 
