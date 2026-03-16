@@ -73,6 +73,7 @@ class FyersAnalyzer:
         self.tape_reader = TapeReader()
         self.profile_analyzer = ProfileAnalyzer()
         self.oi_history = {} # Symbol -> deque of (timestamp, oi, price) use deque(maxlen=20)
+        self.slope_decay_tracker = {} # Phase 66: Symbol -> first_decay_time (datetime)
 
     def get_history(self, symbol: str, interval: str = "1") -> Optional[pd.DataFrame]:
         """
@@ -137,13 +138,35 @@ class FyersAnalyzer:
             grl.record(gr)
             return None
         gr.g2_pass = True
-        gr.g2_value = float(len(df))
-            
         # Enrichment & Technicals
         self._enrich_dataframe(df)
         prev_df = df.iloc[:-1]
 
-        # Phase 60.1: Standardize Gain Calculation (Net Change from Prev Close)
+        # Phase 66: Tech Pre-calc (Moved up for Adaptive G1)
+        atr = self.gm_analyst.calculate_atr(df)
+        vwap_sd = self.gm_analyst.calculate_vwap_bands(prev_df)
+        is_extended = vwap_sd > 2.0
+        slope_now, _  = self.gm_analyst.calculate_vwap_slope(df.iloc[-30:])
+        slope_prev, _ = self.gm_analyst.calculate_vwap_slope(df.iloc[-31:-1])
+
+        # Phase 66: Momentum Decay Tracker (Stateful)
+        is_decaying = False
+        if getattr(config, 'P66_ADAPTIVE_G1_ENABLED', False):
+            # Condition: Momentum is slowing AND price is extended
+            if slope_now < slope_prev and vwap_sd > config.P66_G4_DECAY_SD_THRESHOLD:
+                if symbol not in self.slope_decay_tracker:
+                    self.slope_decay_tracker[symbol] = datetime.datetime.now()
+                
+                # Check confirmation window (120s)
+                first_decay = self.slope_decay_tracker[symbol]
+                duration = (datetime.datetime.now() - first_decay).total_seconds()
+                if duration >= config.P66_G4_DECAY_CONFIRMATION_SEC:
+                    is_decaying = True
+            else:
+                # Reset if momentum accelerates or extension drops
+                self.slope_decay_tracker.pop(symbol, None)
+
+        # Standardize Gain Calculation
         pc = 0
         try:
             snapshot = self.fyers.get_quote_cache_snapshot()
@@ -161,10 +184,6 @@ class FyersAnalyzer:
         open_price = df.iloc[0]['open']
         baseline = pc if pc > 0 else open_price
         gain_pct = ((ltp - baseline) / baseline) * 100
-
-        atr = self.gm_analyst.calculate_atr(df)
-        vwap_sd = self.gm_analyst.calculate_vwap_bands(prev_df)
-        is_extended = vwap_sd > 2.0
         
         # Phase 65: AMT Pre-checks (Profile & Volume Z)
         profile = None
@@ -194,8 +213,7 @@ class FyersAnalyzer:
             grl.record(gr)
             return None
 
-        # ── G1: Constraints & Kill Backdoor ─────────────────────────
-        # Phase 65: G1 Soft Threshold (7.5% - 9.0% with Profile Rejection)
+        # ── G1: Constraints & Kill Backdoor (Phase 66 Adaptive) ──────
         min_gain = config.SCANNER_GAIN_MIN_PCT
         amt_failing_auction = False
         if getattr(config, 'P65_AMT_ENABLED', False):
@@ -203,14 +221,16 @@ class FyersAnalyzer:
                 min_gain = config.P65_G1_NET_GAIN_THRESHOLD
                 amt_failing_auction = True
         
-        ok, msg = self.gm_analyst.check_constraints(ltp, day_high, gain_pct, open_price, df=df, atr=atr)
+        ok, msg = self.gm_analyst.check_constraints(
+            ltp, day_high, gain_pct, open_price, 
+            df=df, atr=atr, is_decaying=is_decaying
+        )
         
         # Override gain check for AMT
         if gain_pct < min_gain:
             ok = False
             msg = f"Insufficient Gain: {gain_pct:.1f}% (need {min_gain}%)"
         elif gain_pct < config.SCANNER_GAIN_MIN_PCT and not amt_failing_auction:
-             # If we haven't reached 9% and AMT is NOT confirming, still reject
              ok = False
              msg = f"Low Gain {gain_pct:.1f}% requires AMT Profile Rejection"
 
@@ -353,6 +373,10 @@ class FyersAnalyzer:
         if getattr(config, 'P65_AMT_ENABLED', False) and gain_pct < 9.0:
             signal_meta['tp1_atr_mult_override'] = 1.0
             logger.info(f"[G13] Dynamic Risk Scaling applied for {symbol} (Gain: {gain_pct:.1f}%) -> TP1: 1.0x ATR")
+
+        # Phase 66: Snapshot Reference High (Peak of Day)
+        # Ensure SL and Signal High are derived from the absolute top, even if rotating.
+        signal_meta['snapshot_high'] = day_high
 
         gr.verdict = "ANALYZER_PASS"
         finalized = self._finalize_signal(symbol, ltp, df, pattern_desc, slope_now, "", signal_meta)
@@ -868,7 +892,11 @@ class FyersAnalyzer:
         # Calculate Stop Loss (ATR)
         atr = self.gm_analyst.calculate_atr(df)
         buffer = max(atr * 0.5, 0.25)
-        setup_high = df.iloc[-2]['high']
+        
+        # Phase 66: Use Absolute High Snapshot for SL and Signal High
+        # This prevents the SL from moving down while the price is rotating.
+        peak_high = signal_meta.get('snapshot_high', df.iloc[-2]['high'])
+        setup_high = peak_high
         sl_price = setup_high + buffer
 
         # Logging

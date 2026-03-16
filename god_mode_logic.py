@@ -81,10 +81,11 @@ class GodModeAnalyst:
             
         return structure, z_score_vol
 
-    def check_constraints(self, ltp, day_high, net_gain_pct, open_price, df=None, atr: float = 0.0):
+    def check_constraints(self, ltp, day_high, net_gain_pct, open_price, df=None, atr: float = 0.0, is_decaying: bool = False):
         """
         G1: Gain & Consistency Constraints.
         Ensures the stock is structurally overextended but not yet in a confirmed crash.
+        Phase 66: Added is_decaying flag for adaptive retrace softening.
         """
         import config
         
@@ -100,12 +101,17 @@ class GodModeAnalyst:
                 threshold_pct = max(fixed_pct, atr_mult * atr_pct)
             else:
                 threshold_pct = fixed_pct
+            
+            # Phase 66: Adaptive Softening for Dalton Rotation
+            if is_decaying and getattr(config, 'P66_ADAPTIVE_G1_ENABLED', False):
+                threshold_pct = config.P66_G1_ROTATION_THRESHOLD_PCT
+                logger.info(f"🛡️ [ADAPTIVE G1] Softening retrace limit to {threshold_pct*100:.1f}% due to verified decay.")
 
             if ltp < day_high * (1 - threshold_pct):
                 return False, (
                     f"[G1_REJECT] Kill Backdoor: ₹{ltp:.2f} is "
                     f"{threshold_pct * 100:.1f}% below day high ₹{day_high:.2f} "
-                    f"(ATR={atr:.2f}, threshold={threshold_pct*100:.2f}%)"
+                    f"(ATR={atr:.2f}, limit={threshold_pct*100:.2f}%)"
                 )
 
         # 1. G1.3: Time-Since-High Buffer

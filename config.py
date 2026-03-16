@@ -382,6 +382,12 @@ P65_G1_NET_GAIN_THRESHOLD: float = 7.5  # Lowered from 9.0
 P65_G1_AMT_REQUIRED_BELOW_9: bool = True
 P65_G1_TIME_SINCE_HIGH_CANDLES: int = 45 # Extended from 20
 
+# PHASE 66: ADAPTIVE GATES & SNAPSHOTS
+P66_ADAPTIVE_G1_ENABLED: bool = True
+P66_G1_ROTATION_THRESHOLD_PCT: float = 0.030  # 3.0% retrace allowed on decay
+P66_G4_DECAY_CONFIRMATION_SEC: int = 120      # 2-minute confirmation window
+P66_G4_DECAY_SD_THRESHOLD: float = 2.5        # Minimum SD for adaptive softening
+
 # ============================================================================
 # PHASE 52 — PARTIAL EXIT ENGINE & HUMAN INTERVENTION SAFETY
 # ============================================================================
