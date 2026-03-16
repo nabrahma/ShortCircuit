@@ -134,7 +134,7 @@ class OrderManager:
         return self._round_sl_to_tick(sl_price, 'SELL', tick)
 
     def compute_take_profits(self, entry: float, signal: dict) -> dict:
-        """Phase 51: 40/40/20 Target Split."""
+        """Phase 51: 40/40/20 Target Split. Phase 65: Dynamic scaling."""
         atr = signal.get('atr', 0)
         if atr == 0:
             return {
@@ -143,12 +143,12 @@ class OrderManager:
                 'tp3': entry * 0.965, 'tp3_trail_atr': 0.05
             }
 
-        tp1_mult = getattr(config, 'P51_TP1_ATR_MULT', 1.5)
+        tp1_mult = signal.get('tp1_atr_mult_override', getattr(config, 'P51_TP1_ATR_MULT', 1.5))
         tp2_mult = getattr(config, 'P51_TP2_ATR_MULT', 2.5)
         tp3_mult = getattr(config, 'P51_TP3_ATR_MULT', 3.5)
 
-        if signal.get('execution_mode') == 'CAUTIOUS':
-            # Tighter TP for wide spread
+        if signal.get('execution_mode') == 'CAUTIOUS' and 'tp1_atr_mult_override' not in signal:
+            # Tighter TP for wide spread (only if no Phase 65 override already present)
             tp1_mult *= 0.7  # e.g. 1.5 -> 1.05
             tp2_mult *= 0.7  # e.g. 2.5 -> 1.75
             tp3_mult *= 0.7  # e.g. 3.5 -> 2.45

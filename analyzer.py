@@ -111,22 +111,10 @@ class FyersAnalyzer:
         """
         grl = get_gate_result_logger()
         gr = GateResult(symbol=symbol, scan_id=scan_id, data_tier=data_tier)
+        signal_meta = {}
 
-        # ── G7: Market Regime & Time Gate (Consolidated) ────────────
-        allowed, reason = self.market_context.evaluate_g7()
-            
-        gr.g7_pass = allowed
-        gr.g7_value = reason
-        if not allowed:
-            gr.verdict = "REJECTED"
-            gr.first_fail_gate = "G7_REGIME"
-            gr.rejection_reason = reason
-            grl.record(gr)
-            return None
-
-        # ── G1: Data Fetching & RVOL validity ──────────────────────────────
+        # ── G1+G2: Data Fetching & Enrichment (Phase 65 Order) ───────
         if pre_fetched_df is not None:
-
              df = pre_fetched_df
              df = df.copy()
         else:
@@ -151,13 +139,10 @@ class FyersAnalyzer:
         gr.g2_pass = True
         gr.g2_value = float(len(df))
             
-        # Define prev_df (used for structural analysis components that need history context)
-        # Note: df includes the current candle 'i'. prev_df is history up to 'i-1'.
+        # Enrichment & Technicals
+        self._enrich_dataframe(df)
         prev_df = df.iloc[:-1]
 
-        # 3. Technical Calculations & Context
-        self._enrich_dataframe(df)
-        
         # Phase 60.1: Standardize Gain Calculation (Net Change from Prev Close)
         pc = 0
         try:
@@ -165,7 +150,6 @@ class FyersAnalyzer:
             if symbol in snapshot:
                 entry = snapshot[symbol]
                 pc = entry.get('pc', 0)
-                # Backup: if pc is 0 but ch_oc is present, back-calculate pc
                 if pc == 0 and entry.get('ch_oc', 0) != 0:
                     ltp_val = entry.get('ltp', ltp)
                     ch_oc = entry.get('ch_oc')
@@ -175,20 +159,61 @@ class FyersAnalyzer:
 
         day_high = df['high'].max()
         open_price = df.iloc[0]['open']
-        # Baseline: Previous Close (Net Change) or Open Price fallback
         baseline = pc if pc > 0 else open_price
         gain_pct = ((ltp - baseline) / baseline) * 100
 
-        if pc == 0:
-            logger.debug(f"[ANALYZER] No prev_close for {symbol}, falling back to open-based gain: {gain_pct:.2f}%")
-
-        # ATR & VWAP Context (required for G1-G5)
         atr = self.gm_analyst.calculate_atr(df)
         vwap_sd = self.gm_analyst.calculate_vwap_bands(prev_df)
         is_extended = vwap_sd > 2.0
         
+        # Phase 65: AMT Pre-checks (Profile & Volume Z)
+        profile = None
+        profile_rejection = False
+        vol_z = 0.0
+        try:
+            profile = self.profile_analyzer.calculate_market_profile(df, mode='VOLUME')
+            if profile:
+                profile_rejection, _ = self.profile_analyzer.check_profile_rejection(df, ltp)
+            vol_z = self.market_context.get_volume_z_score(df)
+        except Exception as e:
+            logger.warning(f"Profile/VolZ pre-calc error for {symbol}: {e}")
+
+        # ── G7: Market Regime & Time Gate (Phase 65 Signature) ────────
+        allowed, reason = self.market_context.evaluate_g7(
+            vwap_sd=vwap_sd, 
+            profile_rejection=profile_rejection, 
+            volume_z=vol_z
+        )
+            
+        gr.g7_pass = allowed
+        gr.g7_value = reason
+        if not allowed:
+            gr.verdict = "REJECTED"
+            gr.first_fail_gate = "G7_REGIME"
+            gr.rejection_reason = reason
+            grl.record(gr)
+            return None
+
         # ── G1: Constraints & Kill Backdoor ─────────────────────────
+        # Phase 65: G1 Soft Threshold (7.5% - 9.0% with Profile Rejection)
+        min_gain = config.SCANNER_GAIN_MIN_PCT
+        amt_failing_auction = False
+        if getattr(config, 'P65_AMT_ENABLED', False):
+            if profile_rejection and gain_pct >= config.P65_G1_NET_GAIN_THRESHOLD:
+                min_gain = config.P65_G1_NET_GAIN_THRESHOLD
+                amt_failing_auction = True
+        
         ok, msg = self.gm_analyst.check_constraints(ltp, day_high, gain_pct, open_price, df=df, atr=atr)
+        
+        # Override gain check for AMT
+        if gain_pct < min_gain:
+            ok = False
+            msg = f"Insufficient Gain: {gain_pct:.1f}% (need {min_gain}%)"
+        elif gain_pct < config.SCANNER_GAIN_MIN_PCT and not amt_failing_auction:
+             # If we haven't reached 9% and AMT is NOT confirming, still reject
+             ok = False
+             msg = f"Low Gain {gain_pct:.1f}% requires AMT Profile Rejection"
+
         gr.g1_pass = ok
         gr.g1_value = round(gain_pct, 2)
         if not ok:
@@ -197,8 +222,6 @@ class FyersAnalyzer:
             gr.rejection_reason = msg
             grl.record(gr)
             return None
-        
-
 
         # ── G3: Circuit Guard & Blacklist ───────────────────────────
         depth_data = None
@@ -206,8 +229,6 @@ class FyersAnalyzer:
             full_depth = self.fyers.depth(data={"symbol": symbol, "ohlcv_flag":"1"})
             if 'd' in full_depth and symbol in full_depth['d']:
                 depth_data = full_depth['d'][symbol]
-                
-                # Check for circuit touches to mark for blacklist
                 uc = depth_data.get('upper_ckt', 0)
                 if uc > 0 and ltp >= uc * 0.999:
                     self.market_context.mark_circuit_touched(symbol)
@@ -226,7 +247,7 @@ class FyersAnalyzer:
             grl.record(gr)
             return None
 
-        # ── G4: Momentum safeguard (Phase 57: Slope Decay Optimization) ─────
+        # ── G4: Momentum safeguard ──────────────────────────────────
         slope_now, _  = self.gm_analyst.calculate_vwap_slope(df.iloc[-30:])
         slope_prev, _ = self.gm_analyst.calculate_vwap_slope(df.iloc[-31:-1])
         
@@ -240,37 +261,15 @@ class FyersAnalyzer:
             grl.record(gr)
             return None
 
-        # 7. Pre-Calculation step
-        if len(df) > 1:
-            prev_candle = df.iloc[-2]
-            is_sniper_zone = self._check_sniper_zone(df)
-        else:
-            prev_candle = df.iloc[0] # Fallback
-            is_sniper_zone = False
-        
-        # ── PHASE 44.8.1: Gate 5 moved outside breakdown block ──────────
-
-        # Profile computation — feeds Gate 5 Gate D (close > VAH)
-        signal_meta = {}
-        profile = None
-        try:
-            profile = self.profile_analyzer.calculate_market_profile(df, mode='VOLUME')
-        except Exception as e:
-            logger.warning(f"Profile computation error for {symbol}: {e}")
-
-        # FIX-3: VAH is mandatory per Dalton auction theory.
-        # If profile is None (computation failed), reject — do NOT proceed to G5.
+        # ── G5: Gate 5 — Exhaustion at Stretch ──────────────────────
         if profile is None:
             gr.g5_pass = False
             gr.verdict = "REJECTED"
             gr.first_fail_gate = "G5_PROFILE_UNAVAILABLE"
             gr.rejection_reason = "Market profile computation failed — VAH unverifiable"
             grl.record(gr)
-            logger.warning(f"  REJECTED {symbol} G5_PROFILE_UNAVAILABLE — cannot verify VAH")
             return None
 
-        # ── G5: Gate 5 — Exhaustion at Stretch ──────────────────────
-        # atr already computed before G1 — reused here for G5
         exhaustion = self.gm_analyst.is_exhaustion_at_stretch(
             candles=df.to_dict('records'),
             profile=profile,
@@ -286,19 +285,7 @@ class FyersAnalyzer:
             gr.first_fail_gate = "G5_EXHAUSTION"
             gr.rejection_reason = exhaustion.get('reject_reason', 'Exhaustion conditions not met')
             grl.record(gr)
-            logger.debug(
-                f"[Gate5] {symbol} FAIL — {exhaustion['reject_reason']} "
-                f"stretch={exhaustion['stretch_score']:.2f} "
-                f"vol_fade={exhaustion['vol_fade_ratio']:.2f}"
-            )
             return None
-
-        logger.debug(
-            f"[Gate5] {symbol} PASS — "
-            f"confidence={exhaustion['confidence']} "
-            f"vol_fade={exhaustion['vol_fade_ratio']:.2f} "
-            f"pattern_bonus={exhaustion['pattern_bonus']}"
-        )
 
         signal_meta.update({
             "stretch_score":  exhaustion["stretch_score"],
@@ -307,24 +294,16 @@ class FyersAnalyzer:
             "pattern_bonus":  exhaustion["pattern_bonus"],
         })
 
-        pattern_desc = (
-            exhaustion['pattern_bonus']
-            if exhaustion['pattern_bonus'] != "None"
-            else "EXHAUSTION_FADE"
-        )
+        pattern_desc = exhaustion['pattern_bonus'] if exhaustion['pattern_bonus'] != "None" else "EXHAUSTION_FADE"
 
         # ── G6: Tiered Scoring ──────────────────────────────────────
-        # vwap_sd already computed at top of check_setup
-
         valid_signal, pro_conf_msgs = self._check_pro_confluence(
             symbol, df, prev_df, slope_now, is_extended, vwap_sd,
             pattern_desc, depth_data, ltp, oi, signal_meta
         )
         
-        # Phase 51: Tiered Scoring [Section 2.5]
         if config.PHASE_51_ENABLED:
             confluence_score = len(pro_conf_msgs)
-            # PRD: Score >= 2 required. NO auto-passes for Extreme/Patterns.
             if confluence_score < 2:
                 valid_signal = False
                 gr.rejection_reason = f"Low Confluence Score: {confluence_score} (need 2+)"
@@ -340,7 +319,7 @@ class FyersAnalyzer:
             grl.record(gr)
             return None
 
-        # ── G8: Signal Manager gate (daily limit / cooldown / pause) ─
+        # ── G8: Signal Manager gate ───────────────────────────────
         sm = self.signal_manager
         can_signal, sm_reason = sm.can_signal(symbol) if hasattr(sm, 'can_signal') else (True, "")
         gr.g8_pass = can_signal
@@ -352,22 +331,14 @@ class FyersAnalyzer:
             grl.record(gr)
             return None
 
-        import concurrent.futures
-
         # ── G9: HTF Confluence ────────────────────────────────────
+        import concurrent.futures
         try:
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _htf_exec:
                 _htf_future = _htf_exec.submit(self.htf_confluence.check_trend_exhaustion, symbol, df_15m=df_15m, vwap_sd=vwap_sd)
-                try:
-                    htf_ok, htf_msg = _htf_future.result(timeout=1.5)
-                except concurrent.futures.TimeoutError:
-                    htf_ok  = True
-                    htf_msg = "HTF_TIMEOUT_PASS"
-                    logger.warning(f"  G9 HTF timeout for {symbol} — passing through (1.5s exceeded)")
+                htf_ok, htf_msg = _htf_future.result(timeout=1.5)
         except Exception as e:
-            htf_ok  = True
-            htf_msg = f"HTF_ERROR_PASS:{e}"
-            logger.warning(f"  G9 HTF exception for {symbol} — passing through: {e}")
+            htf_ok, htf_msg = True, f"HTF_BYPASS:{e}"
 
         gr.g9_pass  = htf_ok
         gr.g9_value = htf_msg
@@ -376,16 +347,17 @@ class FyersAnalyzer:
             gr.first_fail_gate = "G9_HTF_CONFLUENCE"
             gr.rejection_reason = f"HTF blocked: {htf_msg}"
             grl.record(gr)
-            logger.info(f"BLOCKED by HTF Confluence: {symbol} - {htf_msg}")
             return None
 
-        # All analyzer gates passed — attach gate result to signal for focus_engine
-        gr.verdict = "ANALYZER_PASS"   # Partial — focus_engine will finalize
-        finalized = self._finalize_signal(
-            symbol, ltp, df, pattern_desc, slope_now, "", signal_meta
-        )
+        # ── G13: Risk & Reward (Phase 65 Dynamic Scaling) ───────────
+        if getattr(config, 'P65_AMT_ENABLED', False) and gain_pct < 9.0:
+            signal_meta['tp1_atr_mult_override'] = 1.0
+            logger.info(f"[G13] Dynamic Risk Scaling applied for {symbol} (Gain: {gain_pct:.1f}%) -> TP1: 1.0x ATR")
+
+        gr.verdict = "ANALYZER_PASS"
+        finalized = self._finalize_signal(symbol, ltp, df, pattern_desc, slope_now, "", signal_meta)
         if finalized:
-            finalized['_gate_result'] = gr   # Pass GateResult object to focus_engine
+            finalized['_gate_result'] = gr
         return finalized
 
     def _check_filters(self, symbol: str) -> bool:
@@ -663,20 +635,13 @@ class FyersAnalyzer:
             if dpoc == 0: return False, ""
             
             # If Price is significantly above dPOC (e.g. > 1%) 
-            # and we are at Day Highs, but dPOC hasn't migrated.
-            # This is hard to prove without historical dPOC, but if Price >> dPOC it implies thin value.
-            
             dist_pct = (ltp - dpoc) / dpoc * 100
-            if dist_pct > 1.0: # 1% Extension from Value
-                return True, f"Value Div (LTP > POC+{dist_pct:.1f}%)"
-                
+            if dist_pct > 1.0: 
+                return True, "Value Div"
         except:
             pass
         return False, ""
 
-    # ------------------------------------------------------------------
-    # Phase 41: Multi-Edge Analyzer Entry Point
-    # ------------------------------------------------------------------
     def check_setup_with_edges(
         self, symbol: str, ltp: float, oi: float,
         pre_fetched_df, edge_payload: dict,
@@ -689,19 +654,9 @@ class FyersAnalyzer:
         """
         grl = get_gate_result_logger()
         gr = GateResult(symbol=symbol, scan_id=scan_id, data_tier=data_tier)
+        signal_meta = {}
 
-        # ── G7: Market Regime ──────────────────────────────────────────
-        allow_short, regime_reason = self.market_context.evaluate_g7()
-        gr.g7_pass  = allow_short
-        gr.g7_value = regime_reason
-        if not allow_short:
-            gr.verdict = "REJECTED"
-            gr.first_fail_gate = "G7_REGIME"
-            gr.rejection_reason = regime_reason
-            grl.record(gr)
-            return None
-
-        # ── G1+G2: Data + RVOL Validity ───────────────────────────────
+        # ── G1+G2: Data Fetching & Enrichment (Phase 65) ──────────────
         if pre_fetched_df is not None:
             df = pre_fetched_df.copy()
         else:
@@ -725,11 +680,11 @@ class FyersAnalyzer:
         gr.g2_pass  = True
         gr.g2_value = float(len(df))
 
+        # Enrichment & Technicals
+        self._enrich_dataframe(df)
         prev_df = df.iloc[:-1]
 
-        # ── Enrichment ─────────────────────────────────────────────────
-        self._enrich_dataframe(df)
-        # Phase 60.1: Standardize Gain Calculation
+        # Standardize Gain Calculation
         pc = 0
         try:
             snapshot = self.fyers.get_quote_cache_snapshot()
@@ -743,15 +698,54 @@ class FyersAnalyzer:
         baseline = pc if pc > 0 else open_price
         gain_pct = ((ltp - baseline) / baseline) * 100
 
-        # Phase 54: ATR computed early — needed by G1 Kill Backdoor (ATR-relative)
         atr = self.gm_analyst.calculate_atr(df)
-
-        # Phase 57: vwap_sd (Z-Score) moved to top to support G4 Slope Decay & G6 logic
         vwap_sd = self.gm_analyst.calculate_vwap_bands(prev_df)
         is_extended = vwap_sd > 2.0
 
-        # ── G1: Gain constraints ───────────────────────────────────────
+        # Phase 65: AMT Pre-checks
+        profile = None
+        profile_rejection = False
+        vol_z = 0.0
+        try:
+            profile = self.profile_analyzer.calculate_market_profile(df, mode='VOLUME')
+            if profile:
+                profile_rejection, _ = self.profile_analyzer.check_profile_rejection(df, ltp)
+            vol_z = self.market_context.get_volume_z_score(df)
+        except Exception as e:
+            logger.warning(f"Profile/VolZ pre-calc error for edge {symbol}: {e}")
+
+        # ── G7: Market Regime & Time Gate (Phase 65) ──────────────────
+        allowed, regime_reason = self.market_context.evaluate_g7(
+            vwap_sd=vwap_sd,
+            profile_rejection=profile_rejection,
+            volume_z=vol_z
+        )
+        gr.g7_pass  = allowed
+        gr.g7_value = regime_reason
+        if not allowed:
+            gr.verdict = "REJECTED"
+            gr.first_fail_gate = "G7_REGIME"
+            gr.rejection_reason = regime_reason
+            grl.record(gr)
+            return None
+
+        # ── G1: Gain constraints (Phase 65 Soft Threshold) ───────────
+        min_gain = config.SCANNER_GAIN_MIN_PCT
+        amt_failing_auction = False
+        if getattr(config, 'P65_AMT_ENABLED', False):
+            if profile_rejection and gain_pct >= config.P65_G1_NET_GAIN_THRESHOLD:
+                min_gain = config.P65_G1_NET_GAIN_THRESHOLD
+                amt_failing_auction = True
+
         ok, msg = self.gm_analyst.check_constraints(ltp, day_high, gain_pct, open_price, df=df, atr=atr)
+        
+        if gain_pct < min_gain:
+            ok = False
+            msg = f"Insufficient Gain: {gain_pct:.1f}% (need {min_gain}%)"
+        elif gain_pct < config.SCANNER_GAIN_MIN_PCT and not amt_failing_auction:
+             ok = False
+             msg = f"Low Gain {gain_pct:.1f}% requires AMT Profile Rejection"
+
         gr.g1_pass  = ok
         gr.g1_value = round(gain_pct, 2)
         if not ok:
@@ -780,7 +774,7 @@ class FyersAnalyzer:
             grl.record(gr)
             return None
 
-        # ── G4: Momentum Safeguard (Phase 57: Slope Decay Optimization) ─────
+        # ── G4: Momentum Safeguard ──────────────────────────────────
         slope_now, _  = self.gm_analyst.calculate_vwap_slope(df.iloc[-30:])
         slope_prev, _ = self.gm_analyst.calculate_vwap_slope(df.iloc[-31:-1])
 
@@ -794,9 +788,7 @@ class FyersAnalyzer:
             grl.record(gr)
             return None
 
-        # G5 (exhaustion pattern) SKIP — edges already detected by MultiEdgeDetector
-
-        # ── Edge-specific entry trigger check (replaces G5/G12 in this path) ─
+        # ── Edge-specific entry trigger check ─────────────────────────
         current_ltp = df.iloc[-1]['close']
         if current_ltp >= edge_payload['entry_trigger']:
             gr.g5_pass  = False
@@ -809,12 +801,10 @@ class FyersAnalyzer:
         gr.g5_pass = True
 
         # ── G6: Pro Confluence ─────────────────────────────────────────
-        # vwap_sd already computed at top
         edge_desc   = " + ".join(e['trigger'] for e in edge_payload['edges'])
-
         valid_signal, pro_conf_msgs = self._check_pro_confluence(
             symbol, df, prev_df, slope_now, is_extended, vwap_sd,
-            edge_desc, depth_data, ltp, oi
+            edge_desc, depth_data, ltp, oi, signal_meta
         )
         gr.g6_pass  = valid_signal
         gr.g6_value = f"+{len(pro_conf_msgs)}conf"
@@ -828,23 +818,14 @@ class FyersAnalyzer:
             grl.record(gr)
             return None
 
-        import concurrent.futures
-
         # ── G9: HTF Confluence ─────────────────────────────────────────
-        # FIX-5: Wrap in 1.5s timeout. REST call for 15m candles can stall scan loop.
+        import concurrent.futures
         try:
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _htf_exec:
                 _htf_future = _htf_exec.submit(self.htf_confluence.check_trend_exhaustion, symbol, vwap_sd=vwap_sd)
-                try:
-                    htf_ok, htf_msg = _htf_future.result(timeout=1.5)
-                except concurrent.futures.TimeoutError:
-                    htf_ok  = True
-                    htf_msg = "HTF_TIMEOUT_PASS"
-                    logger.warning(f"  G9 HTF timeout for {symbol} — passing through (1.5s exceeded)")
+                htf_ok, htf_msg = _htf_future.result(timeout=1.5)
         except Exception as e:
-            htf_ok  = True
-            htf_msg = f"HTF_ERROR_PASS:{e}"
-            logger.warning(f"  G9 HTF exception for {symbol} — passing through: {e}")
+            htf_ok, htf_msg = True, f"HTF_BYPASS:{e}"
 
         gr.g9_pass  = htf_ok
         gr.g9_value = htf_msg
@@ -853,14 +834,16 @@ class FyersAnalyzer:
             gr.first_fail_gate  = "G9_HTF_CONFLUENCE"
             gr.rejection_reason = f"HTF blocked: {htf_msg}"
             grl.record(gr)
-            logger.info(f"BLOCKED by HTF Confluence (edge): {symbol} - {htf_msg}")
             return None
+
+        # ── G13: Risk & Reward (Phase 65 Dynamic Scaling) ───────────
+        if getattr(config, 'P65_AMT_ENABLED', False) and gain_pct < 9.0:
+            signal_meta['tp1_atr_mult_override'] = 1.0
 
         # ── Finalize ───────────────────────────────────────────────────
         gr.verdict = "ANALYZER_PASS"
-        base_signal = self._finalize_signal(symbol, ltp, df, edge_desc, slope_now, "", {})
+        base_signal = self._finalize_signal(symbol, ltp, df, edge_desc, slope_now, "", signal_meta)
         if base_signal is None:
-            # _finalize_signal only fails on exceptions now — but guard anyway
             gr.verdict = "DATA_ERROR"
             gr.rejection_reason = "_finalize_signal returned None unexpectedly"
             grl.record(gr)
@@ -871,21 +854,16 @@ class FyersAnalyzer:
         base_signal['confidence']     = edge_payload['confidence']
         base_signal['edge_count']     = edge_payload['edge_count']
         base_signal['primary_edge']   = edge_payload['primary_trigger']
-        base_signal['_gate_result']   = gr   # Pass to focus_engine
+        base_signal['_gate_result']   = gr
 
         if edge_payload.get('recommended_sl') and edge_payload['recommended_sl'] < base_signal['stop_loss']:
             base_signal['stop_loss'] = edge_payload['recommended_sl']
 
         return base_signal
-
-
     def _finalize_signal(self, symbol, ltp, df, pattern_desc, slope, wall_msg, signal_meta: dict = None):
         """Calculates SL, builds signal dict, logs to signal log and ML. Pure — no gate checks."""
         if signal_meta is None: signal_meta = {}
-        at_level, level_name, level_price = self.htf_confluence.is_at_key_level(symbol, ltp, tolerance_pct=1.0)
-        level_msg = f"At {level_name} ({level_price:.2f})" if at_level else ""
-        if level_msg:
-            logger.info(f"   Key Level: {level_msg}")
+        level_msg = "" # Legacy hook
 
         # Calculate Stop Loss (ATR)
         atr = self.gm_analyst.calculate_atr(df)
@@ -978,10 +956,9 @@ class FyersAnalyzer:
         signal_data["confidence"]     = signal_meta.get("confidence",     "")
         signal_data["pattern_bonus"]  = signal_meta.get("pattern_bonus",  "None")
         signal_data["oi_direction"]   = signal_meta.get("oi_direction",   "unknown")
-
-        # ── Bug 2 fix: record_signal() REMOVED from here. ───────────────────
-        # Previously this burned a daily signal slot before focus_engine
-        # validated that the signal actually resulted in an order.
-        # Signal counting now happens in focus_engine.py at order placement.
-        # can_signal() check is already done at G8 in check_setup().
+        
+        # Phase 65: Dynamic Risk Scaling Override
+        if 'tp1_atr_mult_override' in signal_meta:
+            signal_data['tp1_atr_mult_override'] = signal_meta['tp1_atr_mult_override']
+            
         return signal_data

@@ -371,6 +371,17 @@ P51_TP2_ATR_MULT = 2.5
 P51_TP3_ATR_MULT = 3.5
 P51_TP3_TRAIL_ATR_MULT = 1.0
 
+# PHASE 65: AMT & QUANTITATIVE EVOLUTION
+P65_AMT_ENABLED: bool = True
+P65_G7_SAFE_TRADE_START: str = "09:45"
+P65_G7_CLIMAX_WINDOW_START: str = "09:30"
+P65_G7_CLIMAX_SD_THRESHOLD: float = 3.0
+P65_G7_VOLUME_Z_SCORE_THRESHOLD: float = 2.0
+
+P65_G1_NET_GAIN_THRESHOLD: float = 7.5  # Lowered from 9.0
+P65_G1_AMT_REQUIRED_BELOW_9: bool = True
+P65_G1_TIME_SINCE_HIGH_CANDLES: int = 45 # Extended from 20
+
 # ============================================================================
 # PHASE 52 — PARTIAL EXIT ENGINE & HUMAN INTERVENTION SAFETY
 # ============================================================================

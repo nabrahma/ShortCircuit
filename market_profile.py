@@ -9,13 +9,60 @@ class ProfileAnalyzer:
     def __init__(self):
         pass
         
+    def calculate_dalton_value_area(self, df, bins=20, va_pct=0.70):
+        """
+        Dalton Value Area Algorithm:
+        1. Segment price range into 20 horizontal bins
+        2. Identify Point of Control (POC)
+        3. Expand from POC until 70% Volume is captured
+        """
+        if df is None or df.empty: return None
+        
+        try:
+            # 1. Segment price range into 20 horizontal bins
+            df = df.copy()
+            df['bin'] = pd.cut(df['close'], bins=bins)
+            v_profile = df.groupby('bin', observed=True)['volume'].sum()
+            
+            # 2. Identify Point of Control (POC)
+            poc_bin = v_profile.idxmax()
+            total_v, va_v = v_profile.sum(), v_profile[poc_bin]
+            
+            # 3. Expand from POC until 70% Volume is captured
+            # Dalton Rule: Compare up/down bins and pick highest volume in each step
+            va_bins = [poc_bin]
+            sorted_bins = v_profile.sort_values(ascending=False).index.tolist()
+            for b in sorted_bins:
+                if va_v >= total_v * va_pct: break
+                if b not in va_bins:
+                    va_bins.append(b)
+                    va_v += v_profile[b]
+                    
+            # 4. Extract VAH and VAL boundaries
+            vah = max([b.right for b in va_bins])
+            val = min([b.left for b in va_bins])
+            
+            return {
+                'poc': float(poc_bin.mid),
+                'vah': float(vah),
+                'val': float(val),
+                'vpoc': float(poc_bin.mid), # compatibility
+                'vvah': float(vah),          # compatibility
+                'vval': float(val)           # compatibility
+            }
+        except Exception as e:
+            logger.error(f"Dalton Profile Calc Error: {e}")
+            return None
+
     def calculate_market_profile(self, df, price_step=None, mode='VOLUME'):
         """
         Calculates Market Profile.
-        Modes: 
-        - 'TPO': Time-at-Price (Frequency of closes in bins)
-        - 'VOLUME': Volume-at-Price (Sum of volumes in bins)
+        If mode is 'VOLUME' and Phase 65 is enabled, uses Dalton's algorithm.
         """
+        import config
+        if getattr(config, 'P65_AMT_ENABLED', False) and mode == 'VOLUME':
+            return self.calculate_dalton_value_area(df)
+
         if df is None or df.empty: return None
         
         try:

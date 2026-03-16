@@ -9,6 +9,7 @@ from datetime import datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 from symbols import NIFTY_50, validate_symbol
 import config
+import pandas as pd
 
 logger = logging.getLogger(__name__)
 IST = ZoneInfo("Asia/Kolkata")
@@ -206,17 +207,58 @@ class MarketContext:
         
         return self._index_cache.get(symbol) # Fallback to expired cache if API fails
 
-    def evaluate_g7(self) -> tuple[bool, str]:
+    def get_volume_z_score(self, df: pd.DataFrame) -> float:
+        """
+        Phase 65: Calculates Volume Z-Score for the current 1m candle 
+        relative to the morning session mean/std.
+        """
+        if df is None or len(df) < 10: return 0.0
+        
+        # Get morning session volumes (all candles in df)
+        vols = df['volume']
+        if len(vols) < 2: return 0.0
+        
+        mean_v = vols.mean()
+        std_v = vols.std()
+        
+        if std_v == 0: return 0.0
+        
+        current_v = vols.iloc[-1]
+        z_score = (current_v - mean_v) / std_v
+        return z_score
+
+    def evaluate_g7(self, vwap_sd: float = 0.0, profile_rejection: bool = False, volume_z: float = 0.0) -> tuple[bool, str]:
         """
         Consolidated Gate 7: Market Regime + Time Filters.
-        Replaces legacy should_allow_short and is_favorable_time_for_shorts.
+        Updated for Phase 65: Climax Window (09:30-09:45)
         Returns: (allowed, reason)
         """
         now_ist = datetime.now(IST).time()
         
-        # 1. TIME GATE: Opening Volatility
-        if now_ist < time(10, 0):
-            return False, "BLOCKED [G7]: Opening Volatility (9:15-10:00)"
+        # 1. TIME GATE: Phase 65 AMT & Climax Window
+        if getattr(config, 'P65_AMT_ENABLED', False):
+            # 09:30 - 09:45: Climax Window
+            if time(9, 30) <= now_ist < time(9, 45):
+                climax_ok = vwap_sd >= config.P65_G7_CLIMAX_SD_THRESHOLD and profile_rejection
+                vol_ok = volume_z >= config.P65_G7_VOLUME_Z_SCORE_THRESHOLD
+                
+                if climax_ok and vol_ok:
+                    return True, f"ALLOWED [G7]: Climax Exception (SD: {vwap_sd:.1f}, VolZ: {volume_z:.1f})"
+                else:
+                    return False, f"BLOCKED [G7]: Early Window (Climax needed - SD: {vwap_sd:.1f}/3.0, VZ: {volume_z:.1f}/2.0, Rej: {profile_rejection})"
+            
+            # Before 09:30: Hard Block
+            if now_ist < time(9, 30):
+                return False, "BLOCKED [G7]: Pre-Market Noise (before 09:30)"
+            
+            # 09:45 - 10:00: New Safe Start
+            if time(9, 45) <= now_ist < time(10, 0):
+                # Allowed without climax after 09:45
+                pass
+        else:
+            # Legacy 10:00 AM Gate
+            if now_ist < time(10, 0):
+                return False, "BLOCKED [G7]: Opening Volatility (9:15-10:00)"
             
         # 2. TIME GATE: EOD Cutoff
         if config.PHASE_51_ENABLED and config.P51_G7_TIME_GATE_ENABLED:
