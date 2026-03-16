@@ -140,7 +140,7 @@ class FyersScanner:
             if config.RVOL_VALIDITY_GATE_ENABLED:
                 if not _rvol_valid:
                     logger.warning(f"SKIP {symbol} — RVOL_VALIDITY_GATE: {_mins_open:.1f} min since open — need {config.RVOL_MIN_CANDLES} min for valid RVOL. Skip.")
-                    self.quality_reject_counts[symbol] = self.quality_reject_counts.get(symbol, 0) + 1
+                    # self.quality_reject_counts[symbol] = self.quality_reject_counts.get(symbol, 0) + 1 # DEPRECATED Phase 64 (Transient skip)
                     return False, None, None
                 # Candle count: keep as absolute floor for API data integrity only
                 min_candles = 10  # No longer varies by time — cliff-edge removed
@@ -194,7 +194,7 @@ class FyersScanner:
             # Fix #4: Hard block 0-candle data instead of allowing
             candle_count = len(response.get('candles', []))
             logger.warning(f"SKIP {symbol} — Insufficient candle data ({candle_count}). Blocking.")
-            self.quality_reject_counts[symbol] = self.quality_reject_counts.get(symbol, 0) + 1
+            # self.quality_reject_counts[symbol] = self.quality_reject_counts.get(symbol, 0) + 1 # DEPRECATED Phase 64 (Transient skip)
             return False, None, None
             
         except Exception as e:
