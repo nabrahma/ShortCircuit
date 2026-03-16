@@ -237,28 +237,23 @@ class MarketContext:
         
         # 1. TIME GATE: Phase 65 AMT & Climax Window
         if getattr(config, 'P65_AMT_ENABLED', False):
-            # 09:30 - 09:45: Climax Window
-            if time(9, 30) <= now_ist < time(9, 45):
+            # 09:30 - 10:00: Climax Window (Phase 65)
+            if time(9, 30) <= now_ist < time(10, 0):
                 climax_ok = vwap_sd >= config.P65_G7_CLIMAX_SD_THRESHOLD and profile_rejection
                 vol_ok = volume_z >= config.P65_G7_VOLUME_Z_SCORE_THRESHOLD
                 
                 if climax_ok and vol_ok:
                     return True, f"ALLOWED [G7]: Climax Exception (SD: {vwap_sd:.1f}, VolZ: {volume_z:.1f})"
                 else:
-                    return False, f"BLOCKED [G7]: Early Window (Climax needed - SD: {vwap_sd:.1f}/3.0, VZ: {volume_z:.1f}/2.0, Rej: {profile_rejection})"
+                    return False, f"BLOCKED [G7]: Opening Window (Climax needed - SD: {vwap_sd:.1f}/3.0, VZ: {volume_z:.1f}/2.0, Rej: {profile_rejection})"
             
             # Before 09:30: Hard Block
             if now_ist < time(9, 30):
                 return False, "BLOCKED [G7]: Pre-Market Noise (before 09:30)"
-            
-            # 09:45 - 10:00: New Safe Start
-            if time(9, 45) <= now_ist < time(10, 0):
-                # Allowed without climax after 09:45
-                pass
         else:
             # Legacy 10:00 AM Gate
             if now_ist < time(10, 0):
-                return False, "BLOCKED [G7]: Opening Volatility (9:15-10:00)"
+                return False, "BLOCKED [G7]: Opening Volatility (before 10:00)"
             
         # 2. TIME GATE: EOD Cutoff
         if config.PHASE_51_ENABLED and config.P51_G7_TIME_GATE_ENABLED:

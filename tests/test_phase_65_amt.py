@@ -53,8 +53,8 @@ def test_dalton_value_area(profile_analyzer):
     assert profile['vah'] > profile['val']
 
 def test_g7_climax_window(market_context, monkeypatch):
-    """Verify 09:30 - 09:45 Climax Exception."""
-    # Mock time to 09:35
+    """Verify 09:30 - 10:00 Climax Exception."""
+    # Mock time to 09:35 (Inside Climax Window)
     mock_now = datetime.now(IST).replace(hour=9, minute=35, second=0)
     
     class MockDateTime(datetime):
@@ -64,15 +64,21 @@ def test_g7_climax_window(market_context, monkeypatch):
             
     monkeypatch.setattr('market_context.datetime', MockDateTime)
     
-    # Case 1: No climax -> Blocked
+    # Case 1: No climax at 09:35 -> Blocked
     allowed, reason = market_context.evaluate_g7(vwap_sd=1.0, profile_rejection=False, volume_z=0.0)
     assert allowed is False
-    assert "Early Window" in reason
+    assert "Opening Window" in reason
 
-    # Case 2: Climax (SD > 3, Profile Reject, VolZ > 2) -> Allowed
+    # Case 2: Climax at 09:35 -> Allowed
     allowed, reason = market_context.evaluate_g7(vwap_sd=3.5, profile_rejection=True, volume_z=2.5)
     assert allowed is True
     assert "Climax Exception" in reason
+
+    # Case 3: 09:50 (Now also Climax Window, formerly Normal) -> Blocked if no climax
+    mock_now = datetime.now(IST).replace(hour=9, minute=50, second=0)
+    allowed, reason = market_context.evaluate_g7(vwap_sd=1.0, profile_rejection=False, volume_z=0.0)
+    assert allowed is False
+    assert "Opening Window" in reason
 
 def test_g1_soft_threshold(analyzer, monkeypatch):
     """Verify 7.5% - 9.0% gain allowance with AMT."""

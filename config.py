@@ -191,7 +191,7 @@ DISCRETIONARY_CONFIG = {
 MARKET_SESSION_CONFIG = {
     # Time thresholds (IST)
     'market_open': '09:15',
-    'safe_trade_start': '09:45',
+    'safe_trade_start': '10:00',
     'eod_cutoff': '15:10',
     'market_close': '15:30',
     
@@ -373,7 +373,7 @@ P51_TP3_TRAIL_ATR_MULT = 1.0
 
 # PHASE 65: AMT & QUANTITATIVE EVOLUTION
 P65_AMT_ENABLED: bool = True
-P65_G7_SAFE_TRADE_START: str = "09:45"
+P65_G7_SAFE_TRADE_START: str = "10:00"
 P65_G7_CLIMAX_WINDOW_START: str = "09:30"
 P65_G7_CLIMAX_SD_THRESHOLD: float = 3.0
 P65_G7_VOLUME_Z_SCORE_THRESHOLD: float = 2.0

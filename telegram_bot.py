@@ -677,14 +677,14 @@ class ShortCircuitBot:
 
         IST = ZoneInfo("Asia/Kolkata")
         now_ist = datetime.now(IST)
-        earliest = now_ist.replace(hour=9, minute=45, second=0, microsecond=0)
+        earliest = now_ist.replace(hour=9, minute=30, second=0, microsecond=0)
 
         if now_ist < earliest:
             delta = earliest - now_ist
             mins_left = int(delta.total_seconds() // 60)
             self._auto_on_queued = True
             await update.message.reply_text(
-                f"⏳ *Auto ON queued* — activates at 09:45 IST\n"
+                f"⏳ *Auto ON queued* — activates at 09:30 IST\n"
                 f"_{mins_left} min remaining. No action needed._",
                 parse_mode="Markdown"
             )
