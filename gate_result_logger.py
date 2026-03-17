@@ -414,7 +414,16 @@ class GateResultLogger:
                     # but double check and catch asyncpg-specific decimal issues
                     out[i] = float(val)
                 elif expected_type == str:
-                    out[i] = str(val)
+                    # Defensive truncation: ensures we never crash even if schema changes
+                    val_str = str(val)
+                    if idx in (18, 20, 24, 28): # g6, g7, g9, g11 values
+                         out[i] = val_str[:245]
+                    elif idx == 32: # first_fail_gate
+                         out[i] = val_str[:145]
+                    elif idx == 33: # rejection_reason (TEXT but let's be sane)
+                         out[i] = val_str[:5000]
+                    else:
+                         out[i] = val_str[:95]
                 else:
                     out[i] = expected_type(val)
             except (ValueError, TypeError, decimal.InvalidOperation) as e:
