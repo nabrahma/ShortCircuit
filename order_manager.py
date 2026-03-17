@@ -634,12 +634,16 @@ class OrderManager:
 
                 # DB Log
                 if self.db:
-                    await self.db.log_trade_entry({
-                        'symbol':    symbol,
-                        'direction': signal_type,
-                        'qty':       qty,
-                        'entry_price': ltp
-                    })
+                    try:
+                        await self.db.log_trade_entry({
+                            'symbol':    symbol,
+                            'direction': side,   # Use 'SELL'/'BUY' from line 490, not 'SHORT'
+                            'qty':       qty,
+                            'entry_price': ltp
+                        })
+                    except Exception as db_err:
+                        # Non-fatal to execution, but important
+                        logger.error(f"❌ [ENTRY-DB] Failed to log entry for {symbol}: {db_err}")
 
                 cap_status = self.capital.get_slot_status() if self.capital else {}
                 logger.info(

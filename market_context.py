@@ -97,10 +97,10 @@ class MarketContext:
             return 0.0, 0.0
 
         morning_start = time(9, 15)
-        morning_end = time(9, 45)
+        morning_end = time(9, 30)
         _IST = ZoneInfo("Asia/Kolkata")
         market_open = int(datetime(today.year, today.month, today.day, 9, 15, tzinfo=_IST).timestamp())
-        warmup_end = int(datetime(today.year, today.month, today.day, 9, 45, tzinfo=_IST).timestamp())
+        warmup_end = int(datetime(today.year, today.month, today.day, 9, 30, tzinfo=_IST).timestamp())
 
         morning_candles = []
         for c in candles:
@@ -110,7 +110,7 @@ class MarketContext:
 
         if not morning_candles:
             logger.warning(
-                "[MarketContext] No 09:15–09:45 candles found; falling back to all today's intraday candles."
+                "[MarketContext] No 09:15–09:30 candles found; falling back to all today's intraday candles."
             )
             all_today = []
             for c in candles:

@@ -10,6 +10,13 @@ ALTER TABLE gate_results ALTER COLUMN verdict TYPE VARCHAR(50);
 ALTER TABLE gate_results ALTER COLUMN first_fail_gate TYPE VARCHAR(100);
 ALTER TABLE gate_results ALTER COLUMN data_tier TYPE VARCHAR(50);
 
+-- Phase 66: Session Hardening Fixes
+ALTER TABLE orders ALTER COLUMN side TYPE VARCHAR(10);
+ALTER TABLE orders DROP CONSTRAINT IF EXISTS orders_side_check;
+ALTER TABLE orders ADD CONSTRAINT orders_side_check CHECK (side IN ('BUY', 'SELL', 'SHORT', 'LONG'));
+
+ALTER TABLE positions ALTER COLUMN source TYPE VARCHAR(50);
+
 COMMIT;
 
 -- Verify

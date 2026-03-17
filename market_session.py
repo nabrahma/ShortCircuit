@@ -1,6 +1,7 @@
 import time
 import sys
 import logging
+import asyncio
 from datetime import datetime, time as dtime, timedelta, timezone
 
 # Helper for IST Timezone
@@ -22,7 +23,7 @@ class MarketSession:
     
     # NSE Market Hours (IST)
     MARKET_OPEN = dtime(9, 15)
-    SAFE_TRADE_START = dtime(9, 45)
+    SAFE_TRADE_START = dtime(9, 30)
     EOD_SQUARE_OFF = dtime(15, 10)
     MARKET_CLOSE = dtime(15, 30)
 
@@ -136,7 +137,7 @@ class MarketSession:
         msg = (
             f"🌄 **EARLY MARKET WARMUP**\n\n"
             f"⏰ Current: `{now.strftime('%H:%M:%S')}`\n"
-            f"⏳ Trading Starts: `09:45` ({wait_mins:.0f} mins)\n\n"
+            f"⏳ Trading Starts: `09:30` ({wait_mins:.0f} mins)\n\n"
             f"**Status:** Monitor Mode Only.\n"
             f"Collecting candle data..."
         )
@@ -227,27 +228,10 @@ class MarketSession:
                 "symbol": self.NIFTY_SYMBOL,
                 "resolution": "5",
                 "date_format": "1",
-                "range_from": f"{today_str}", # Fyers usually takes epoch or YYYY-MM-DD
+                "range_from": f"{today_str}", 
                 "range_to": f"{today_str}",
                 "cont_flag": "1"
             }
-            # Need to start_epoch and end_epoch for 'history' usually?
-            # Using basic logic from existing scanner or manual.
-            # Assuming fyers.history expects epoch or date string depending on 'date_format'.
-            # PRD uses YYYY-MM-DD string with date_format=1? 
-            # Usually date_format=0 is epoch, 1 might be string. I'll trust standard usage of 'history'.
-            # Wait, fyers documentation says date_format 0=epoch, 1=yyyy-mm-dd.
-            
-            # Since we need specific time 9:15 to 9:30, we must use timestamps if granularity is needed within a day?
-            # Or pass full date string "2025-01-01 09:15:00"?
-            # Let's use simple logic: Fetch today's data and slice.
-            
-            # Actually, `market_context.py` handles this.
-            # I will return a best-effort estimate or fallback.
-            
-            # For now returning placeholder structure, relying on existing `market_context` logic 
-            # to be updated to accept this.
-            
             return {'high': fallback_high, 'low': fallback_low} 
             
         except Exception as e:

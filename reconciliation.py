@@ -558,9 +558,11 @@ class ReconciliationEngine:
             if self.capital and not self.capital.is_slot_free:
                 try:
                     await self.capital.release_slot(broker=self.broker)
-                    logger.info(f"[GHOST] Capital slot force-released for phantom {sym}")
+                    # Trigger immediate sync to refresh balance/buying power after manual close
+                    await self.capital.sync(self.broker)
+                    logger.info(f"[GHOST] Capital slot force-released and synced for phantom {sym}")
                 except Exception as e:
-                    logger.error(f"[GHOST] Capital force-release failed for {sym}: {e}")
+                    logger.error(f"[GHOST] Capital force-release/sync failed for {sym}: {e}")
 
             # Step 3: CRITICAL — mark DB dirty so next cycle re-fetches fresh positions.
             # Without this, _get_db_positions_cached() keeps returning stale cache

@@ -89,7 +89,7 @@ import datetime
 import pytz
 
 # Early Session Data Validity Gate Phase 44.3
-RVOL_MIN_CANDLES = 45           # Phase 51: Up from 20
+RVOL_MIN_CANDLES = 15           # Reduced to 15 for Phase 65 Climax Window (09:30+)
 RVOL_VALIDITY_GATE_ENABLED = True  # Feature flag — set False to disable instantly
 
 def minutes_since_market_open() -> float:
@@ -191,13 +191,13 @@ DISCRETIONARY_CONFIG = {
 MARKET_SESSION_CONFIG = {
     # Time thresholds (IST)
     'market_open': '09:15',
-    'safe_trade_start': '10:00',
+    'safe_trade_start': '09:30',
     'eod_cutoff': '15:10',
     'market_close': '15:30',
     
     # Startup behavior
     'allow_postmarket_sleep': True,   # Sleep overnight vs exit
-    'enable_warmup_scanning': True,   # Scan during 9:15-9:45
+    'enable_warmup_scanning': True,   # Scan during 9:15-9:30
     'require_morning_data': True,     # Fetch historical data
     
     # Fallback

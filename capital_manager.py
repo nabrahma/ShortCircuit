@@ -110,26 +110,39 @@ class CapitalManager:
             raise ValueError(f"Fyers funds response invalid: {funds}")
 
         # Pattern 1: fund_limit list (Fyers v3 standard)
+        best_val = 0.0
         for item in funds.get('fund_limit', []):
-            # id=2 is "Available Balance" in Fyers v3
-            if item.get('id') == 2 or 'available' in str(item.get('title', '')).lower():
-                val = float(item.get('equityAmount', 0) or 0)
-                if val > 0:
+            # id=2 is "Available Balance" in Fyers v3. id=1 is "Total Balance".
+            # Sometimes Fyers returns abnormally low value in ID 2 during early morning/settlement.
+            val = float(item.get('equityAmount', 0) or 0)
+            title = str(item.get('title', '')).lower()
+            
+            if item.get('id') == 2 or 'available' in title:
+                if val > 100: # Threshold for "normal" account balance
                     return val
+                best_val = max(best_val, val)
+            
+            # Fallback to id=1 (cash) if id=2 is suspicious
+            if item.get('id') == 1 or 'total' in title:
+                best_val = max(best_val, val)
+
+        if best_val > 0:
+            return best_val
 
         # Pattern 2: equity dict (some Fyers SDK wrappers)
         eq = funds.get('equity', {})
         if isinstance(eq, dict):
-            for key in ('available_margin', 'availableMargin', 'available'):
+            for key in ('available_margin', 'availableMargin', 'available', 'cash_balance'):
                 if key in eq:
                     return float(eq[key] or 0)
 
         # Pattern 3: flat dict
-        for key in ('available_margin', 'availableMargin', 'available_balance'):
+        for key in ('available_margin', 'availableMargin', 'available_balance', 'cashBalance'):
             if key in funds:
                 return float(funds[key] or 0)
 
-        raise ValueError(f"Cannot parse available margin from Fyers funds: {funds}")
+        logger.warning(f"Abnormal funds structure detected: {json.dumps(funds)}")
+        raise ValueError(f"Cannot parse available margin from Fyers funds.")
 
     # ─────────────────────────────────────────────────────────────────────────
     # Sizing
