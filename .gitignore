@@ -57,3 +57,6 @@ dist/
 build/
 *.egg-info/
 
+# ── Legacy / Unused Code (moved from root) ───────────────────
+legacy/
+
