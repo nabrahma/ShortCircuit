@@ -17,7 +17,7 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 # DEPRECATED Phase 44.6 — real margin now fetched from Fyers /funds
 CAPITAL_PER_TRADE = 1800  # INR per trade (Safety buffer for 2k account)
 CAPITAL = CAPITAL_PER_TRADE  # Backward-compatible alias
-RISK_PER_TRADE = 200 # Max loss in INR (optional logic)
+MAX_SESSION_LOSS_INR = 500  # Max cumulative intra-day loss before bot halts
 # ============================================================
 # AUTO TRADE GATE
 # CRITICAL: Must ALWAYS be False on startup.

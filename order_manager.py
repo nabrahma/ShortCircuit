@@ -233,17 +233,13 @@ class OrderManager:
         try:
             pos = self.active_positions.get(symbol)
             if pos:
-                entry_price = pos.get('entry_price', 0)
-                # For SHORT trades, exit_price < entry_price IS A WIN
-                is_win = exit_price < entry_price if exit_price > 0 and entry_price > 0 else False
-                
                 if self.trade_manager:
-                    self.trade_manager.record_trade_outcome(symbol, is_win)
+                    self.trade_manager.record_trade_outcome(symbol, pnl)
                 else:
                     # Fallback to direct call if trade_manager not injected
                     from signal_manager import get_signal_manager
-                    get_signal_manager().record_outcome(symbol, is_win)
-                    logger.info(f"G13 Outcome recorded for {symbol} (direct): {'WIN' if is_win else 'LOSS'}")
+                    get_signal_manager().record_outcome(symbol, pnl)
+                    logger.info(f"Phase 69 Outcome recorded for {symbol} (direct): ₹{pnl:.2f}")
         except Exception as e:
             logger.error(f"[CLOSE] G13 record failed: {e}")
 

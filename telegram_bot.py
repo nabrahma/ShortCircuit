@@ -599,20 +599,22 @@ class ShortCircuitBot:
         """Build capital status block for command responses."""
         if not self.capital_manager:
             return "Capital: N/A\n"
-        cs = self.capital_manager.get_status()
-        return (
-            f"Base:      ₹{cs['base_capital']:.0f}\n"
-            f"Leverage:  {cs['leverage']}×\n"
-            f"Buying:    ₹{cs['total_buying_power']:.0f}\n"
-            f"Available: ₹{cs['available']:.0f}\n"
-            f"Deployed:  ₹{cs['in_use']:.0f}\n"
-        )
+        try:
+            cs = self.capital_manager.get_slot_status()
+            return (
+                f"Margin (Live): ₹{cs.get('real_margin', 0):.0f}\n"
+                f"Leverage:      {cs.get('leverage', 5)}×\n"
+                f"Buying Power:  ₹{cs.get('buying_power', 0):.0f}\n"
+                f"Slot Free:     {'Yes ✅' if cs.get('slot_free') else 'No 🔴'}\n"
+            )
+        except Exception:
+            return "Margin: Data Unavailable\n"
     def _get_signal_block(self) -> str:
         """Build signal manager status block."""
         if not self.signal_manager:
             return ""
         st = self.signal_manager.get_status()
-        cb = "🔴 CIRCUIT BREAKER" if st.get('is_paused') else f"{st.get('signals_remaining', '?')} remaining"
+        cb = "🔴 CIRCUIT BREAKER (MAX LOSS)" if st.get('is_paused') else "🟢 ACTIVE"
         return (
             f"Signals:   {st.get('signals_sent', 0)} today | {cb}\n"
         )
@@ -724,20 +726,17 @@ class ShortCircuitBot:
         mode_str = "🟢 AUTO" if self._auto_mode else "🔴 ALERT ONLY"
         if self._scanning_paused:
             mode_str += " (⏸️ PAUSED)"
-        # Aggregate P&L from broker
+        # Aggregate P&L from memory
         today_pnl = 0.0
         open_positions = 0
         unrealised = 0.0
-        if self.order_manager:
-            try:
-                trades = await self.order_manager.get_today_trades()
-                for t in trades:
-                    today_pnl += t.get('realised_pnl', 0)
-                    unrealised += t.get('unrealised_pnl', 0)
-                    if t.get('qty', 0) != 0:
-                        open_positions += 1
-            except Exception:
-                pass
+        
+        if getattr(self, 'signal_manager', None):
+            today_pnl = getattr(self.signal_manager, 'daily_pnl', 0.0)
+            
+        if getattr(self, 'order_manager', None) and hasattr(self.order_manager, 'active_positions'):
+            open_positions = len(self.order_manager.active_positions)
+            unrealised = sum(p.get('unrealised_pnl', 0.0) for p in getattr(self.order_manager, 'active_positions').values())
         pnl_str = f"+₹{today_pnl:.2f}" if today_pnl >= 0 else f"-₹{abs(today_pnl):.2f}"
         unr_str = f"+₹{unrealised:.2f}" if unrealised >= 0 else f"-₹{abs(unrealised):.2f}"
         text = (

@@ -15,8 +15,7 @@ class SignalManager:
     Manages signal flow to prevent overtrading and enforce quality filters.
     """
     
-    def __init__(self, max_signals_per_day=5, cooldown_minutes=45):
-        self.max_signals_per_day = max_signals_per_day
+    def __init__(self, cooldown_minutes=45):
         self.cooldown_minutes = cooldown_minutes
         
         # Daily tracking
@@ -26,9 +25,10 @@ class SignalManager:
         # Per-symbol tracking
         self.last_signal_time = {}  # symbol -> datetime
         
-        # Loss tracking for auto-pause
-        self.consecutive_losses = 0
-        self.max_consecutive_losses = 3
+        # PnL tracking for auto-pause (Phase 69)
+        import config
+        self.daily_pnl = 0.0
+        self.max_session_loss = getattr(config, 'MAX_SESSION_LOSS_INR', 500.0)
         self.is_paused = False
         
         # Stats
@@ -44,7 +44,7 @@ class SignalManager:
             logger.info(f"New trading day: {today}. Resetting signal manager.")
             self.signals_today = []
             self.last_signal_time = {}
-            self.consecutive_losses = 0
+            self.daily_pnl = 0.0
             self.is_paused = False
             self.current_date = today
             self.stats = defaultdict(int)
@@ -74,15 +74,11 @@ class SignalManager:
                 else:
                     del self._exec_cooldowns[symbol]  # expired
             
-            # Check 1: Daily limit
-            if len(self.signals_today) >= self.max_signals_per_day:
-                self.stats['blocked_daily_limit'] += 1
-                return False, f"Daily limit reached ({self.max_signals_per_day} signals)"
-            
-            # Check 2: Paused due to consecutive losses
+
+            # Check 2: Paused due to max session loss
             if self.is_paused:
                 self.stats['blocked_paused'] += 1
-                return False, f"Trading paused after {self.max_consecutive_losses} consecutive losses"
+                return False, f"Trading paused: Max session loss reached (₹{self.daily_pnl:.2f})"
             
             # Check 3: Per-symbol cooldown
             if symbol in self.last_signal_time:
@@ -190,40 +186,37 @@ class SignalManager:
             del self._exec_cooldowns[symbol]
             return False, 0, ''
     
-    def record_outcome(self, symbol, is_win):
+    def record_outcome(self, symbol: str, pnl: float):
         """
-        Record the outcome of a trade for consecutive loss tracking.
+        Record the outcome of a trade for daily PnL risk limits.
         
         Args:
             symbol: Stock symbol
-            is_win: True if trade was profitable
+            pnl: Realized PnL from the trade
         """
+        self.daily_pnl += pnl
+        is_win = pnl > 0
+        
         if is_win:
-            self.consecutive_losses = 0
             self.stats['wins'] += 1
-            logger.info(f"WIN recorded for {symbol}. Consecutive losses reset.")
+            logger.info(f"WIN recorded for {symbol} (₹{pnl:.2f}). Session PnL: ₹{self.daily_pnl:.2f}")
         else:
-            self.consecutive_losses += 1
             self.stats['losses'] += 1
-            logger.warning(f"LOSS recorded for {symbol}. Consecutive losses: {self.consecutive_losses}")
+            logger.warning(f"LOSS recorded for {symbol} (₹{pnl:.2f}). Session PnL: ₹{self.daily_pnl:.2f}")
             
-            if self.consecutive_losses >= self.max_consecutive_losses:
+            if self.daily_pnl <= -self.max_session_loss:
                 self.is_paused = True
-                logger.critical(f"TRADING PAUSED: {self.consecutive_losses} consecutive losses")
+                logger.critical(f"🚨 TRADING PAUSED: Max session loss limit breached. Session PnL: ₹{self.daily_pnl:.2f}")
     
-    def get_remaining_signals(self):
-        """Get how many signals are left for today."""
-        self._reset_if_new_day()
-        return max(0, self.max_signals_per_day - len(self.signals_today))
-    
+
     def get_status(self):
         """Get current status for dashboard/logging."""
         self._reset_if_new_day()
         return {
             'date': self.current_date,
             'signals_sent': len(self.signals_today),
-            'signals_remaining': self.get_remaining_signals(),
-            'consecutive_losses': self.consecutive_losses,
+            'signals_remaining': 'Unlimited',
+            'daily_pnl': self.daily_pnl,
             'is_paused': self.is_paused,
             'symbols_on_cooldown': list(self.last_signal_time.keys()),
             'stats': dict(self.stats)
@@ -243,7 +236,6 @@ def get_signal_manager():
     global _signal_manager
     if _signal_manager is None:
         _signal_manager = SignalManager(
-            max_signals_per_day=5,
             cooldown_minutes=45
         )
     return _signal_manager

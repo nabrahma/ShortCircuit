@@ -671,8 +671,13 @@ class TradeManager:
                     try:
                         avg_price = pos.get('avgPrice', 0)
                         exit_price = pos.get('lp', 0) # Use last price as estimate for PnL
-                        is_win = exit_price < avg_price if exit_price > 0 and avg_price > 0 else False
-                        self.record_trade_outcome(symbol, is_win)
+                        pnl_estimate = 0.0
+                        if avg_price > 0 and exit_price > 0:
+                            if net_qty < 0: # SHORT
+                                pnl_estimate = (avg_price - exit_price) * abs(net_qty)
+                            elif net_qty > 0: # LONG
+                                pnl_estimate = (exit_price - avg_price) * abs(net_qty)
+                        self.record_trade_outcome(symbol, pnl_estimate)
                     except Exception as e:
                         logger.error(f"G13 outcome recording failed in square-off: {e}")
                     
@@ -693,15 +698,15 @@ class TradeManager:
             logger.error(f"Auto-Square Off Failed: {e}")
             return f"Square Off Error: {e}"
 
-    def record_trade_outcome(self, symbol: str, is_win: bool):
+    def record_trade_outcome(self, symbol: str, pnl: float):
         """
-        Phase 51 [G13]: Record trade outcome in SignalManager.
-        Updates consecutive loss tracking and global stats.
+        Phase 69 [G13]: Record trade outcome in SignalManager.
+        Updates daily PnL tracking and global stats.
         """
         from signal_manager import get_signal_manager
         sm = get_signal_manager()
-        sm.record_outcome(symbol, is_win)
-        logger.info(f"G13 Outcome recorded for {symbol}: {'WIN' if is_win else 'LOSS'}")
+        sm.record_outcome(symbol, pnl)
+        logger.info(f"Phase 69 Outcome recorded for {symbol}: ₹{pnl:.2f}")
 
     # ==================================================================
     # SAFETY UTILITIES

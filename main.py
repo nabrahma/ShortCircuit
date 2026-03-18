@@ -309,19 +309,15 @@ async def _initialize_runtime() -> RuntimeContext:
     bot.order_manager = order_manager
     # ────────────────────────────────────────────────────────────────────
 
+    # ────────────────────────────────────────────────────────────────────
+    # Reconciliation Engine construction
+    # ────────────────────────────────────────────────────────────────────
     reconciliation_engine = ReconciliationEngine(
         broker=broker,
         db_manager=db_manager,
         telegram_bot=bot,
         capital_manager=capital_manager,
         order_manager=order_manager,
-    )
-
-    # Phase 44.6: Scalper Position Manager wiring
-    from scalper_position_manager import ScalperPositionManager
-    trade_manager.scalper_manager = ScalperPositionManager(
-        trade_manager,
-        on_position_closed=lambda: capital_manager.release_slot(broker=broker)
     )
 
     await order_manager.startup_reconciliation()
@@ -382,7 +378,8 @@ async def _trading_loop(shutdown_event: asyncio.Event, ctx: RuntimeContext):
         try:
             if hasattr(ctx.capital_manager, "_last_sync") and ctx.capital_manager._last_sync:
                 from datetime import datetime
-                if (datetime.utcnow() - ctx.capital_manager._last_sync).total_seconds() > 300:
+                import pytz
+                if (datetime.now(datetime.timezone.utc).replace(tzinfo=None) - ctx.capital_manager._last_sync).total_seconds() > 300:
                     await ctx.capital_manager.sync(ctx.broker)
             if not ctx.market_session.should_trade_now():
                 current_state = ctx.market_session.get_current_state()
