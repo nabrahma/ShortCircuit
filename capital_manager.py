@@ -112,17 +112,17 @@ class CapitalManager:
         # Pattern 1: fund_limit list (Fyers v3 standard)
         best_val = 0.0
         for item in funds.get('fund_limit', []):
-            # id=2 is "Available Balance" in Fyers v3. id=1 is "Total Balance".
-            # Sometimes Fyers returns abnormally low value in ID 2 during early morning/settlement.
+            # id=10 is "Available Balance" in Fyers v3. id=1 is "Total Balance".
+            # id=2 is "Utilized Amount" (which was causing the bot to size based on used margin!)
             val = float(item.get('equityAmount', 0) or 0)
             title = str(item.get('title', '')).lower()
             
-            if item.get('id') == 2 or 'available' in title:
+            if item.get('id') == 10 or 'available' in title:
                 if val > 100: # Threshold for "normal" account balance
                     return val
                 best_val = max(best_val, val)
             
-            # Fallback to id=1 (cash) if id=2 is suspicious
+            # Fallback to id=1 (cash) if id=10 is missing
             if item.get('id') == 1 or 'total' in title:
                 best_val = max(best_val, val)
 

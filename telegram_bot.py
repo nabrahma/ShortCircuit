@@ -187,12 +187,20 @@ class ShortCircuitBot:
         side = signal.get('side', 'SHORT')
         ltp = signal.get('ltp', signal.get('entry_price', 0))
         trigger = signal.get('signal_low', signal.get('entry_price', 0))
+        
+        # Calculate pre-trade margin utilization
+        margin_str = "N/A"
+        if self.capital_manager and ltp > 0:
+            qty, _, margin_req = self.capital_manager.compute_qty(symbol, ltp)
+            margin_str = f"₹{margin_req:.0f} (Qty: {qty})"
+
         return (
             f"🔍 <b>SIGNAL DISCOVERED</b>\n\n"
             f"Symbol: <code>{_he(symbol)}</code>\n"
             f"Side: {side}\n"
             f"LTP: ₹{ltp:.2f}\n"
-            f"Gate 12 Trigger: < ₹{trigger:.2f}\n\n"
+            f"Trigger: < ₹{trigger:.2f}\n"
+            f"Est. Margin: {margin_str}\n\n"
             f"<i>Waiting for Gate 12 validation...</i>"
         )
     def _build_signal_validation_text(self, signal: dict, outcome: str, details: dict | None = None) -> str:
@@ -205,6 +213,16 @@ class ShortCircuitBot:
         entry = signal.get('entry_price', 0)
         stop = signal.get('stop_loss', 0)
         target = signal.get('target', 0)
+        
+        # Calculate pre-trade margin utilization
+        margin_str = "N/A"
+        qty = signal.get('quantity', 0)
+        if qty > 0 and entry > 0:
+            margin_str = f"₹{(qty * entry) / 5:.0f} (Qty: {qty})"
+        elif self.capital_manager and ltp > 0:
+            c_qty, _, margin_req = self.capital_manager.compute_qty(symbol, ltp)
+            margin_str = f"₹{margin_req:.0f} (Qty: {c_qty})"
+
         if outcome == 'VALIDATED':
             mode = "AUTO EXECUTION" if self._auto_mode else "ALERT ONLY (AUTO OFF)"
             return (
@@ -213,6 +231,7 @@ class ShortCircuitBot:
                 f"Side: {side}\n"
                 f"LTP: ₹{ltp:.2f}\n"
                 f"Trigger: < ₹{trigger:.2f}\n"
+                f"Est. Margin: {margin_str}\n"
                 f"Entry: ₹{entry:.2f} | SL: ₹{stop:.2f} | Target: ₹{target:.2f}\n"
                 f"Action: {mode}\n"
                 f"Reason: <code>{_he(reason)}</code>"
@@ -326,12 +345,19 @@ class ShortCircuitBot:
         
         oi_emoji = {"falling": "✅", "rising": "⚠️", "flat": "➖", "unknown": "➖"}
         
+        # Calculate pre-trade margin utilization
+        margin_str = "N/A"
+        if self.capital_manager and entry > 0:
+            qty, _, margin_req = self.capital_manager.compute_qty(symbol, entry)
+            margin_str = f"₹{margin_req:.0f} (Qty: {qty})"
+
         text = (
             f"{mode_tag} | <b>{_he(symbol)}</b> {side_emoji} <b>{_he(side)}</b>\n"
             f"\n📊 <b>Edge:</b> {conf} | Vol Fade: {fade:.0%}"
             f"\n🕯 Pattern Bonus: {pattern_bonus}"
             f"\n📈 Futures OI: {oi_emoji.get(oi_dir, '➖')} {oi_dir.upper()}\n\n"
             f"Entry:    ₹{entry:.2f}\n"
+            f"Margin:   {margin_str}\n"
             f"SL:       ₹{sl:.2f}\n"
             f"Target:   ₹{target:.2f}\n"
             f"R:R:      1:{rr:.1f}\n"

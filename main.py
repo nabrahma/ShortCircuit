@@ -481,8 +481,19 @@ def _update_terminal_log() -> None:
     try:
         logger.info("[CLEANUP] Updating terminal log.")
         subprocess.run([sys.executable, "dump_terminal_log.py"], check=False)
+        
+        # Phase 70: Auto-generate the noise-filtered markdown report
+        import datetime as _dt
+        import os
+        today_str = _dt.date.today().strftime('%Y-%m-%d')
+        log_path = f"logs/{today_str}_session.log"
+        if os.path.exists(log_path):
+            logger.info("[CLEANUP] Generating human-readable Markdown Session Report...")
+            subprocess.run([sys.executable, "tools/analyze_session_log.py", log_path], check=False)
+            logger.info(f"✅ Session Analysis Saved: reports/session_analysis_{today_str}.md")
+            
     except Exception as exc:
-        logger.error("[CLEANUP] Failed to update terminal log: %s", exc)
+        logger.error("[CLEANUP] Failed to update terminal logs / reports: %s", exc)
 
 
 async def _cleanup_runtime(ctx: Optional[RuntimeContext]):

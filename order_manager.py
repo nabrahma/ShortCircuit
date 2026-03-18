@@ -17,6 +17,7 @@ from datetime import datetime, timedelta
 from typing import Dict, Optional, Any
 import config
 from fyers_broker_interface import FyersBrokerInterface
+from ml_logger import get_ml_logger
 
 
 logger = logging.getLogger(__name__)
@@ -206,7 +207,35 @@ class OrderManager:
         send_alert: bool = False,
     ) -> None:
         """Shared close-path. Cleans state, releases capital, logs DB."""
-        # State cleanup (Move to END to allow outcome calculation)
+        
+        pos = self.active_positions.get(symbol)
+
+        # Phase 71: Update ML Outcome
+        if pos and pos.get('obs_id'):
+            try:
+                # Determine outcome label
+                outcome = "BREAKEVEN"
+                if pnl > 0: 
+                    outcome = "WIN"
+                elif pnl < 0: 
+                    outcome = "LOSS"
+                
+                # Calculate hold time (mins)
+                hold_time = 0
+                if pos.get('entry_time'):
+                    elapsed = (datetime.now() - pos['entry_time']).total_seconds()
+                    hold_time = int(elapsed / 60)
+
+                # ML Update
+                get_ml_logger().update_outcome(
+                    obs_id=pos['obs_id'],
+                    outcome=outcome,
+                    exit_price=exit_price,
+                    hold_time_mins=hold_time
+                )
+                logger.info(f"   [ML] Outcome recorded for {symbol} (obs={pos['obs_id']})")
+            except Exception as e:
+                logger.error(f"❌ [ML-OUTCOME] Failed for {symbol}: {e}")
 
         # FIX 5: use async release_slot (re-syncs Fyers margin after close)
         if self.capital:
@@ -623,6 +652,7 @@ class OrderManager:
                     'entry_time': datetime.now(),
                     'entry_price': ltp,
                     'stop_loss':  stop_price,
+                    'obs_id':     signal.get('obs_id'),  # Phase 71: ML Link
                     # Phase 51: G13 Targets for trade_manager monitoring
                     'tp_targets': self.compute_take_profits(ltp, signal)
                 }

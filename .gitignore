@@ -60,3 +60,6 @@ build/
 # ── Legacy / Unused Code (moved from root) ───────────────────
 legacy/
 
+# ── Local Reports (machine-specific) ──────────────────────────
+reports/
+

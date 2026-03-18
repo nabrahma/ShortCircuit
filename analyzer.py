@@ -975,7 +975,8 @@ class FyersAnalyzer:
             'signal_high': setup_high,        # Phase 51: Consistent naming
             'tick_size': 0.05,                # Phase 41.2: Default NSE tick
             'atr': atr,                       # Phase 41.2: For legacy simulation
-            'meta': meta_str
+            'meta': meta_str,
+            'obs_id': obs_id if 'obs_id' in locals() else None  # Phase 71: ML Link
         }
         
         # Phase 44.8 — new signal quality fields

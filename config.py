@@ -397,3 +397,34 @@ P52_BREAKEVEN_AFTER_TP1: bool = True       # Move SL to entry after TP1 hit
 P52_SL_MOVE_AFTER_TP2: bool = True         # Move SL to TP1 level after TP2 hit
 P52_CLEANUP_ON_STOP_FOCUS: bool = True     # Cancel pending orders on stop_focus()
 P52_HARD_STOP_RECONCILE_SECONDS: int = 30  # Active position SL poll interval (was 1800)
+
+# ============================================================================
+# PHASE 70: DYNAMIC ML CONFIGURATION OVERRIDE
+# ============================================================================
+import json
+import logging
+from pathlib import Path
+
+# Master Safety Switch: Set this to True in 1 month when enough data is collected
+P70_ML_DYNAMIC_OVERRIDE_ENABLED = False
+
+if P70_ML_DYNAMIC_OVERRIDE_ENABLED:
+    DYNAMIC_CONFIG_PATH = Path("data/ml/dynamic_config.json")
+    if DYNAMIC_CONFIG_PATH.exists():
+        try:
+            with open(DYNAMIC_CONFIG_PATH, 'r') as f:
+                dynamic_overrides = json.load(f)
+                
+            _overridden = 0
+            import sys
+            _current_module = sys.modules[__name__]
+            for key, val in dynamic_overrides.items():
+                if hasattr(_current_module, key):
+                    setattr(_current_module, key, val)
+                    _overridden += 1
+                    
+            if _overridden > 0:
+                print(f"✅ Loaded {_overridden} ML-optimized parameters from dynamic_config.json")
+                
+        except Exception as e:
+            print(f"❌ Failed to load dynamic_config.json: {e}")
