@@ -3,205 +3,262 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ShortCircuit — JARVIS HUD</title>
+    <title>ShortCircuit — AEGIS HUD</title>
     <script src="https://cdn.tailwindcss.com"></script>
-    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;500;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Space+Grotesk:wght@300;500;700&display=swap" rel="stylesheet">
     <style>
+        :root {
+            --neon-blue: #00D1FF;
+            --neon-green: #00FF9D;
+            --neon-red: #FF3B3B;
+            --glass-bg: rgba(10, 10, 15, 0.85);
+        }
         body {
-            background-color: #050505;
-            color: #e0e0e0;
+            background-color: #030305;
+            color: #d1d1d1;
             font-family: 'Space Grotesk', sans-serif;
             overflow: hidden;
+            background-image: 
+                radial-gradient(circle at 50% 50%, rgba(0, 209, 255, 0.05) 0%, transparent 70%),
+                linear-gradient(rgba(255, 255, 255, 0.02) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(255, 255, 255, 0.02) 1px, transparent 1px);
+            background-size: 100% 100%, 30px 30px, 30px 30px;
         }
+        .header-font { font-family: 'Orbitron', sans-serif; }
+        
         .glass {
-            background: rgba(20, 20, 25, 0.7);
-            backdrop-filter: blur(12px);
-            border: 1px solid rgba(255, 255, 255, 0.1);
-            box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.8);
+            background: var(--glass-bg);
+            backdrop-filter: blur(20px);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            box-shadow: 0 4px 30px rgba(0, 0, 0, 0.5);
+            position: relative;
         }
-        .neon-text {
-            text-shadow: 0 0 10px rgba(0, 255, 157, 0.6);
-        }
-        .neon-border-green {
-            border-color: #00FF9D;
-            box-shadow: 0 0 15px rgba(0, 255, 157, 0.3);
-        }
-        .neon-border-blue {
-            border-color: #00D1FF;
-            box-shadow: 0 0 15px rgba(0, 209, 255, 0.3);
-        }
-        .gate-card {
-            transition: all 0.3s ease;
-        }
-        .gate-inactive { opacity: 0.3; filter: grayscale(1); }
-        .gate-pass { opacity: 1; filter: grayscale(0); border-color: #00FF9D; color: #00FF9D; }
-        .gate-fail { opacity: 1; filter: grayscale(0); border-color: #FF3B3B; color: #FF3B3B; }
-        .gate-scanning { animation: pulse 1.5s infinite; }
-
-        @keyframes pulse {
-            0% { opacity: 0.4; }
-            50% { opacity: 1; box-shadow: 0 0 20px rgba(0, 209, 255, 0.5); }
-            100% { opacity: 0.4; }
-        }
-
-        .scanline {
-            width: 100%;
-            height: 2px;
-            background: rgba(0, 255, 157, 0.1);
+        .glass::before {
+            content: '';
             position: absolute;
-            top: 0;
-            animation: scan 4s linear infinite;
-            z-index: 10;
+            top: 0; left: 0; right: 0; height: 1px;
+            background: linear-gradient(90deg, transparent, rgba(255,255,255,0.2), transparent);
         }
 
-        @keyframes scan {
-            0% { top: 0; }
-            100% { top: 100%; }
+        .neon-glow-blue { filter: drop-shadow(0 0 8px rgba(0, 209, 255, 0.4)); }
+        .neon-glow-green { filter: drop-shadow(0 0 8px rgba(0, 255, 157, 0.4)); }
+
+        .gate-card {
+            transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+            clip-path: polygon(10% 0, 100% 0, 100% 70%, 90% 100%, 0 100%, 0 30%);
+            border-left: 3px solid rgba(255, 255, 255, 0.1);
+        }
+        .gate-inactive { background: rgba(255, 255, 255, 0.02); opacity: 0.4; }
+        .gate-pass { background: rgba(0, 255, 157, 0.05); border-left-color: var(--neon-green); opacity: 1; }
+        .gate-fail { background: rgba(255, 59, 59, 0.05); border-left-color: var(--neon-red); opacity: 1; }
+        .gate-scanning { animation: scan-pulse 2s infinite; border-left-color: var(--neon-blue); opacity: 0.8; }
+
+        @keyframes scan-pulse {
+            0%, 100% { background: rgba(0, 209, 255, 0.05); box-shadow: inset 0 0 10px rgba(0, 209, 255, 0.1); }
+            50% { background: rgba(0, 209, 255, 0.15); box-shadow: inset 0 0 20px rgba(0, 209, 255, 0.3); }
+        }
+
+        .scan-line {
+            position: absolute;
+            width: 100%; height: 100px;
+            background: linear-gradient(to bottom, transparent, rgba(0, 209, 255, 0.05), transparent);
+            top: -100px;
+            animation: scan-move 8s linear infinite;
+            pointer-events: none;
+        }
+        @keyframes scan-move {
+            0% { top: -100px; }
+            100% { top: 110%; }
+        }
+
+        .hud-border {
+            border: 2px solid rgba(0, 209, 255, 0.3);
+            border-image: linear-gradient(45deg, var(--neon-blue), transparent 40%, transparent 60%, var(--neon-blue)) 1;
+        }
+
+        .ticker-wrap {
+            mask-image: linear-gradient(90deg, transparent, black 15%, black 85%, transparent);
         }
     </style>
 </head>
-<body class="p-6 h-screen flex flex-col relative">
-    <div class="scanline"></div>
+<body class="p-8 h-screen flex flex-col relative overflow-hidden">
+    <div class="scan-line"></div>
 
-    <!-- Header -->
-    <header class="flex justify-between items-center mb-6 z-20">
-        <div>
-            <h1 class="text-3xl font-bold tracking-tighter text-white neon-text uppercase">ShortCircuit <span class="text-[#00D1FF]">Jarvis HUD</span></h1>
-            <p id="status-text" class="text-xs opacity-50 font-light tracking-widest mt-1 uppercase">SYSTEM: WAITING FOR BROADCAST...</p>
-        </div>
-        <div class="glass px-4 py-2 rounded-lg flex items-center space-x-6">
-            <div class="text-right">
-                <span class="block text-[10px] opacity-40 uppercase tracking-widest">Session PnL</span>
-                <span id="session-pnl" class="text-xl font-bold">₹0.00</span>
+    <!-- Top Bar -->
+    <header class="flex justify-between items-start mb-10 z-20">
+        <div class="flex flex-col">
+            <div class="flex items-center space-x-3">
+                <div class="w-10 h-10 border-2 border-[#00D1FF] flex items-center justify-center rotate-45">
+                    <span class="rotate-[-45deg] font-black text-[#00D1FF] text-xl">S</span>
+                </div>
+                <div>
+                    <h1 class="text-4xl font-black tracking-[0.2em] header-font text-white uppercase italic">AEGIS <span class="text-[#00D1FF] not-italic">HUD</span></h1>
+                    <div class="flex items-center space-x-2 mt-1">
+                        <span class="w-2 h-2 rounded-full bg-[#00D1FF] animate-pulse"></span>
+                        <p id="status-text" class="text-[10px] opacity-60 font-medium tracking-[0.3em] uppercase">LINKING NEURAL BRIDGE...</p>
+                    </div>
+                </div>
             </div>
-            <div class="h-8 w-[1px] bg-white/10"></div>
-            <div class="text-right">
-                <span class="block text-[10px] opacity-40 uppercase tracking-widest">Time</span>
-                <span id="clock" class="text-xl font-mono">00:00:00</span>
+        </div>
+
+        <div class="flex space-x-8">
+            <div class="glass px-6 py-3 rounded-sm border-r-4 border-[#00FF9D]">
+                <span class="block text-[9px] opacity-40 uppercase tracking-[0.2em] mb-1">Session P&L</span>
+                <span id="session-pnl" class="text-2xl font-bold header-font">&#8377;0.00</span>
+            </div>
+            <div class="glass px-6 py-3 rounded-sm border-r-4 border-[#00D1FF]">
+                <span class="block text-[9px] opacity-40 uppercase tracking-[0.2em] mb-1">System Time</span>
+                <span id="clock" class="text-2xl font-mono header-font">00:00:00</span>
             </div>
         </div>
     </header>
 
-    <!-- Main Content -->
-    <main class="grid grid-cols-12 gap-6 flex-grow z-20">
+    <!-- Content Grid -->
+    <div class="grid grid-cols-12 gap-8 flex-grow z-20 overflow-hidden">
         
-        <!-- Left Column: Active Monitoring -->
-        <div class="col-span-8 flex flex-col space-y-6">
+        <!-- Left: Monitoring -->
+        <div class="col-span-8 flex flex-col space-y-8">
             
-            <!-- Live Ticker & Signal Status -->
-            <div class="glass p-6 rounded-2xl flex-grow relative overflow-hidden">
-                <div class="absolute top-4 right-6 flex items-center space-x-2">
-                    <span class="w-2 h-2 rounded-full bg-green-400 animate-ping"></span>
-                    <span class="text-[10px] uppercase font-bold text-green-400 tracking-tighter">Live Insight</span>
-                </div>
-
-                <div class="mb-8">
-                    <span id="active-symbol" class="text-6xl font-black border-l-4 border-[#00D1FF] pl-4 uppercase tracking-tighter">---</span>
-                    <div class="flex items-center mt-2 space-x-4 pl-5">
-                        <span id="active-ltp" class="text-2xl font-light opacity-80">₹0.00</span>
-                        <span id="active-gain" class="text-sm px-2 py-0.5 rounded bg-white/10 text-white/60">+0.00%</span>
-                    </div>
-                </div>
-
-                <!-- Simulation/Chart Area Placeholder -->
-                <div class="w-full h-64 border border-white/5 rounded-xl bg-black/50 flex items-center justify-center">
-                    <p class="text-[10px] opacity-20 uppercase tracking-[0.5em]">Real-time Visualization Engine Offline</p>
-                </div>
-            </div>
-
-            <!-- Bottom Metrics -->
-            <div class="grid grid-cols-3 gap-6">
-                <div class="glass p-4 rounded-xl border-b-2 border-white/5">
-                    <span class="text-[10px] opacity-40 uppercase">RVOL Gauge</span>
-                    <div class="flex items-end space-x-2 mt-2">
-                        <span id="metric-rvol" class="text-3xl font-bold">0.0</span>
-                        <span class="text-xs mb-1 opacity-40 italic">x avg</span>
-                    </div>
-                </div>
-                <div class="glass p-4 rounded-xl border-b-2 border-white/5">
-                    <span class="text-[10px] opacity-40 uppercase">VWAP Slope</span>
-                    <div class="flex items-end space-x-2 mt-2">
-                        <span id="metric-slope" class="text-3xl font-bold">0.0</span>
-                        <span class="text-xs mb-1 opacity-40 italic">bp/m</span>
-                    </div>
-                </div>
-                <div class="glass p-4 rounded-xl border-b-2 border-white/5">
-                    <span class="text-[10px] opacity-40 uppercase">Nifty Trend</span>
-                    <div id="metric-nifty" class="text-xl font-bold mt-2 uppercase text-[#00D1FF]">Unknown</div>
-                </div>
-            </div>
-        </div>
-
-        <!-- Right Column: Gate HUD -->
-        <div class="col-span-4 flex flex-col space-y-6">
-            <div class="glass p-6 rounded-2xl flex-grow">
-                <h2 class="text-xs font-bold uppercase tracking-[0.2em] mb-6 opacity-60 border-b border-white/10 pb-2">Validator Pulse (G1-G13)</h2>
+            <!-- Main Display -->
+            <div class="glass p-10 rounded-sm flex-grow border-l-2 border-[#00D1FF] relative overflow-hidden group">
+                <!-- Decorative Corners -->
+                <div class="absolute top-0 left-0 w-4 h-4 border-t-2 border-l-2 border-[#00D1FF]"></div>
+                <div class="absolute bottom-0 right-0 w-4 h-4 border-b-2 border-r-2 border-[#00D1FF]"></div>
                 
-                <div class="grid grid-cols-2 gap-3" id="gate-container">
-                    <!-- Gates generated by JS -->
+                <div class="absolute top-6 right-8 flex items-center space-x-2">
+                    <div class="px-2 py-0.5 border border-[#00FF9D]/30 bg-[#00FF9D]/5 rounded-xs">
+                        <span class="text-[9px] font-bold text-[#00FF9D] uppercase tracking-widest">Live Telemetry</span>
+                    </div>
+                </div>
+
+                <div class="flex flex-col h-full">
+                    <div class="mb-10">
+                        <div class="flex items-end space-x-6">
+                            <span id="active-symbol" class="text-8xl font-black header-font text-white uppercase tracking-tighter opacity-90 transition-all duration-500">---</span>
+                            <span id="active-gain" class="text-2xl font-bold text-[#00FF9D] mb-4">+0.00%</span>
+                        </div>
+                        <div class="h-0.5 w-full bg-gradient-to-r from-[#00D1FF] to-transparent mt-2"></div>
+                        <div id="active-ltp" class="text-4xl font-light opacity-60 mt-4 header-font pr-4">&#8377;0.00</div>
+                    </div>
+
+                    <!-- Visualizer Placeholder -->
+                    <div class="flex-grow border border-white/5 bg-black/40 rounded-sm relative group">
+                        <div class="absolute inset-0 flex items-center justify-center">
+                            <div class="flex flex-col items-center opacity-20 group-hover:opacity-40 transition-opacity">
+                                <svg class="w-20 h-20 text-[#00D1FF] animate-spin-slow" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="0.5" d="M11 3.055A9.001 9.001 0 1020.945 13H11V3.055z" />
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="0.5" d="M20.488 9H15V3.512A9.025 9.025 0 0120.488 9z" />
+                                </svg>
+                                <span class="text-[10px] uppercase tracking-[1em] mt-4">Aegis Visualization Engine Idle</span>
+                            </div>
+                        </div>
+                    </div>
                 </div>
             </div>
 
-            <!-- Trade History / Logs -->
-            <div class="glass p-4 rounded-2xl h-48 overflow-hidden relative">
-                <span class="text-[8px] uppercase absolute top-2 right-4 opacity-30">Neural Log</span>
-                <div id="log-container" class="text-[10px] space-y-1 font-mono opacity-80 mt-2">
-                    <div class="text-[#00D1FF]">[SYSTEM] Initializing HUD V1...</div>
+            <!-- Dashboard Bottom Widgets -->
+            <div class="grid grid-cols-3 gap-8">
+                <div class="glass p-6 border-b-2 border-[#00FF9D]/20">
+                    <p class="text-[9px] uppercase tracking-widest opacity-40 mb-2">Rel. Volume Z</p>
+                    <div class="flex items-baseline space-x-2">
+                        <span id="metric-rvol" class="text-4xl font-bold header-font text-[#00FF9D]">0.0</span>
+                        <span class="text-xs opacity-30 select-none">SIGMA</span>
+                    </div>
+                </div>
+                <div class="glass p-6 border-b-2 border-[#00D1FF]/20">
+                    <p class="text-[9px] uppercase tracking-widest opacity-40 mb-2">VWAP Slope Velocity</p>
+                    <div class="flex items-baseline space-x-2">
+                        <span id="metric-slope" class="text-4xl font-bold header-font text-[#00D1FF]">0.0</span>
+                        <span class="text-xs opacity-30 select-none">BP/M</span>
+                    </div>
+                </div>
+                <div class="glass p-6 border-b-2 border-white/10">
+                    <p class="text-[9px] uppercase tracking-widest opacity-40 mb-2">Benchmark Correlation</p>
+                    <div id="metric-nifty" class="text-2xl font-bold header-font uppercase text-white/80">NEUTRAL</div>
                 </div>
             </div>
         </div>
-    </main>
+
+        <!-- Right: Control/Logs -->
+        <div class="col-span-4 flex flex-col space-y-8 h-full">
+            
+            <!-- Gate HUD -->
+            <div class="glass p-8 flex flex-col h-2/3">
+                <div class="flex justify-between items-center mb-6 border-b border-white/5 pb-4">
+                    <h2 class="text-xs font-bold uppercase tracking-[0.3em] text-[#00D1FF]">Gate Pulse</h2>
+                    <span class="text-[8px] opacity-30 font-mono">V1.0.4-AEGIS</span>
+                </div>
+                
+                <div class="grid grid-cols-2 gap-4 auto-rows-fr overflow-y-auto pr-2" id="gate-container">
+                    <!-- Gates -->
+                </div>
+            </div>
+
+            <!-- Holographic Log -->
+            <div class="glass p-6 flex flex-col h-1/3 border-t-2 border-[#00D1FF]/30">
+                <div class="flex items-center justify-between mb-3">
+                    <p class="text-[10px] font-bold uppercase tracking-widest opacity-60">System Feed</p>
+                    <div class="h-1 w-12 bg-[#00D1FF]/20"></div>
+                </div>
+                <div id="log-container" class="text-[11px] space-y-2 font-mono overflow-y-auto pr-2 flex-grow scroll-smooth">
+                    <div class="text-[#00D1FF] opacity-50">>> AEGIS CORE LOADED...</div>
+                    <div class="text-[#00D1FF] opacity-50">>> WAITING FOR NEURAL BRIDGE...</div>
+                </div>
+            </div>
+        </div>
+    </div>
 
     <script>
         const gates = [
-            { id: 'G1', name: 'Gain/Limits' },
-            { id: 'G2', name: 'RVOL Validity' },
-            { id: 'G3', name: 'Circuit Guard' },
-            { id: 'G4', name: 'Momentum' },
-            { id: 'G5', name: 'Exhaustion' },
-            { id: 'G6', name: 'Confluence' },
-            { id: 'G7', name: 'Market Regime' },
-            { id: 'G8', name: 'Session Cooldown' },
-            { id: 'G9', name: 'HTF Trend' },
-            { id: 'G10', name: 'Spread Guard' },
-            { id: 'G11', name: 'Timing Gate' },
-            { id: 'G12', name: 'Candle Confirmation' },
-            { id: 'G13', name: 'Risk Scale' },
+            { id: 'G1', name: 'GAIN GUARD' },
+            { id: 'G2', name: 'RVOL VALID' },
+            { id: 'G3', name: 'CIRCUIT BD' },
+            { id: 'G4', name: 'MOMENTUM' },
+            { id: 'G5', name: 'EXHAUSTION' },
+            { id: 'G6', name: 'CONFLUENCE' },
+            { id: 'G7', name: 'MARKET REG.' },
+            { id: 'G8', name: 'COOLDOWN' },
+            { id: 'G9', name: 'HTF TREND' },
+            { id: 'G10', name: 'SPREAD LMT' },
+            { id: 'G11', name: 'TIME GATE' },
+            { id: 'G12', name: 'CANDLE CF' },
+            { id: 'G13', name: 'RISK SCALE' },
         ];
 
         const container = document.getElementById('gate-container');
         gates.forEach(g => {
             const div = document.createElement('div');
             div.id = `gate-${g.id}`;
-            div.className = 'gate-card border border-white/10 p-3 rounded-lg gate-inactive flex flex-col justify-between h-16';
+            div.className = 'gate-card p-4 gate-inactive flex flex-col justify-center';
             div.innerHTML = `
-                <span class="text-[8px] opacity-50 uppercase tracking-tighter">${g.id}</span>
-                <span class="text-[10px] font-bold uppercase overflow-hidden whitespace-nowrap">${g.name}</span>
+                <span class="text-[9px] opacity-40 font-bold mb-1">${g.id}</span>
+                <span class="text-[11px] font-bold uppercase tracking-wider overflow-hidden">${g.name}</span>
             `;
             container.appendChild(div);
         });
 
-        // Clock
+        // Clock Update
         setInterval(() => {
             const now = new Date();
             document.getElementById('clock').innerText = now.toTimeString().split(' ')[0];
         }, 1000);
 
-        // WebSockets
+        // WebSocket Link
         const ws = new WebSocket(`ws://${window.location.host}/ws`);
         const log = document.getElementById('log-container');
 
-        function addLog(text, color = 'white') {
+        function addLog(text, color = '#00D1FF', opacity = 1) {
             const div = document.createElement('div');
             div.style.color = color;
-            div.innerText = `[${new Date().toLocaleTimeString()}] ${text}`;
+            div.style.opacity = opacity;
+            div.innerHTML = `<span class="opacity-40">>></span> ${text}`;
             log.prepend(div);
-            if (log.children.length > 10) log.removeChild(log.lastChild);
+            if (log.children.length > 20) log.removeChild(log.lastChild);
         }
 
         ws.onopen = () => {
-            document.getElementById('status-text').innerText = 'SYSTEM: NEURAL BRIDGE ACTIVE (8555)';
-            addLog('Connected to Neural Bridge.', '#00FF9D');
+            document.getElementById('status-text').innerText = 'LINK ESTABLISHED: AEGIS ACTIVE';
+            addLog('Neural Link Secured.', '#00FF9D');
         };
 
         ws.onmessage = (event) => {
@@ -216,26 +273,32 @@
                     el.classList.add(statusClass);
                 }
             } else if (type === 'HEARTBEAT') {
-                document.getElementById('session-pnl').innerText = `₹${payload.pnl.toFixed(2)}`;
-                if (payload.pnl < 0) document.getElementById('session-pnl').className = 'text-xl font-bold text-red-500';
-                else if (payload.pnl > 0) document.getElementById('session-pnl').className = 'text-xl font-bold text-[#00FF9D]';
+                document.getElementById('session-pnl').innerHTML = `&#8377;${payload.pnl.toLocaleString('en-IN', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
+                if (payload.pnl < 0) document.getElementById('session-pnl').className = 'text-2xl font-bold header-font text-red-500';
+                else if (payload.pnl > 0) document.getElementById('session-pnl').className = 'text-2xl font-bold header-font text-[#00FF9D]';
             } else if (type === 'SYMBOL_UPDATE') {
                 document.getElementById('active-symbol').innerText = payload.symbol;
-                document.getElementById('active-ltp').innerText = `₹${payload.ltp.toFixed(2)}`;
-                document.getElementById('active-gain').innerText = `${payload.gain_pct.toFixed(2)}%`;
+                document.getElementById('active-ltp').innerHTML = `&#8377;${payload.ltp.toLocaleString('en-IN', {minimumFractionDigits: 2})}`;
+                
+                const gainEl = document.getElementById('active-gain');
+                const gain = payload.gain_pct.toFixed(2);
+                gainEl.innerText = `${gain}%`;
+                gainEl.className = `text-2xl font-bold mb-4 ${payload.gain_pct >= 0 ? 'text-[#00FF9D]' : 'text-red-500'}`;
+
                 document.getElementById('metric-rvol').innerText = payload.rvol.toFixed(1);
                 document.getElementById('metric-slope').innerText = payload.slope.toFixed(2);
                 document.getElementById('metric-nifty').innerText = payload.nifty_trend;
             } else if (type === 'SYSTEM_ALERT') {
-                addLog(payload.msg, '#FFD700'); // Gold color for system alerts
+                addLog(payload.msg, '#FFD700');
+            } else if (type === 'ORDER_EVENT') {
+                const color = payload.type === 'ENTRY' ? '#00FF9D' : '#FFD700';
+                addLog(`[ORDER] ${payload.type} ${payload.symbol} @ \u20b9${payload.ltp || ''}`, color);
             }
-            
-            addLog(`BROADCAST: ${type}`, '#00D1FF');
         };
 
         ws.onclose = () => {
-            document.getElementById('status-text').innerText = 'SYSTEM: NEURAL BRIDGE OFFLINE';
-            addLog('Lost connection to neural bridge.', '#FF3B3B');
+            document.getElementById('status-text').innerText = 'BRIDGE COLLAPSED: RECONNECTING...';
+            addLog('Critical: Bridge Connection Lost.', '#FF3B3B');
         };
     </script>
 </body>
