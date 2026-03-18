@@ -14,9 +14,13 @@
             --card-bg: rgba(13, 17, 23, 0.8);
         }
         
-        * { scrollbar-width: thin; scrollbar-color: var(--cyan) transparent; }
-        ::-webkit-scrollbar { width: 4px; }
-        ::-webkit-scrollbar-thumb { background: var(--cyan); border-radius: 10px; }
+        * { 
+            scrollbar-width: none; /* Firefox */
+            -ms-overflow-style: none; /* IE and Edge */
+        }
+        ::-webkit-scrollbar { 
+            display: none; /* Chrome, Safari and Opera */
+        }
 
         body {
             background-color: var(--bg-dark);
