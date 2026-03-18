@@ -428,3 +428,7 @@ if P70_ML_DYNAMIC_OVERRIDE_ENABLED:
                 
         except Exception as e:
             print(f"❌ Failed to load dynamic_config.json: {e}")
+
+# Phase 72: ShortCircuit "Jarvis" HUD (V1)
+P72_DASHBOARD_ENABLED = True
+P72_DASHBOARD_PORT = 8555

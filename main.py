@@ -405,6 +405,13 @@ async def _trading_loop(shutdown_event: asyncio.Event, ctx: RuntimeContext):
                 "last_scan_time": datetime.now(),
                 "candidate_count": len(candidates) if candidates else 0,
             }
+            
+            # Phase 72: Jarvis Heartbeat
+            from dashboard_bridge import get_dashboard_bridge
+            get_dashboard_bridge().broadcast("HEARTBEAT", {
+                "pnl": ctx.trade_manager.daily_pnl if hasattr(ctx.trade_manager, 'daily_pnl') else 0.0,
+                "status": "SCANNING"
+            })
 
             for cand in candidates or []:
                 if shutdown_event.is_set():
@@ -724,6 +731,18 @@ async def main() -> int:
                 eod_watchdog(shutdown_event),
                 name="eod_watchdog",
             )
+            # Phase 72: Jarvis HUD (V1)
+            if config.P72_DASHBOARD_ENABLED:
+                from dashboard_server import start_dashboard_server
+                import threading
+                # Running FastAPI in a daemon thread to keep it fully non-blocking
+                dashboard_thread = threading.Thread(
+                    target=start_dashboard_server,
+                    kwargs={'port': config.P72_DASHBOARD_PORT},
+                    daemon=True
+                )
+                dashboard_thread.start()
+                logger.info(f"Phase 72: Jarvis HUD V1 deployed at http://127.0.0.1:{config.P72_DASHBOARD_PORT}")
     except* Exception as eg:
         logger.critical("[SUPERVISOR] TaskGroup failed: %s", eg)
         for i, exc in enumerate(eg.exceptions):
