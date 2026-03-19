@@ -33,7 +33,7 @@ class MarketSession:
         self.session_state = None
         self.morning_context = None
 
-    def initialize_session(self):
+    async def initialize_session(self):
         """
         Main entry point. Analyzes time and handles waiting/logic.
         Returns: session_context (dict) or None
@@ -44,15 +44,15 @@ class MarketSession:
         logger.info(f"🕐 Initializing Session. Detected State: {state}")
         
         if state == 'PRE_MARKET':
-            self.handle_premarket()
+            await self.handle_premarket()
         elif state == 'EARLY_MARKET':
-            self.handle_early_market()
+            await self.handle_early_market()
         elif state == 'MID_MARKET':
             return self.handle_mid_market()
         elif state == 'EOD_WINDOW':
             self.handle_eod_window()
         elif state == 'POST_MARKET':
-            self.handle_postmarket()
+            await self.handle_postmarket()
             
         return None
 
@@ -109,7 +109,7 @@ class MarketSession:
 
     # ── HANDLERS ──────────────────────────────────────────────────
 
-    def handle_premarket(self):
+    async def handle_premarket(self):
         now = datetime.now(IST)
         wait_seconds = self._seconds_until(self.MARKET_OPEN)
         wait_mins = wait_seconds / 60
@@ -123,13 +123,13 @@ class MarketSession:
         self._notify(msg)
         logger.info(f"💤 PRE-MARKET: Sleeping {wait_seconds}s until 9:15...")
         
-        time.sleep(wait_seconds)
+        await asyncio.sleep(wait_seconds)
         
         # Transition
         self.session_state = 'EARLY_MARKET'
-        self.handle_early_market()
+        await self.handle_early_market()
 
-    def handle_early_market(self):
+    async def handle_early_market(self):
         now = datetime.now(IST)
         wait_seconds = self._seconds_until(self.SAFE_TRADE_START)
         wait_mins = wait_seconds / 60
@@ -148,7 +148,7 @@ class MarketSession:
         # Optional: We could run a loop here to 'warm up' scanner without trading,
         # but for simplicity/reliability, we'll sleep or use main loop with disabled flag.
         # PRD suggests sleep.
-        time.sleep(wait_seconds)
+        await asyncio.sleep(wait_seconds)
         
         # Transition
         self.session_state = 'MID_MARKET'
@@ -186,7 +186,7 @@ class MarketSession:
         set_trading_enabled(False)
         # Just return, main loop handles monitoring (reconciliation)
 
-    def handle_postmarket(self):
+    async def handle_postmarket(self):
         now = datetime.now(IST)
         next_open = self._next_market_open_time()
         hours_until = (next_open - now).total_seconds() / 3600
@@ -203,14 +203,12 @@ class MarketSession:
         if MARKET_SESSION_CONFIG.get('allow_postmarket_sleep', True):
             sleep_sec = (next_open - now).total_seconds()
             logger.info(f"💤 Sleeping {sleep_sec}s until next open...")
-            time.sleep(sleep_sec)
+            await asyncio.sleep(sleep_sec)
             
             # Wake up -> Reset
             self.session_state = 'PRE_MARKET' # Will naturally flow
             # Recursively restart? Or just return and let main loop catch up?
-            # Ideally main loop detects time. But initialize_session is called ONCE.
-            # So if we sleep here, we should re-call logic.
-            return self.initialize_session()
+            return await self.initialize_session()
         else:
             logger.info("👋 Auto-sleep disabled. Exiting.")
             sys.exit(0)

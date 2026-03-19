@@ -175,7 +175,7 @@ async def _initialize_runtime() -> RuntimeContext:
 
     market_session = MarketSession(fyers_client, bot)
     logger.info("[INIT] Evaluating market session...")
-    morning_context = market_session.initialize_session()
+    morning_context = await market_session.initialize_session()
     mh = morning_context["high"] if morning_context else None
     ml = morning_context["low"] if morning_context else None
 
@@ -633,6 +633,23 @@ async def _run_startup_validation(ctx: RuntimeContext) -> None:
 
 async def main() -> int:
     _configure_logging()
+
+    # Phase 72: AEGIS HUD (V1)
+    if getattr(config, 'P72_DASHBOARD_ENABLED', False):
+        try:
+            from dashboard_server import start_dashboard_server
+            import threading
+            # Running FastAPI in a daemon thread to keep it fully non-blocking
+            dashboard_thread = threading.Thread(
+                target=start_dashboard_server,
+                kwargs={'port': config.P72_DASHBOARD_PORT},
+                daemon=True
+            )
+            dashboard_thread.start()
+            logger.info(f"Phase 72: AEGIS HUD V1 deployed at http://127.0.0.1:{config.P72_DASHBOARD_PORT}")
+        except Exception as _e:
+            logger.error(f"Failed to start AEGIS HUD: {_e}")
+
     shutdown_event = asyncio.Event()
     loop = asyncio.get_running_loop()
     _install_signal_handlers(loop, shutdown_event)
@@ -686,6 +703,11 @@ async def main() -> int:
         async def _restart_recovery():
             await asyncio.to_thread(ctx.startup_recovery.scan_orphaned_trades)
 
+        _update_terminal_log()
+
+        # PRD-008: periodic terminal log update
+        _update_terminal_log()
+
         async with asyncio.TaskGroup() as tg:
             tg.create_task(
                 _supervised(
@@ -731,18 +753,6 @@ async def main() -> int:
                 eod_watchdog(shutdown_event),
                 name="eod_watchdog",
             )
-            # Phase 72: Jarvis HUD (V1)
-            if config.P72_DASHBOARD_ENABLED:
-                from dashboard_server import start_dashboard_server
-                import threading
-                # Running FastAPI in a daemon thread to keep it fully non-blocking
-                dashboard_thread = threading.Thread(
-                    target=start_dashboard_server,
-                    kwargs={'port': config.P72_DASHBOARD_PORT},
-                    daemon=True
-                )
-                dashboard_thread.start()
-                logger.info(f"Phase 72: Jarvis HUD V1 deployed at http://127.0.0.1:{config.P72_DASHBOARD_PORT}")
     except* Exception as eg:
         logger.critical("[SUPERVISOR] TaskGroup failed: %s", eg)
         for i, exc in enumerate(eg.exceptions):
