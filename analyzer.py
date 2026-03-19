@@ -65,8 +65,9 @@ class FyersAnalyzer:
     Orchestrates technical analysis, pattern recognition, and risk checks.
     """
     
-    def __init__(self, fyers, morning_high=None, morning_low=None):
+    def __init__(self, fyers, broker=None, morning_high=None, morning_low=None):
         self.fyers = fyers
+        self.broker = broker
         self.market_context = MarketContext(fyers, morning_high, morning_low)
         self.signal_manager = get_signal_manager()
         self.htf_confluence = HTFConfluence(fyers)
@@ -170,14 +171,15 @@ class FyersAnalyzer:
         # Standardize Gain Calculation
         pc = 0
         try:
-            snapshot = self.fyers.get_quote_cache_snapshot()
-            if symbol in snapshot:
-                entry = snapshot[symbol]
-                pc = entry.get('pc', 0)
-                if pc == 0 and entry.get('ch_oc', 0) != 0:
-                    ltp_val = entry.get('ltp', ltp)
-                    ch_oc = entry.get('ch_oc')
-                    pc = ltp_val / (1 + (ch_oc / 100))
+            if self.broker:
+                snapshot = self.broker.get_quote_cache_snapshot()
+                if symbol in snapshot:
+                    entry = snapshot[symbol]
+                    pc = entry.get('pc', 0)
+                    if pc == 0 and entry.get('ch_oc', 0) != 0:
+                        ltp_val = entry.get('ltp', ltp)
+                        ch_oc = entry.get('ch_oc')
+                        pc = ltp_val / (1 + (ch_oc / 100))
         except Exception:
             pass
 
@@ -977,6 +979,11 @@ class FyersAnalyzer:
                 "confirmations": pattern_desc.split(" + ")[1:] if " + " in pattern_desc else [],
                 
                 "nifty_trend": self.market_context.get_trend_label() if hasattr(self.market_context, 'get_trend_label') else "UNKNOWN",
+                "atr": atr,
+                "sl_price": sl_price,
+                "tp1_price": tp1,
+                "tp2_price": tp2,
+                "tp3_price": tp3,
             }
             
             obs_id = ml_logger.log_observation(symbol, ltp, features)

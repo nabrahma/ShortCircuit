@@ -84,6 +84,13 @@ FEATURE_COLUMNS = [
     "sector",           # Extracted from symbol if possible
     "time_bucket",      # OPEN/MID/CLOSE (market phase)
     
+    # Risk Parameters (for EOD Simulation)
+    "atr",
+    "sl_price",
+    "tp1_price",
+    "tp2_price",
+    "tp3_price",
+    
     # OI (if available)
     "oi",               # Open interest
     "oi_change_pct",    # OI change from previous
@@ -220,6 +227,13 @@ class MLDataLogger:
             "nifty_trend": features.get("nifty_trend", "UNKNOWN"),
             "sector": self._extract_sector(symbol),
             "time_bucket": time_bucket,
+            
+            # Risk Parameters
+            "atr": features.get("atr", 0),
+            "sl_price": features.get("sl_price", 0),
+            "tp1_price": features.get("tp1_price", 0),
+            "tp2_price": features.get("tp2_price", 0),
+            "tp3_price": features.get("tp3_price", 0),
             
             "oi": features.get("oi", 0),
             "oi_change_pct": features.get("oi_change_pct", 0),

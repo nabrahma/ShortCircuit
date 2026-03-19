@@ -20,7 +20,8 @@ def test_gain_mismatch_standardization():
         'NSE:ZYDWELL-EQ': {'pc': 100.0, 'ltp': 115.0}
     }
     
-    analyzer = FyersAnalyzer(mock_fyers)
+    # In the new Phase 72 architecture, analyzer needs the broker instance for PC access
+    analyzer = FyersAnalyzer(fyers=mock_fyers, broker=mock_fyers)
     
     # Create simple DF starting at Open=96
     df = pd.DataFrame([

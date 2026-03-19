@@ -179,11 +179,6 @@ async def _initialize_runtime() -> RuntimeContext:
     mh = morning_context["high"] if morning_context else None
     ml = morning_context["low"] if morning_context else None
 
-
-    analyzer = FyersAnalyzer(fyers_client, morning_high=mh, morning_low=ml)
-    bot.signal_manager = analyzer.signal_manager
-    bot.market_session = market_session
-
     db_manager = DatabaseManager()
     await db_manager.initialize()
 
@@ -208,6 +203,10 @@ async def _initialize_runtime() -> RuntimeContext:
     await broker.initialize()
     # PRD-3: Wire Telegram bot to broker for WS cache alerts
     broker.set_telegram(bot)
+
+    analyzer = FyersAnalyzer(fyers_client, broker=broker, morning_high=mh, morning_low=ml)
+    bot.signal_manager = analyzer.signal_manager
+    bot.market_session = market_session
 
     # ── PRD-007: Phase 44.7 + Startup Gate ───────────────────────────
     # 1. Create scanner with broker reference

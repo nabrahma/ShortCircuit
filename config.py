@@ -405,7 +405,7 @@ import json
 import logging
 from pathlib import Path
 
-# Master Safety Switch: Set this to True in 1 month when enough data is collected
+# Master Safety Switch: Set this to True to enable weekend-tuned parameters
 P70_ML_DYNAMIC_OVERRIDE_ENABLED = False
 
 if P70_ML_DYNAMIC_OVERRIDE_ENABLED:
