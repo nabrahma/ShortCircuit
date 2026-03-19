@@ -49,12 +49,13 @@ class SignalManager:
             self.current_date = today
             self.stats = defaultdict(int)
     
-    def can_signal(self, symbol):
+    def can_signal(self, symbol, is_execution=False):
         """
         Check if we can send a signal for this symbol.
         
         Args:
             symbol: The stock symbol (e.g., "NSE:HINDCOPPER-EQ")
+            is_execution: If True, skips discovery-level cooldown check (Phase 73 Fix)
             
         Returns:
             tuple: (allowed, reason)
@@ -63,7 +64,7 @@ class SignalManager:
             self._reset_if_new_day()
             now = datetime.now()
             
-            # Check 0: Execution failure cooldown (set on broker failures, not just normal cooldown)
+            # Check 0: Execution failure cooldown (Hard block on broker errors)
             cd = self._exec_cooldowns.get(symbol)
             if cd:
                 now_ts = datetime.now()
@@ -80,8 +81,8 @@ class SignalManager:
                 self.stats['blocked_paused'] += 1
                 return False, f"Trading paused: Max session loss reached (₹{self.daily_pnl:.2f})"
             
-            # Check 3: Per-symbol cooldown
-            if symbol in self.last_signal_time:
+            # Check 3: Per-symbol cooldown (Discovery only)
+            if not is_execution and symbol in self.last_signal_time:
                 unlock_at = self.last_signal_time[symbol]
                 if now < unlock_at:
                     remaining = (unlock_at - now).total_seconds() / 60

@@ -157,6 +157,8 @@
 
         const ws = new WebSocket(`ws://${window.location.host}/ws`);
 
+        const getSafeId = (sym) => `card-${sym.replace(/[^a-z0-9]/gi, '_')}`;
+
         function addLog(msg, level = 'INFO') {
             const div = document.createElement('div');
             let color = 'rgba(255,255,255,0.6)';
@@ -183,7 +185,7 @@
                 // Clear symbols not in this batch
                 for (let sym of candidates.keys()) {
                     if (!payload.candidates.includes(sym)) {
-                        const el = document.getElementById(`card-${sym}`);
+                        const el = document.getElementById(getSafeId(sym));
                         if (el) el.remove();
                         candidates.delete(sym);
                     }
@@ -200,17 +202,22 @@
             }
             else if (type === 'GATE_UPDATE') {
                 const sym = payload.symbol;
-                const card = document.getElementById(`card-${sym}`);
+                const card = document.getElementById(getSafeId(sym));
                 if (card) {
                     const dot = card.querySelector(`.g-dot.${payload.gate.toLowerCase()}`);
                     if (dot) {
                         dot.className = `g-dot ${payload.gate.toLowerCase()} gate-dot ${payload.status.toLowerCase()}`;
                     }
+                    if (payload.status === 'FAIL') {
+                        card.classList.add('rejected');
+                        const reason = card.querySelector('.reason');
+                        if (reason) reason.innerText = payload.value || '';
+                    }
                 }
             }
             else if (type === 'AMT_UPDATE') {
                 const sym = payload.symbol;
-                const card = document.getElementById(`card-${sym}`);
+                const card = document.getElementById(getSafeId(sym));
                 if (card) updateProfile(card, payload);
             }
             else if (type === 'HEARTBEAT') {
@@ -222,7 +229,7 @@
         function createCard(sym) {
             const clone = template.content.cloneNode(true);
             const card = clone.querySelector('.candidate-card');
-            card.id = `card-${sym}`;
+            card.id = getSafeId(sym);
             card.querySelector('.symbol').innerText = sym;
             
             // Init Chart
@@ -238,7 +245,7 @@
         }
 
         function updateCard(sym, data) {
-            const card = document.getElementById(`card-${sym}`);
+            const card = document.getElementById(getSafeId(sym));
             if (!card) return;
 
             if (data.ltp) card.querySelector('.ltp').innerText = `₹${data.ltp.toFixed(2)}`;

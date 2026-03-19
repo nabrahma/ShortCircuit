@@ -10,7 +10,9 @@ def profile_analyzer():
     return ProfileAnalyzer()
 
 @pytest.fixture
-def gm_logic():
+def gm_logic(monkeypatch):
+    # Reset some key config to known states to avoid previous test pollution
+    monkeypatch.setattr(config, 'SCANNER_GAIN_MIN_PCT', 7.5)
     return GodModeAnalyst()
 
 def test_volume_profile_calculation(profile_analyzer):
@@ -47,7 +49,7 @@ def test_vah_rejection_pattern(gm_logic):
     pattern, _ = gm_logic.detect_structure_advanced(df, vah=vah)
     assert pattern == "VAH_REJECTION"
 
-def test_g5_vah_rejection_bypass(gm_logic):
+def test_g5_vah_rejection_bypass(gm_logic, monkeypatch):
     """Verify G5 passes on VAH Rejection even if below VAH."""
     # VAH is 105. Current close is 99.8.
     # Normally this is a price_below_vah rejection.
@@ -61,10 +63,10 @@ def test_g5_vah_rejection_bypass(gm_logic):
     
     profile = {'vah': 105.0} # vVAH
     
-    # Setup config for success
-    config.G5_STRETCH_LOW_PCT = 1.0
-    config.SCANNER_GAIN_MIN_PCT = 1.0
-    config.P51_G5_GATE_B_USE_ALLDAY_HIGH = False
+    # Setup config for success via monkeypatch
+    monkeypatch.setattr(config, 'G5_STRETCH_LOW_PCT', 1.0)
+    monkeypatch.setattr(config, 'SCANNER_GAIN_MIN_PCT', 1.0)
+    monkeypatch.setattr(config, 'P51_G5_GATE_B_USE_ALLDAY_HIGH', False)
     
     res = gm_logic.is_exhaustion_at_stretch(candles, profile, gain_pct=5.0, vwap_sd=2.5)
     print(f"G5 Result: {res}")

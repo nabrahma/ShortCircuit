@@ -492,7 +492,7 @@ class FocusEngine:
                     # ── SLOT GUARD (Signal Manager) ──────────────────────────────────
                     analyzer = getattr(self, 'analyzer', None)
                     if analyzer and hasattr(analyzer, 'signal_manager'):
-                        can_trade, reason = analyzer.signal_manager.can_signal(symbol)
+                        can_trade, reason = analyzer.signal_manager.can_signal(symbol, is_execution=True)
                         if not can_trade:
                             logger.info(f"🚫 [SLOT BLOCKED] {symbol} — {reason}")
                             if _gr is not None:

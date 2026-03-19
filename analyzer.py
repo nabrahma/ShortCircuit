@@ -228,7 +228,7 @@ class FyersAnalyzer:
             return None
 
         # ── G1: Constraints & Kill Backdoor (Phase 66 Adaptive) ──────
-        min_gain = config.SCANNER_GAIN_MIN_PCT
+        min_gain = getattr(config, 'P65_G1_NORMAL_THRESHOLD', 9.0)
         amt_failing_auction = False
         if getattr(config, 'P65_AMT_ENABLED', False):
             if profile_rejection and gain_pct >= config.P65_G1_NET_GAIN_THRESHOLD:
@@ -243,11 +243,8 @@ class FyersAnalyzer:
         # Override gain check for AMT
         if gain_pct < min_gain:
             ok = False
-            msg = f"Insufficient Gain: {gain_pct:.1f}% (need {min_gain}%)"
-        elif gain_pct < config.SCANNER_GAIN_MIN_PCT and not amt_failing_auction:
-             ok = False
-             msg = f"Low Gain {gain_pct:.1f}% requires AMT Profile Rejection"
-
+            msg = f"Insufficient Gain: {gain_pct:.1f}% (need {min_gain}% {'with AMT' if amt_failing_auction else ''})"
+        
         gr.g1_pass = ok
         gr.g1_value = round(gain_pct, 2)
         get_dashboard_bridge().broadcast("GATE_UPDATE", {"gate": "G1", "status": "PASS" if ok else "FAIL"})
@@ -733,17 +730,49 @@ class FyersAnalyzer:
 
         # Standardize Gain Calculation
         pc = 0
+        ch_oc = 0
         try:
             snapshot = self.fyers.get_quote_cache_snapshot()
             if symbol in snapshot:
                 pc = snapshot[symbol].get('pc', 0)
+                ch_oc = snapshot[symbol].get('ch_oc', 0)
         except Exception:
             pass
 
         day_high   = df['high'].max()
         open_price = df.iloc[0]['open']
-        baseline = pc if pc > 0 else open_price
-        gain_pct = ((ltp - baseline) / baseline) * 100
+        
+        # Phase 73 FIX: Use ch_oc from snapshot if pc is missing
+        if pc > 0:
+            gain_pct = ((ltp - pc) / pc) * 100
+        elif ch_oc != 0:
+            # Fallback to direct gain % from broker (used by scanner)
+            gain_pct = ch_oc
+        else:
+            # Last resort: Gain from open
+            baseline = open_price
+            gain_pct = ((ltp - baseline) / baseline) * 100
+        
+        # --- Phase 75: V2 Pulse Instrumentation ---
+        try:
+            atr = self.gm_analyst.calculate_atr(df)
+            slope_now, _ = self.gm_analyst.calculate_vwap_slope(df.iloc[-30:])
+            vol_avg = df['volume'].iloc[-21:-1].mean()
+            rvol = df['volume'].iloc[-1] / vol_avg if vol_avg > 0 else 1.0
+            
+            pulse_data = {
+                "ltp": ltp,
+                "gain_pct": gain_pct,
+                "rvol": rvol,
+                "slope": slope_now,
+                "atr": atr,
+                "vwap": df['vwap'].iloc[-1] if 'vwap' in df.columns else ltp
+            }
+            get_dashboard_bridge().broadcast_candidate_pulse(symbol, pulse_data)
+            get_dashboard_bridge().broadcast("GATE_UPDATE", {"symbol": symbol, "gate": "G2", "status": "PASS"})
+        except Exception:
+            pass
+        # ------------------------------------------
 
         atr = self.gm_analyst.calculate_atr(df)
         vwap_sd = self.gm_analyst.calculate_vwap_bands(prev_df)
@@ -787,7 +816,7 @@ class FyersAnalyzer:
             return None
 
         # ── G1: Gain constraints (Phase 65 Soft Threshold) ───────────
-        min_gain = config.SCANNER_GAIN_MIN_PCT
+        min_gain = getattr(config, 'P65_G1_NORMAL_THRESHOLD', 9.0)
         amt_failing_auction = False
         if getattr(config, 'P65_AMT_ENABLED', False):
             if profile_rejection and gain_pct >= config.P65_G1_NET_GAIN_THRESHOLD:
@@ -796,12 +825,13 @@ class FyersAnalyzer:
 
         ok, msg = self.gm_analyst.check_constraints(ltp, day_high, gain_pct, open_price, df=df, atr=atr)
         
+        # Phase 65: AMT Pre-checks — Below 9.0% (Normal Threshold) requires Profile Rejection
         if gain_pct < min_gain:
             ok = False
-            msg = f"Insufficient Gain: {gain_pct:.1f}% (need {min_gain}%)"
-        elif gain_pct < config.SCANNER_GAIN_MIN_PCT and not amt_failing_auction:
+            msg = f"Insufficient Gain: {gain_pct:.1f}% (need {min_gain}% {'with AMT' if amt_failing_auction else ''})"
+        elif gain_pct < getattr(config, 'P65_G1_NORMAL_THRESHOLD', 9.0) and not amt_failing_auction:
              ok = False
-             msg = f"Low Gain {gain_pct:.1f}% requires AMT Profile Rejection"
+             msg = f"Low Gain {gain_pct:.1f}% requires AMT Profile Rejection (Failed Auction)"
 
         gr.g1_pass  = ok
         gr.g1_value = round(gain_pct, 2)

@@ -360,13 +360,6 @@ class FyersScanner:
                     f"Cache: {len(fresh)}/{len(symbol_list)} fresh | "
                     f"Scan_ms: {tier_ms} | Pre-candidates: {len(pre_candidates)}"
                 )
-                
-                # Phase 75: Neural Grid Sync
-                from dashboard_bridge import get_dashboard_bridge
-                get_dashboard_bridge().broadcast("SCAN_BATCH", {
-                    "scan_id": scan_id,
-                    "candidates": [c['symbol'] for c in pre_candidates]
-                })
 
         if data_tier == "REST_EMERGENCY" or not (self.broker and hasattr(self.broker, 'is_cache_ready')):
             # ── Tier 3 / No-broker fallback: original REST batch path ────
@@ -405,7 +398,7 @@ class FyersScanner:
                         if ltp is None or volume is None or change_p is None:
                             continue
 
-                        if 9.0 <= change_p <= 18.0 and volume > 100000 and ltp > config.SCANNER_MIN_LTP:
+                        if config.SCANNER_GAIN_MIN_PCT <= change_p <= config.SCANNER_GAIN_MAX_PCT and volume > config.SCANNER_MIN_VOLUME and ltp > config.SCANNER_MIN_LTP:
                             if self.quality_reject_counts.get(symbol, 0) >= 3:
                                 logger.debug(f"BLACKLIST {symbol} — Quality rejected 3x today, skipping history fetch.")
                                 continue
@@ -494,10 +487,17 @@ class FyersScanner:
         top_gainers = filtered_candidates[:20]
         
         logger.info(f"Scan Complete. Found {len(filtered_candidates)} candidates.")
-        
 
+        # Phase 75: Neural Grid Sync
+        try:
+            from dashboard_bridge import get_dashboard_bridge
+            get_dashboard_bridge().broadcast("SCAN_BATCH", {
+                "scan_id": scan_id,
+                "candidates": [c['symbol'] for c in filtered_candidates]
+            })
+        except Exception:
+            pass
 
-            
         return top_gainers
 
 if __name__ == "__main__":

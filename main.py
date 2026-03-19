@@ -782,12 +782,12 @@ async def main() -> int:
         logger.info("[SUPERVISOR] Cleanup complete.")
 
         # ✅ HARD EXIT FALLBACK — kills any hanging non-daemon threads
-        # Give Python 3 seconds to exit naturally first
+        # Give Python 10 seconds to exit naturally first (FastAPI/GhostAudit need time)
         import threading
         def _force_exit():
             import time
-            time.sleep(3)
-            logger.warning("[SUPERVISOR] Process did not exit naturally after 3s. "
+            time.sleep(10)
+            logger.warning("[SUPERVISOR] Process did not exit naturally after 10s. "
                            "Forcing os._exit(0).")
             os._exit(0)
 

@@ -117,8 +117,8 @@ NSE Market (9:15 AM → 3:30 PM IST)
 
 Scanner
     2,418 NSE-EQ symbols. WS cache first — REST batch fallback (50 symbols/call).
-    Pre-filter: gain ≥9%, volume >100k, LTP ≥₹50 (Fyers basket-rule safety floor).
-    Minimum 45 candles before RVOL is treated as valid.
+    Pre-filter: gain ≥7.5%, volume >100k, LTP ≥₹50 (Fyers basket-rule safety floor).
+    Minimum 45 candles (15 in Climax Window) before RVOL is treated as valid.
     Chart quality check: rejects symbols with >50% zero-volume or >50% doji candles.
     Output: candidate list, every ~60 seconds.
 
@@ -186,15 +186,15 @@ from a lesson that cost something to learn. They are not additions. They are cor
 
 | Gate | ID | What It Kills |
 |---|---|---|
-| **G1** | STRUCTURAL_INTEGRITY | Time-since-high > 20 candles, Kill Backdoor (price dropped >1.5% from high) |
-| **G2** | DATA_QUALITY | Fewer than 45 candles (45 mins) of data — makes RVOL unreliable |
+| **G1** | STRUCTURAL_INTEGRITY | Time-since-high (45 candles), Kill Backdoor (price dropped >1.5% from high) |
+| **G2** | DATA_QUALITY | Insufficient candles (<45 or <15 in Climax) — makes indicators unreliable |
 | **G3** | CIRCUIT_GUARD | Session-permanent blacklist: any symbol that touched upper circuit today |
-| **G4** | MOMENTUM | VWAP slope > 3.0 bp/min or RVOL > 5.0x — freight train guard |
-| **G5** | EXHAUSTION | Gain outside 9–14.5%, price not above VAH, volume fade > 0.65 ratio |
+| **G4** | MOMENTUM | VWAP slope > 3.0 or RVOL > 5.0x (Momentum Decay fallback allowed) |
+| **G5** | EXHAUSTION | Gain outside 7.5–14.5%, price not above VAH, volume fade > 0.65 ratio |
 | **G6** | TIERED_SCORING | Confluence score < 2 (DPOC, OI, Tape, Patterns) — no auto-passes |
-| **G7** | MARKET_REGIME | Pre-10:00 AM, Post-15:10 PM, or Nifty Trend > 1.5% against the move |
-| **G8** | SIGNAL_LIMIT | 3-signal daily cap, 45-min per-symbol cooldown, 3-consecutive-loss pause |
-| **G9** | MATH_PHYSICS | Z-Score Stretch (>3.0) / Momentum Stall / Accel Reject (>2%/15m) |
+| **G7** | MARKET_REGIME | Pre-09:30 AM, Post-15:10 PM, or Nifty Trend > 1.5% against the move |
+| **G8** | SIGNAL_LIMIT | Unlimited signals, 45-min per-symbol cooldown, ₹500 session loss pause |
+| **G9** | MATH_PHYSICS | Z-Score Stretch (>3.0) / Momentum Stall / Alpha Strike Bypass (>3.0 SD) |
 | **G10** | EXEC_PRECISION | Spread >0.4% → CAUTIOUS mode (50% qty) |
 | **G11** | FIXED_TIMEOUT | Signals expire after exactly 15 minutes. |
 | **G12** | CANDLE_CLOSE | Rejects intraday wicks. Requires **1-minute candle close** below trigger to enter |

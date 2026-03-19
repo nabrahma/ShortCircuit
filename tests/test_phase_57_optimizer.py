@@ -5,12 +5,14 @@ from analyzer import FyersAnalyzer
 import config
 
 @pytest.fixture
-def analyzer():
+def analyzer(monkeypatch):
     fyers = MagicMock()
     market_context = MagicMock()
+    # Reset some key config to known states to avoid previous test pollution
+    monkeypatch.setattr(config, 'SCANNER_GAIN_MIN_PCT', 7.5)
     return FyersAnalyzer(fyers)
 
-def test_slope_decay_allowance(analyzer):
+def test_slope_decay_allowance(analyzer, monkeypatch):
     # Setup DF with 31 candles
     df = pd.DataFrame({
         'volume': [1000] * 31,
@@ -20,10 +22,10 @@ def test_slope_decay_allowance(analyzer):
         'open': [100] * 31
     })
     
-    # Mocking config
-    config.P57_G4_SLOPE_DECAY_ENABLED = True
-    config.P51_G4_SLOPE_MIN = 3.0
-    config.P57_G4_DIVERGENCE_SD = 1.5
+    # Mocking config via monkeypatch
+    monkeypatch.setattr(config, 'P57_G4_SLOPE_DECAY_ENABLED', True)
+    monkeypatch.setattr(config, 'P51_G4_SLOPE_MIN', 3.0)
+    monkeypatch.setattr(config, 'P57_G4_DIVERGENCE_SD', 1.5)
     
     # CASE 1: Slope above threshold, but NOT decaying
     # slope_now = 5.0, slope_prev = 4.0
@@ -52,10 +54,10 @@ def test_slope_decay_allowance(analyzer):
     blocked = analyzer._is_momentum_too_strong(df, slope_now, slope_prev, vwap_sd, "TEST")
     assert blocked is False
 
-def test_absorption_relaxation(analyzer):
+def test_absorption_relaxation(analyzer, monkeypatch):
     # Mocking config
-    config.P57_G5_Z_EXTREME_THRESHOLD = 3.3
-    config.P57_G5_Z_FADE_RELAXATION = 0.95
+    monkeypatch.setattr(config, 'P57_G5_Z_EXTREME_THRESHOLD', 3.3)
+    monkeypatch.setattr(config, 'P57_G5_Z_FADE_RELAXATION', 0.95)
     
     # Case: Normal fade ratio (0.8) > 0.65
     # Should block by default
@@ -76,11 +78,11 @@ def test_absorption_relaxation(analyzer):
     # We need to satisfy Gate A/B/D as well to get fired=True, or just check the reject_reason.
     
     # Setup for success in Gate A (gain) and B (day high)
-    config.SCANNER_GAIN_MIN_PCT = 9.0
-    config.G5_STRETCH_LOW_PCT = 9.0
-    config.G5_STRETCH_HIGH_PCT = 15.0
-    config.P51_G5_GATE_B_USE_ALLDAY_HIGH = False # bypass Gate B for simplicity
-    config.P51_G5_GATE_E_LATE_SESSION_EXTREME_ONLY = False # bypass late session rule
+    monkeypatch.setattr(config, 'SCANNER_GAIN_MIN_PCT', 7.5)
+    monkeypatch.setattr(config, 'G5_STRETCH_LOW_PCT', 7.5)
+    monkeypatch.setattr(config, 'G5_STRETCH_HIGH_PCT', 15.0)
+    monkeypatch.setattr(config, 'P51_G5_GATE_B_USE_ALLDAY_HIGH', False)
+    monkeypatch.setattr(config, 'P51_G5_GATE_E_LATE_SESSION_EXTREME_ONLY', False)
     
     # Mock Gate D (profile)
     # It checks profile['vah']. We need ltp > vah.

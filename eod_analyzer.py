@@ -32,53 +32,43 @@ class EODAnalyzer:
         """
         Main async entrypoint for EOD analysis.
         """
+        import pandas as pd
         if self.db is None:
             raise RuntimeError("EODAnalyzer: db is None — DatabaseManager was not injected.")
-        if not hasattr(self.db, "query") or not callable(self.db.query):
-            raise RuntimeError(
-                "EODAnalyzer: DatabaseManager missing .query() method — check interface contract."
-            )
 
+        if not hasattr(self.db, "fetch") and not hasattr(self.db, "query"):
+            raise RuntimeError("EODAnalyzer: injected db is missing .query or .fetch method.")
+        
         if isinstance(date, str):
             import datetime as _dt
             target_date = _dt.date.fromisoformat(date)
-        elif isinstance(date, datetime):
-            target_date = date.date()
-        elif date is not None:
-            target_date = date
         else:
-            target_date = datetime.now().date()
+            target_date = date if date is not None else datetime.now().date()
+            
         logger.info("Starting EOD analysis for %s", target_date)
 
+        # 1. Fetch live trades for performance/audit
         trades = await self._fetch_trades(target_date)
-        if not trades:
-            logger.info("No trades found for analysis.")
-            return "No Trades Executed Today."
-
-        audit_results = self.perform_safety_audit(trades)
+        audit_results = self.perform_safety_audit(trades) if trades else {"status": "PASSED", "issues": [], "orphans": 0, "processed": 0}
         soft_stop_results = await self.analyze_soft_stops(target_date)
         stats = self.calculate_performance(trades)
         
-        # Phase 73: Ghost Signal Auditing (labeling missed opportunities)
+        # 2. Phase 73: Ghost Signal Auditing (labeling missed opportunities)
         ghost_stats = {"processed": 0, "wins": 0, "losses": 0}
         try:
+            # Force target_date passed to audit
             ghost_stats = await self.audit_missed_signals(target_date)
             stats["ghost_trades"] = ghost_stats
         except Exception as e:
             logger.error(f"Ghost Signal Audit failed: {e}")
 
+        # 3. Report generation
         report_text = self.generate_report(target_date, stats, audit_results, soft_stop_results, ghost_stats)
-
-        await self._save_summary_db(target_date, stats, audit_results)
         
-        # Phase 73: Ghost Signal Auditing (labeling missed opportunities)
-        try:
-            ghost_stats = await self.audit_missed_signals(target_date)
-            stats["ghost_trades"] = ghost_stats
-        except Exception as e:
-            logger.error(f"Ghost Signal Audit failed: {e}")
-
+        # 4. Persistence
+        await self._save_summary_db(target_date, stats, audit_results)
         self._generate_session_log(target_date)
+        
         return report_text
 
     async def audit_missed_signals(self, target_date: date):

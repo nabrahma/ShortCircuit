@@ -148,9 +148,9 @@ def test_g1_soft_threshold(analyzer, monkeypatch):
     analyzer.htf_confluence.check_trend_exhaustion = MagicMock(return_value=(True, "HTF_OK"))
     
     # Ensure flag is enabled
-    config.P65_AMT_ENABLED = True
-    config.P65_G1_NET_GAIN_THRESHOLD = 7.5
-    config.SCANNER_GAIN_MIN_PCT = 9.0
+    monkeypatch.setattr(config, 'P65_AMT_ENABLED', True)
+    monkeypatch.setattr(config, 'P65_G1_NET_GAIN_THRESHOLD', 7.5)
+    monkeypatch.setattr(config, 'SCANNER_GAIN_MIN_PCT', 7.5)
 
     # Mock gate result logger to see failures
     mock_grl = MagicMock()

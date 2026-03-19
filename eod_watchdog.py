@@ -34,10 +34,10 @@ async def eod_watchdog(shutdown_event: asyncio.Event):
     while True:   # ← keep the while True but add the break
         now = datetime.now(IST)
 
-        # Soft shutdown at 15:32 — give cleanup_runtime() 25s to finish
-        if now.hour == 15 and now.minute >= 32:
+        # Soft shutdown at 15:35 — give enough time for analysis + cleanup
+        if now.hour == 15 and now.minute >= 35:
             if not shutdown_event.is_set():
-                logger.warning("[EOD-WATCHDOG] 15:32 IST — setting shutdown_event.")
+                logger.warning("[EOD-WATCHDOG] 15:35 IST — triggering graceful shutdown.")
                 shutdown_event.set()
 
         # ✅ HARD KILL at 15:40 — cannot be trapped, cannot be ignored

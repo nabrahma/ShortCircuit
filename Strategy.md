@@ -32,9 +32,9 @@ Since Phase 44.7, this happens at near-zero latency. The Fyers WebSocket streams
 The pre-filter is brutal by design:
 
 ```
-Gain today:   ≥ 6.18% from today's open
+Gain today:   ≥ 7.5% from today's open
 Volume:       > 100,000 shares traded
-LTP:          > ₹5 (eliminates penny stocks)
+LTP:          > ₹50 (eliminates penny stocks)
 ```
 
 Out of 2418 symbols, maybe 15-40 pass on a normal day. These are the candidates. Everything else is noise. The scanner hands these candidates to the analyzer — the real judge.
@@ -47,13 +47,13 @@ Before Phase 44.8, the system required a specific candle shape (Shooting Star, B
 
 The actual edge has four components. All four must be true simultaneously:
 
-### Component 1 — The Sweet Spot (9–14.5% stretched)
+### Component 1 — The Sweet Spot (7.5–14.5% stretched)
 
-Below 9%: the move hasn't stretched far enough. Mean reversion distance to VWAP is small. Risk/reward is poor.
+Below 7.5%: the move hasn't stretched far enough. Mean reversion distance to VWAP is small. Risk/reward is poor.
 
 Above 14.5%: the stock is approaching circuit territory. Liquidity dries up. Unpredictable.
 
-Between 9–14.5% from today's open: the stock has moved enough that retail longs are underwater if it reverses, but not so much that circuits make execution dangerous. This is the zone.
+Between 7.5–14.5% from today's open: the stock has moved enough that retail longs are underwater if it reverses, but not so much that circuits make execution dangerous. This is the zone.
 
 ### Component 2 — New High on Dying Volume
 
@@ -88,19 +88,19 @@ Every candidate that passes the scanner enters the 12-gate pipeline. Think of it
 ### Gate 1 — Signal Manager
 *"Are we allowed to trade right now?"*
 
-Maximum 5 signals per day. 45-minute cooldown per symbol. 3 consecutive losses triggers a full session pause. This gate exists entirely for capital preservation — not signal quality. The best signal in the world, on the 6th trade of the day, does not get taken.
+Unlimited signals per day. 45-minute per-symbol cooldown. A cumulative session loss of ₹500 (Phase 69) triggers a full session pause. This gate exists entirely for capital preservation — not signal quality.
 
 ### Gate 2 — Market Regime
 *"Is the macro environment hostile?"*
 
-NIFTY is the tide. Shorting individual stocks when NIFTY is in TREND_UP mode is fighting the tide. Gate 2 fetches NIFTY intraday data, computes the morning range (9:15–10:15), and classifies the regime. TREND_UP = all shorts blocked. RANGE or TREND_DOWN = proceed.
+NIFTY is the tide. Shorting individual stocks when NIFTY is in TREND_UP mode (> 1.5% from high) is fighting the tide. Gate 2 fetches NIFTY intraday data, computes the morning range, and classifies the regime. TREND_UP = all shorts blocked. RANGE or TREND_DOWN = proceed.
 
 Exception: if a setup is so strong (Evening Star, Bearish Engulfing confirmed) that the stock is clearly distributing against the market, the regime gate can be bypassed. The market does not move all 2418 stocks identically.
 
 ### Gate 3 — Data Quality
 *"Do we have enough history to make a decision?"*
 
-At least 20 candles required (RVOL validity gate — ensures 20 minutes of market activity before any RVOL reading is trusted). Fewer candles = unreliable averages = false signals.
+At least 45 candles required (15 during Climax Window). RVOL validity gate — ensures sufficient market activity before any RVOL reading is trusted. Fewer candles = unreliable averages = false signals.
 
 ### Gate 4 — Technical Context
 *"Set up the calculations."*
@@ -113,10 +113,11 @@ VWAP is computed (cumulative `(TP × Volume) / Volume`). Day high, today's open,
 This is the heart of the system. Four sub-checks — all must pass:
 
 ```
-A. gain_pct between 9.0% and 14.5%          (the sweet spot)
+A. gain_pct between 7.5% and 14.5%          (the sweet spot)
 B. New intraday high in last 10 candles     (still pushing up)
 C. vol_fade_ratio < 0.65                    (buyers running out)
 D. close > VAH                              (in unaccepted territory)
+E. AMT Rejection Required (if gain < 9.0%)
 ```
 
 Outputs: `fired=True/False`, `confidence=EXTREME/HIGH/MEDIUM`, `vol_fade_ratio`, `stretch_score`, `pattern_bonus`.
@@ -134,10 +135,12 @@ Also: if the stock has a futures contract, Gate 6 fetches futures OI direction a
 *"Is this a freight train we're standing in front of?"*
 
 ```
-RVOL > 5.0 AND VWAP slope > 40 → BLOCKED
+RVOL > 5.0 AND VWAP slope > 3.0 → BLOCKED
 ```
 
-If volume is 5× average AND momentum is steep AND still accelerating, the move is not exhausted — it's in full force. Shorting this is not mean reversion. It's getting run over. This gate blocks those trades entirely.
+If volume is 5× average AND momentum is steep AND still accelerating, the move is not exhausted — it's in full force. Shorting this is not mean reversion. It's getting run over. 
+
+**Structural Fallback (Phase 60)**: If gain > 10% and slope starts slowing down (`Slope Now < Slope Prev`), it's marked as **Momentum Decay** and allowed to bypass this gate.
 
 ### Gate 8 — Pro Confluence
 *"Do multiple independent indicators agree?"*
@@ -167,7 +170,9 @@ Logic: if the stock is already > 2 standard deviations above VWAP (clearly exten
 ### Gate 9 — HTF Confluence
 *"Does the 15-minute chart agree?"*
 
-The 1-minute chart shows the setup. The 15-minute chart shows the context. Gate 9 fetches 15m candle history and checks for trend exhaustion or Lower Highs on the higher timeframe. If the 15m chart is in strong uptrend with no signs of reversal, the trade is blocked — we don't fight a higher-timeframe trend without HTF confirmation.
+The 1-minute chart shows the setup. The 15-minute chart shows the context. Gate 9 fetches 15m candle history and checks for trend exhaustion. 
+
+**Alpha Strike Bypass (Phase 61)**: If a stock is extremely stretched (> 3.0 SD from VWAP), it bypasses G9 entirely. We assume the institutional climax is so powerful that mean reversion is imminent regardless of HTF trend.
 
 ### Gate 10 — WebSocket Price Trigger
 *"Has the actual breakdown started?"*
@@ -197,9 +202,9 @@ Structural: `setup_high + ATR buffer`. This is above where the setup candle topp
 
 ### Take Profit Levels
 ```
-TP1 = entry - (ATR × 1.5)   → Exit 50% of position
-TP2 = entry - (ATR × 2.5)   → Exit 25% more  
-TP3 = entry - (ATR × 3.5)   → Exit remainder
+TP1 = entry - (ATR × 1.5)   → Exit 40% of position
+TP2 = entry - (ATR × 2.5)   → Exit 40% more  
+TP3 = entry - (ATR × 3.5)   → Exit remainder (20%)
 Ultimate target = VWAP (mean reversion complete)
 ```
 
