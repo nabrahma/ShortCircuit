@@ -16,36 +16,46 @@ class DashboardBridge:
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super(DashboardBridge, cls).__new__(cls)
-            cls._instance.queue = asyncio.Queue(maxsize=100)
+            # Increased size to handle high-frequency log streams
+            cls._instance.queue = asyncio.Queue(maxsize=500)
             cls._instance.is_running = False
             cls._instance.active_connections = []
+            cls._instance._loop = None
         return cls._instance
 
+    def set_loop(self, loop):
+        """Must be called by main.py at startup."""
+        self._loop = loop
+
     def broadcast(self, message_type: str, data: Dict[str, Any]):
-        """
-        Non-blocking broadcast. 
-        Module usage: get_dashboard_bridge().broadcast("GATE_UPDATE", {"gate": "G5", "status": "PASS"})
-        """
+        """Non-blocking broadcast to all dashboard clients."""
         payload = {
             "type": message_type,
             "timestamp": datetime.now().strftime("%H:%M:%S"),
             "payload": data
         }
         
+        if not self._loop:
+            return
+
         try:
-            # We use a try-except because we might be calling this from a sync context 
-            # or before the loop is ready.
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                # If we're in an async loop, we can't block. 
-                # If we're in a thread, we need to be careful.
-                asyncio.run_coroutine_threadsafe(self.queue.put(payload), loop)
-            else:
-                # Fallback or initialization phase
-                pass
-        except Exception:
-            # If the queue is full or loop isn't ready, we silently drop for V1 (Performance priority)
+            if self._loop.is_running():
+                # Correct way for sync -> async bridge with error safety
+                self._loop.call_soon_threadsafe(
+                    lambda: self.queue.put_nowait(payload)
+                )
+        except (asyncio.QueueFull, Exception):
+            # Drop older messages if UI can't keep up
             pass
+
+    def broadcast_log(self, message: str, level: str = "INFO"):
+        """Convenience method for log streaming."""
+        self.broadcast("LOG_STREAM", {"msg": message, "level": level})
+
+    def broadcast_candidate_pulse(self, symbol: str, metrics: Dict[str, Any]):
+        """High-frequency candidate telemetry."""
+        data = {"symbol": symbol, **metrics}
+        self.broadcast("CANDIDATE_PULSE", data)
 
     async def get_next_message(self) -> Any:
         """Dashboard server calls this to wait for new messages to broadcast via WebSockets."""

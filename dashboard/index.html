@@ -3,294 +3,290 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ShortCircuit — AEGIS HUD</title>
+    <title>AEGIS // SHORTCIRCUIT COMMAND CENTER</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;600;800&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
     <style>
         :root {
             --cyan: #00f2ff;
-            --cyan-dim: rgba(0, 242, 255, 0.1);
             --bg-dark: #020408;
-            --card-bg: rgba(10, 15, 20, 0.7);
+            --card-bg: rgba(10, 15, 20, 0.85);
+            --pass-green: #00ff9d;
+            --fail-red: #ff3b3b;
         }
         
-        * { scrollbar-width: none; -ms-overflow-style: none; }
-        ::-webkit-scrollbar { display: none; }
-
         body {
             background-color: var(--bg-dark);
             color: #ecf0f1;
             font-family: 'Plus Jakarta Sans', sans-serif;
             background-image: 
-                radial-gradient(circle at 50% 50%, rgba(0, 242, 255, 0.05) 0%, transparent 80%),
+                radial-gradient(circle at 10% 10%, rgba(0, 242, 255, 0.03) 0%, transparent 40%),
                 linear-gradient(rgba(0, 242, 255, 0.02) 1px, transparent 1px),
                 linear-gradient(90deg, rgba(0, 242, 255, 0.02) 1px, transparent 1px);
-            background-size: 100% 100%, 30px 30px, 30px 30px;
-            min-height: 100vh;
+            background-size: 100% 100%, 40px 40px, 40px 40px;
             overflow: hidden;
+            height: 100vh;
         }
 
         .scifi-card {
             background: var(--card-bg);
-            border: 1px solid rgba(0, 242, 255, 0.05);
+            border: 1px solid rgba(0, 242, 255, 0.1);
+            backdrop-filter: blur(12px);
             position: relative;
-            backdrop-filter: blur(8px);
         }
 
-        /* L-Corners */
-        .scifi-card::before { content: ''; position: absolute; top: -1px; left: -1px; width: 10px; height: 10px; border-top: 2px solid var(--cyan); border-left: 2px solid var(--cyan); pointer-events: none; }
-        .scifi-card::after { content: ''; position: absolute; bottom: -1px; right: -1px; width: 10px; height: 10px; border-bottom: 2px solid var(--cyan); border-right: 2px solid var(--cyan); pointer-events: none; }
+        .scifi-card::before { content: ''; position: absolute; top: -1px; left: -1px; width: 12px; height: 12px; border-top: 2px solid var(--cyan); border-left: 2px solid var(--cyan); }
+        .scifi-card::after { content: ''; position: absolute; bottom: -1px; right: -1px; width: 12px; height: 12px; border-bottom: 2px solid var(--cyan); border-right: 2px solid var(--cyan); }
 
-        .gate-ring {
-            width: 48px; height: 48px;
-            border-radius: 50%;
-            border: 2px solid rgba(255, 255, 255, 0.05);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            position: relative;
-            transition: all 0.4s ease;
-        }
-        .gate-ring-inner {
-            width: 32px; height: 32px;
-            border-radius: 50%;
-            border: 1px solid rgba(255, 255, 255, 0.1);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 9px;
-            font-weight: 800;
-        }
-        
-        .gate-inactive { opacity: 0.2; transform: scale(0.9); }
-        .gate-pass { border-color: #00ff9d !important; box-shadow: 0 0 15px rgba(0, 255, 157, 0.2); opacity: 1; transform: scale(1.05); color: #00ff9d; }
-        .gate-fail { border-color: #ff3b3b !important; box-shadow: 0 0 15px rgba(255, 59, 59, 0.2); opacity: 1; transform: scale(1.05); color: #ff3b3b; }
-        .gate-scanning { border-color: var(--cyan) !important; animation: ring-pulse 1.5s infinite; opacity: 1; color: var(--cyan); }
+        .terminal-scroll { scrollbar-width: none; }
+        .terminal-scroll::-webkit-scrollbar { display: none; }
 
-        @keyframes ring-pulse {
-            0%, 100% { transform: scale(1); box-shadow: 0 0 5px var(--cyan); }
-            50% { transform: scale(1.1); box-shadow: 0 0 20px var(--cyan); }
-        }
-
-        .mono { font-family: 'JetBrains Mono', monospace; }
-        .neon-text { text-shadow: 0 0 8px var(--cyan); }
-        
-        /* Grid Layout */
-        .hud-container {
+        .neural-grid {
             display: grid;
-            grid-template-columns: 320px 1fr 180px;
-            grid-template-rows: 80px 1fr;
-            gap: 20px;
-            height: 100vh;
-            padding: 24px;
+            grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+            gap: 16px;
+            padding: 10px;
         }
 
-        .hud-header { grid-column: 1 / span 3; }
-        .hud-left { 
-            grid-column: 1; 
-            grid-row: 2; 
-            display: flex;
-            flex-direction: column;
-            gap: 20px;
-            overflow-y: auto;
-            padding-right: 4px;
-        }
-        .hud-center { grid-column: 2; grid-row: 2; }
-        .hud-right { grid-column: 3; grid-row: 2; }
+        .gate-dot { width: 8px; height: 8px; border-radius: 50%; background: rgba(255,255,255,0.05); transition: all 0.3s; }
+        .gate-dot.pass { background: var(--pass-green); box-shadow: 0 0 8px var(--pass-green); }
+        .gate-dot.fail { background: var(--fail-red); box-shadow: 0 0 8px var(--fail-red); }
+        .gate-dot.scanning { background: var(--cyan); animation: pulse 1s infinite; }
 
+        @keyframes pulse { 0% { opacity: 0.3; } 50% { opacity: 1; } 100% { opacity: 0.3; } }
+
+        .header-font { font-family: 'Plus Jakarta Sans', sans-serif; font-weight: 800; letter-spacing: -0.05em; }
+        .mono { font-family: 'JetBrains Mono', monospace; }
+        
+        .profile-bar { height: 4px; border-radius: 2px; }
     </style>
 </head>
-<body>
-    
-    <div class="hud-container">
+<body class="flex flex-col">
+
+    <!-- TOP HEADER -->
+    <header class="h-16 flex items-center justify-between px-8 border-b border-white/5 bg-black/40">
+        <div class="flex items-center space-x-6">
+            <div class="flex flex-col">
+                <span class="text-[9px] font-black tracking-[0.4em] text-cyan-400 opacity-60">SYSTEM STATUS</span>
+                <span id="system-status" class="text-xs font-bold text-pass-green">NEURAL LINK STABLE</span>
+            </div>
+            <h1 class="text-xl header-font italic uppercase tracking-tighter">AEGIS <span class="text-cyan-400 not-italic opacity-40">// ALGO COMMAND CENTER</span></h1>
+        </div>
+        <div class="flex items-center space-x-12">
+            <div class="text-right">
+                <span class="block text-[8px] opacity-30 uppercase tracking-widest">SESSION P&L</span>
+                <span id="session-pnl" class="text-xl font-bold mono">&#8377;0.00</span>
+            </div>
+            <div class="text-right border-l border-white/10 pl-12">
+                <span id="clock" class="text-lg font-black mono text-cyan-400">00:00:00</span>
+            </div>
+        </div>
+    </header>
+
+    <!-- MAIN AREA -->
+    <main class="flex-grow flex flex-col p-6 overflow-hidden">
         
-        <!-- HEADER -->
-        <header class="hud-header flex justify-between items-center border-b border-white/5 pb-4">
-            <div class="flex items-center space-x-4">
-                <div class="px-3 py-1 bg-cyan-500/10 border border-cyan-500/30">
-                    <span class="text-xs font-black tracking-widest text-cyan-400 header-font">AEGIS PROTOCOL</span>
-                </div>
-                <h1 class="text-2xl font-black italic tracking-tighter text-white">SHORTCIRCUIT <span class="text-cyan-400 not-italic opacity-40">ALGO ENGINE</span></h1>
+        <!-- Live Candidates Grid -->
+        <div id="neural-grid" class="neural-grid overflow-y-auto flex-grow max-h-[calc(100vh-250px)]">
+            <!-- Dynamic Candidate Cards -->
+            <div id="no-candidates" class="col-span-full h-full flex flex-col items-center justify-center opacity-20">
+                <div class="w-32 h-32 border-2 border-dashed border-cyan-400/30 rounded-full animate-spin-slow mb-6"></div>
+                <p class="text-lg uppercase tracking-[0.5em]">Scanning Alpha Spectrum</p>
             </div>
-            <div class="flex space-x-8 items-center">
+        </div>
+
+        <!-- TERMINAL AREA -->
+        <div class="h-48 mt-6 scifi-card flex flex-col overflow-hidden">
+            <div class="h-8 border-b border-white/5 flex items-center px-4 justify-between bg-white/5">
+                <span class="text-[9px] font-black uppercase tracking-widest text-cyan-400">Live System Intelligence Feed</span>
+                <div class="flex space-x-1"><div class="w-1 h-1 bg-cyan-400"></div><div class="w-1 h-1 bg-white/20"></div><div class="w-1 h-1 bg-white/10"></div></div>
+            </div>
+            <div id="terminal" class="flex-grow p-4 overflow-y-auto terminal-scroll font-mono text-[10px] space-y-1">
+                <div class="text-cyan-400/40">>> Initializing AEGIS Protocol v2.5.0...</div>
+            </div>
+        </div>
+    </main>
+
+    <!-- CARD TEMPLATE (HIDDEN) -->
+    <template id="candidate-template">
+        <div class="candidate-card scifi-card p-4 flex flex-col animate-in fade-in slide-in-from-bottom-4 duration-500">
+            <div class="flex justify-between items-start mb-3">
+                <div class="flex flex-col">
+                    <h3 class="symbol text-2xl font-black header-font tracking-tighter">SYMBOL</h3>
+                    <span class="ltp text-xs mono opacity-50">&#8377;000.00</span>
+                </div>
                 <div class="text-right">
-                    <span class="block text-[8px] opacity-40 uppercase tracking-widest">SYSTEM STATUS</span>
-                    <span id="status-text" class="text-[10px] font-bold text-[#00ff9d]">ONLINE // NEURAL LINK ACTIVE</span>
-                </div>
-                <div class="text-right border-l border-white/10 pl-8">
-                    <span class="block text-[8px] opacity-40 uppercase tracking-widest">REAL-TIME P&L</span>
-                    <span id="session-pnl" class="text-xl font-bold header-font mono">&#8377;0.00</span>
-                </div>
-            </div>
-        </header>
-
-        <!-- LEFT COLUMN: Metrics & Feed -->
-        <div class="hud-left">
-            <div class="scifi-card p-6 flex flex-col justify-center min-h-[140px]">
-                <p class="text-[10px] uppercase tracking-[0.2em] opacity-30 mb-2">Relative Volume (RVOL)</p>
-                <div class="flex flex-col">
-                    <span id="metric-rvol" class="text-5xl font-black mono text-cyan-400 tracking-tighter">0.0</span>
-                    <div class="flex items-center mt-2 space-x-2">
-                        <div class="flex-grow h-1 bg-white/5"><div id="rvol-bar" class="bg-cyan-400 h-full w-[0%] transition-all duration-500"></div></div>
-                        <span class="text-[8px] opacity-40">VOL-Z</span>
+                    <span class="gain text-lg font-black text-pass-green">+0.00%</span>
+                    <div class="flex space-x-1 justify-end mt-1">
+                        <div class="g-dot g1 gate-dot"></div>
+                        <div class="g-dot g2 gate-dot"></div>
+                        <div class="g-dot g4 gate-dot"></div>
+                        <div class="g-dot g5 gate-dot"></div>
+                        <div class="g-dot g7 gate-dot"></div>
+                        <div class="g-dot g9 gate-dot"></div>
+                        <div class="g-dot g12 gate-dot"></div>
                     </div>
                 </div>
             </div>
 
-            <div class="scifi-card p-6 flex flex-col justify-center min-h-[140px]">
-                <p class="text-[10px] uppercase tracking-[0.2em] opacity-30 mb-2">VWAP Velocity</p>
-                <div class="flex flex-col">
-                    <span id="metric-slope" class="text-5xl font-black mono text-cyan-400 tracking-tighter">0.0</span>
-                    <div class="flex items-center mt-2 space-x-2">
-                        <div class="flex-grow h-1 bg-white/5"><div id="slope-bar" class="bg-cyan-400 h-full w-[0%] transition-all duration-500"></div></div>
-                        <span class="text-[8px] opacity-40">BP/M</span>
-                    </div>
+            <div class="flex-grow flex space-x-4">
+                <!-- Sparklines -->
+                <div class="flex-1 h-20 bg-black/40 rounded border border-white/5 relative overflow-hidden">
+                    <canvas class="sparkline"></canvas>
+                </div>
+                <!-- Profile -->
+                <div class="w-16 h-20 flex flex-col-reverse justify-between py-1 bg-white/5 rounded border border-white/5 overflow-hidden profile-container">
+                    <!-- Volume profile bars injected here -->
                 </div>
             </div>
 
-            <div class="scifi-card p-6 flex flex-col justify-center min-h-[140px]">
-                <p class="text-[10px] uppercase tracking-[0.2em] opacity-30 mb-2">Benchmark Correlation</p>
-                <div class="flex flex-col items-center">
-                    <div class="w-16 h-16 rounded-full border-2 border-white/5 flex items-center justify-center relative">
-                        <div id="nifty-gauge" class="absolute inset-0 rounded-full border-2 border-cyan-400/20 border-t-cyan-400 transition-transform duration-500 rotate-0"></div>
-                        <span id="metric-nifty" class="text-[10px] font-black header-font text-white opacity-80">NEUTRAL</span>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Signal Intelligence Feed (Integrated Left Bottom) -->
-            <div class="scifi-card p-5 flex flex-col flex-grow min-h-[250px] overflow-hidden">
-                <div class="flex items-center justify-between mb-3 border-b border-white/5 pb-2">
-                    <span class="text-[9px] font-black uppercase tracking-[0.3em] text-cyan-400">Signal Intelligence Feed</span>
-                    <span id="clock" class="text-[10px] font-bold mono opacity-40">00:00:00</span>
-                </div>
-                <div id="log-container" class="flex-grow overflow-y-auto space-y-2 pr-2 font-mono text-[9px] text-cyan-100/50">
-                    <div class="opacity-40">>> AEGIS CORE V1.2.4 READY...</div>
-                </div>
+            <div class="mt-3 flex justify-between text-[9px] mono opacity-40 uppercase tracking-widest border-t border-white/5 pt-2">
+                <span>RVOL: <b class="rvol text-cyan-400">0.0</b></span>
+                <span>Z: <b class="zscore text-cyan-400">0.0</b></span>
+                <span>VWAP: <b class="slope text-cyan-400">0.0</b></span>
             </div>
         </div>
-
-        <!-- CENTER: Main Visualization -->
-        <div class="hud-center scifi-card p-10 flex flex-col justify-center relative overflow-hidden">
-             <!-- Corner decorative -->
-             <div class="absolute top-4 right-4 text-[8px] opacity-20 font-black tracking-widest uppercase">Visual Intelligence Feed</div>
-             
-             <div class="flex flex-col h-full">
-                <div class="mb-8">
-                    <h2 id="active-symbol" class="text-9xl font-black header-font text-white tracking-tighter uppercase opacity-95 transition-all duration-500">---</h2>
-                    <div class="flex items-center space-x-8 mt-2">
-                        <span id="active-ltp" class="text-4xl font-light opacity-60 mono">&#8377;0.00</span>
-                        <span id="active-gain" class="text-4xl font-black text-[#00ff9d]">+0.00%</span>
-                    </div>
-                </div>
-                
-                <div class="flex-grow border border-white/5 rounded-sm flex items-center justify-center relative overflow-hidden bg-black/60">
-                    <div class="absolute inset-0 opacity-5" style="background-image: linear-gradient(#00f2ff 1px, transparent 1px), linear-gradient(90deg, #00f2ff 1px, transparent 1px); background-size: 15px 15px;"></div>
-                    <div class="z-10 text-center">
-                        <div class="w-24 h-24 border-b-4 border-cyan-400 rounded-full animate-spin-slow mx-auto mb-6 opacity-30"></div>
-                        <p class="text-xs uppercase tracking-[1em] opacity-40">Autonomous Analysis Pending</p>
-                    </div>
-                </div>
-             </div>
-        </div>
-
-        <!-- RIGHT COLUMN: Gates (Entire Side) -->
-        <div class="hud-right scifi-card p-4 flex flex-col gap-3 overflow-y-auto scroll-smooth">
-            <div class="flex flex-col items-center mb-4 border-b border-white/5 pb-2">
-                <span class="text-[9px] font-black tracking-widest text-cyan-400 mb-1">GATE PULSE</span>
-                <div class="flex space-x-1"><div class="w-1 h-1 bg-cyan-400"></div><div class="w-1 h-1 bg-white/10"></div><div class="w-1 h-1 bg-white/5"></div></div>
-            </div>
-            
-            <div id="gate-container" class="flex flex-col gap-3 items-center">
-                <!-- Gates generated by JS -->
-            </div>
-        </div>
-
-    </div>
+    </template>
 
     <script>
-        const gates = [
-            { id: 'G1', name: 'GAIN' },
-            { id: 'G2', name: 'RVOL' },
-            { id: 'G3', name: 'CIRC' },
-            { id: 'G4', name: 'MOMT' },
-            { id: 'G5', name: 'EXHT' },
-            { id: 'G6', name: 'CONF' },
-            { id: 'G7', name: 'REGM' },
-            { id: 'G8', name: 'CDWN' },
-            { id: 'G9', name: 'HTFT' },
-            { id: 'G10', name: 'SPRD' },
-            { id: 'G11', name: 'TIME' },
-            { id: 'G12', name: 'CNDL' },
-            { id: 'G13', name: 'RISK' },
-        ];
-
-        const gateContainer = document.getElementById('gate-container');
-        gates.forEach(g => {
-            const div = document.createElement('div');
-            div.id = `gate-${g.id}`;
-            div.className = 'gate-ring gate-inactive';
-            div.innerHTML = `
-                <div class="gate-ring-inner">${g.id}</div>
-                <span class="absolute -right-16 text-[8px] font-bold opacity-0 transition-opacity whitespace-nowrap">${g.name}</span>
-            `;
-            gateContainer.appendChild(div);
-        });
+        const grid = document.getElementById('neural-grid');
+        const terminal = document.getElementById('terminal');
+        const template = document.getElementById('candidate-template');
+        const candidates = new Map();
 
         const ws = new WebSocket(`ws://${window.location.host}/ws`);
-        const log = document.getElementById('log-container');
 
-        function addLog(text, color = 'rgba(0, 242, 255, 0.7)') {
+        function addLog(msg, level = 'INFO') {
             const div = document.createElement('div');
+            let color = 'rgba(255,255,255,0.6)';
+            if (msg.includes('[ENTRY]')) color = '#00ff9d';
+            if (msg.includes('[EXIT]') || msg.includes('REJECTED')) color = '#ff3b3b';
+            if (msg.includes('CONFIRMED')) color = '#00f2ff';
+            
             div.style.color = color;
-            div.className = 'border-l-2 border-white/5 pl-2 py-1';
-            div.innerHTML = `<span class="opacity-30">>></span> ${text}`;
-            log.prepend(div);
-            if (log.children.length > 50) log.removeChild(log.lastChild);
+            div.innerHTML = `<span class="opacity-20">[${new Date().toLocaleTimeString()}]</span> ${msg}`;
+            terminal.appendChild(div);
+            terminal.scrollTop = terminal.scrollHeight;
+            if (terminal.children.length > 100) terminal.removeChild(terminal.firstChild);
         }
 
-        setInterval(() => {
-            document.getElementById('clock').innerText = new Date().toTimeString().split(' ')[0];
-        }, 1000);
-
-        ws.onopen = () => addLog('Cognitive Bridge Established.', '#00ff9d');
-        
         ws.onmessage = (event) => {
             const msg = JSON.parse(event.data);
             const { type, payload } = msg;
 
-            if (type === 'GATE_UPDATE') {
-                const el = document.getElementById(`gate-${payload.gate}`);
-                if (el) {
-                    el.className = 'gate-ring gate-' + payload.status.toLowerCase();
-                    const nameSpan = el.querySelector('span');
-                    if (payload.status !== 'INACTIVE') nameSpan.style.opacity = '0.3';
+            if (type === 'LOG_STREAM') {
+                addLog(payload.msg, payload.level);
+            } 
+            else if (type === 'SCAN_BATCH') {
+                document.getElementById('no-candidates').style.display = 'none';
+                // Clear symbols not in this batch
+                for (let sym of candidates.keys()) {
+                    if (!payload.candidates.includes(sym)) {
+                        const el = document.getElementById(`card-${sym}`);
+                        if (el) el.remove();
+                        candidates.delete(sym);
+                    }
                 }
-            } else if (type === 'HEARTBEAT') {
-                document.getElementById('session-pnl').innerHTML = `&#8377;${payload.pnl.toLocaleString('en-IN', {minimumFractionDigits: 2})}`;
+                // Ensure all batch symbols have cards
+                payload.candidates.forEach(sym => {
+                    if (!candidates.has(sym)) createCard(sym);
+                });
+            }
+            else if (type === 'CANDIDATE_PULSE') {
+                const sym = payload.symbol;
+                if (!candidates.has(sym)) createCard(sym);
+                updateCard(sym, payload);
+            }
+            else if (type === 'GATE_UPDATE') {
+                const sym = payload.symbol;
+                const card = document.getElementById(`card-${sym}`);
+                if (card) {
+                    const dot = card.querySelector(`.g-dot.${payload.gate.toLowerCase()}`);
+                    if (dot) {
+                        dot.className = `g-dot ${payload.gate.toLowerCase()} gate-dot ${payload.status.toLowerCase()}`;
+                    }
+                }
+            }
+            else if (type === 'AMT_UPDATE') {
+                const sym = payload.symbol;
+                const card = document.getElementById(`card-${sym}`);
+                if (card) updateProfile(card, payload);
+            }
+            else if (type === 'HEARTBEAT') {
+                document.getElementById('session-pnl').innerText = `₹${payload.pnl.toLocaleString('en-IN', {minimumFractionDigits: 2})}`;
                 document.getElementById('session-pnl').style.color = payload.pnl >= 0 ? '#00ff9d' : '#ff3b3b';
-                document.getElementById('status-text').innerText = `ALGO STATUS: ${payload.status} // NEURAL LINK STABLE`;
-            } else if (type === 'SYMBOL_UPDATE') {
-                document.getElementById('active-symbol').innerText = payload.symbol;
-                document.getElementById('active-ltp').innerHTML = `&#8377;${payload.ltp.toLocaleString('en-IN', {minimumFractionDigits: 2})}`;
-                document.getElementById('active-gain').innerText = `${payload.gain_pct.toFixed(2)}%`;
-                document.getElementById('active-gain').style.color = payload.gain_pct >= 0 ? '#00ff9d' : '#ff3b3b';
-                
-                document.getElementById('metric-rvol').innerText = payload.rvol.toFixed(1);
-                document.getElementById('rvol-bar').style.width = Math.min((payload.rvol / 10) * 100, 100) + '%';
-                
-                document.getElementById('metric-slope').innerText = payload.slope.toFixed(2);
-                document.getElementById('slope-bar').style.width = Math.min((payload.slope / 15) * 100, 100) + '%';
-                
-                document.getElementById('metric-nifty').innerText = payload.nifty_trend;
-                const rotation = payload.nifty_trend === 'BULLISH' ? 45 : (payload.nifty_trend === 'BEARISH' ? -45 : 0);
-                document.getElementById('nifty-gauge').style.transform = `rotate(${rotation}deg)`;
-            } else if (type === 'SYSTEM_ALERT') {
-                addLog(payload.msg, '#00f2ff');
-            } else if (type === 'ORDER_EVENT') {
-                addLog(`[ORDER] ${payload.type} ${payload.symbol} @ \u20b9${payload.ltp || ''}`, payload.type === 'ENTRY' ? '#00ff9d' : '#ffD700');
             }
         };
+
+        function createCard(sym) {
+            const clone = template.content.cloneNode(true);
+            const card = clone.querySelector('.candidate-card');
+            card.id = `card-${sym}`;
+            card.querySelector('.symbol').innerText = sym;
+            
+            // Init Chart
+            const ctx = card.querySelector('.sparkline').getContext('2d');
+            const chart = new Chart(ctx, {
+                type: 'line',
+                data: { labels: Array(20).fill(''), datasets: [{ data: [], borderColor: '#00f2ff', borderWidth: 1, pointRadius: 0, fill: true, backgroundColor: 'rgba(0,242,255,0.05)' }]},
+                options: { responsive: true, maintainAspectRatio: false, scales: { x: { display: false }, y: { display: false } }, plugins: { legend: { display: false } } }
+            });
+            
+            candidates.set(sym, { chart, history: [] });
+            grid.appendChild(card);
+        }
+
+        function updateCard(sym, data) {
+            const card = document.getElementById(`card-${sym}`);
+            if (!card) return;
+
+            if (data.ltp) card.querySelector('.ltp').innerText = `₹${data.ltp.toFixed(2)}`;
+            if (data.gain_pct) {
+                const g = card.querySelector('.gain');
+                g.innerText = `${data.gain_pct.toFixed(2)}%`;
+                g.style.color = data.gain_pct >= 0 ? '#00ff9d' : '#ff3b3b';
+            }
+            if (data.rvol) card.querySelector('.rvol').innerText = data.rvol.toFixed(1);
+            if (data.slope) card.querySelector('.slope').innerText = data.slope.toFixed(1);
+            
+            // Status confirmed color
+            if (data.status === 'CONFIRMED') {
+                card.style.borderColor = '#00ff9d';
+                card.style.boxShadow = '0 0 20px rgba(0,255,157,0.1)';
+            }
+
+            // Update Chart
+            const state = candidates.get(sym);
+            if (state && data.ltp) {
+                state.chart.data.datasets[0].data.push(data.ltp);
+                if (state.chart.data.datasets[0].data.length > 20) state.chart.data.datasets[0].data.shift();
+                state.chart.update('none');
+            }
+        }
+
+        function updateProfile(card, data) {
+            const container = card.querySelector('.profile-container');
+            container.innerHTML = '';
+            const max = Math.max(...data.counts);
+            data.counts.forEach((c, i) => {
+                const bar = document.createElement('div');
+                const p = (c / max) * 100;
+                bar.className = 'profile-bar';
+                bar.style.width = `${p}%`;
+                bar.style.background = 'rgba(255,255,255,0.1)';
+                
+                const price = data.bins[i];
+                if (price >= data.val && price <= data.vah) bar.style.background = 'rgba(0,242,255,0.3)';
+                if (Math.abs(price - data.poc) < (data.bins[1]-data.bins[0])) bar.style.background = '#00ff9d';
+                
+                container.appendChild(bar);
+            });
+        }
+
+        setInterval(() => {
+            document.getElementById('clock').innerText = new Date().toLocaleTimeString();
+        }, 1000);
     </script>
 </body>
 </html>

@@ -360,6 +360,13 @@ class FyersScanner:
                     f"Cache: {len(fresh)}/{len(symbol_list)} fresh | "
                     f"Scan_ms: {tier_ms} | Pre-candidates: {len(pre_candidates)}"
                 )
+                
+                # Phase 75: Neural Grid Sync
+                from dashboard_bridge import get_dashboard_bridge
+                get_dashboard_bridge().broadcast("SCAN_BATCH", {
+                    "scan_id": scan_id,
+                    "candidates": [c['symbol'] for c in pre_candidates]
+                })
 
         if data_tier == "REST_EMERGENCY" or not (self.broker and hasattr(self.broker, 'is_cache_ready')):
             # ── Tier 3 / No-broker fallback: original REST batch path ────

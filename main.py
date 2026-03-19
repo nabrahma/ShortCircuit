@@ -31,6 +31,8 @@ from scanner import FyersScanner
 from startup_recovery import StartupRecovery
 from telegram_bot import ShortCircuitBot
 from trade_manager import TradeManager
+from dashboard_bridge import get_dashboard_bridge
+from tools.dashboard_logger import DashboardLoggerHandler
 
 IST = pytz.timezone("Asia/Kolkata")
 logger = logging.getLogger("shortcircuit.supervisor")
@@ -62,6 +64,13 @@ def _configure_logging() -> None:
         handlers=[file_handler, console_handler],
         force=True,
     )
+    
+    # Phase 75: High-frequency Dashboard Log Stream
+    try:
+        dash_handler = DashboardLoggerHandler()
+        logging.getLogger().addHandler(dash_handler)
+    except Exception:
+        pass
 
 
 def _install_signal_handlers(loop: asyncio.AbstractEventLoop, shutdown_event: asyncio.Event):
@@ -651,6 +660,10 @@ async def main() -> int:
 
     shutdown_event = asyncio.Event()
     loop = asyncio.get_running_loop()
+    
+    # Phase 75: Neural Link initialization
+    get_dashboard_bridge().set_loop(loop)
+    
     _install_signal_handlers(loop, shutdown_event)
 
     exit_code = 0

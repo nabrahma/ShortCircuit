@@ -757,6 +757,15 @@ class FyersAnalyzer:
             profile = self.profile_analyzer.calculate_market_profile(df, mode='VOLUME')
             if profile:
                 profile_rejection, _ = self.profile_analyzer.check_profile_rejection(df, ltp)
+                # Phase 75: Broadcast Volume Profile to UI for AMT Charting
+                get_dashboard_bridge().broadcast("AMT_UPDATE", {
+                    "symbol": symbol,
+                    "vah": profile.get('vah'),
+                    "poc": profile.get('poc'),
+                    "val": profile.get('val'),
+                    "counts": profile.get('counts', []).tolist() if hasattr(profile.get('counts'), 'tolist') else [],
+                    "bins": profile.get('bins', []).tolist() if hasattr(profile.get('bins'), 'tolist') else []
+                })
             vol_z = self.market_context.get_volume_z_score(df)
         except Exception as e:
             logger.warning(f"Profile/VolZ pre-calc error for edge {symbol}: {e}")
@@ -769,6 +778,7 @@ class FyersAnalyzer:
         )
         gr.g7_pass  = allowed
         gr.g7_value = regime_reason
+        get_dashboard_bridge().broadcast("GATE_UPDATE", {"symbol": symbol, "gate": "G7", "status": "PASS" if allowed else "FAIL", "value": regime_reason})
         if not allowed:
             gr.verdict = "REJECTED"
             gr.first_fail_gate = "G7_REGIME"
@@ -795,6 +805,7 @@ class FyersAnalyzer:
 
         gr.g1_pass  = ok
         gr.g1_value = round(gain_pct, 2)
+        get_dashboard_bridge().broadcast("GATE_UPDATE", {"symbol": symbol, "gate": "G1", "status": "PASS" if ok else "FAIL", "value": f"{gain_pct:.1f}%"})
         if not ok:
             gr.verdict = "REJECTED"
             gr.first_fail_gate  = "G1_GAIN_CONSTRAINTS"
@@ -814,6 +825,7 @@ class FyersAnalyzer:
         circuit_blocked = self._check_circuit_guard(symbol, ltp, depth_data)
         gr.g3_pass  = not circuit_blocked
         gr.g3_value = round(ltp, 2)
+        get_dashboard_bridge().broadcast("GATE_UPDATE", {"symbol": symbol, "gate": "G3", "status": "PASS" if not circuit_blocked else "FAIL"})
         if circuit_blocked:
             gr.verdict = "REJECTED"
             gr.first_fail_gate  = "G3_CIRCUIT_GUARD"
@@ -828,6 +840,7 @@ class FyersAnalyzer:
         momentum_blocked = self._is_momentum_too_strong(df, slope_now, slope_prev, vwap_sd, symbol, gain_pct)
         gr.g4_pass  = not momentum_blocked
         gr.g4_value = round(slope_now, 3)
+        get_dashboard_bridge().broadcast("GATE_UPDATE", {"symbol": symbol, "gate": "G4", "status": "PASS" if not momentum_blocked else "FAIL", "value": f"{slope_now:.1f}"})
         if momentum_blocked:
             gr.verdict = "REJECTED"
             gr.first_fail_gate  = "G4_MOMENTUM"
@@ -837,7 +850,9 @@ class FyersAnalyzer:
 
         # ── Edge-specific entry trigger check ─────────────────────────
         current_ltp = df.iloc[-1]['close']
-        if current_ltp >= edge_payload['entry_trigger']:
+        is_g5_pass = current_ltp < edge_payload['entry_trigger']
+        get_dashboard_bridge().broadcast("GATE_UPDATE", {"symbol": symbol, "gate": "G5", "status": "PASS" if is_g5_pass else "FAIL", "value": f"@{current_ltp}"})
+        if not is_g5_pass:
             gr.g5_pass  = False
             gr.g5_value = round(current_ltp - edge_payload['entry_trigger'], 4)
             gr.verdict  = "REJECTED"
@@ -876,6 +891,7 @@ class FyersAnalyzer:
 
         gr.g9_pass  = htf_ok
         gr.g9_value = htf_msg
+        get_dashboard_bridge().broadcast("GATE_UPDATE", {"symbol": symbol, "gate": "G9", "status": "PASS" if htf_ok else "FAIL", "value": htf_msg})
         if not htf_ok:
             gr.verdict = "REJECTED"
             gr.first_fail_gate  = "G9_HTF_CONFLUENCE"
@@ -905,6 +921,10 @@ class FyersAnalyzer:
 
         if edge_payload.get('recommended_sl') and edge_payload['recommended_sl'] < base_signal['stop_loss']:
             base_signal['stop_loss'] = edge_payload['recommended_sl']
+
+        get_dashboard_bridge().broadcast("CANDIDATE_PULSE", {"symbol": symbol, "status": "CONFIRMED"})
+        # G12: Pattern Quality
+        get_dashboard_bridge().broadcast("GATE_UPDATE", {"symbol": symbol, "gate": "G12", "status": "PASS", "value": edge_payload['confidence']})
 
         return base_signal
     def _finalize_signal(self, symbol, ltp, df, pattern_desc, slope, wall_msg, signal_meta: dict = None):
