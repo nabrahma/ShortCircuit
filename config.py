@@ -138,16 +138,20 @@ P66_G1_ROTATION_THRESHOLD_PCT: float = 0.030
 P66_G4_DECAY_CONFIRMATION_SEC: int = 120 
 
 # ============================================================================
+# PHASE 79: LEVERAGE GUARD (G14)
+# ============================================================================
+P79_G14_LEVERAGE_GUARD_ENABLED = True
+P79_G14_MIN_LEVERAGE = 4.5  # Reject if leverage < 4.5
+
+# ============================================================================
 # 6. EXIT ENGINE & RISK MULTIPLIERS
 # ============================================================================
 P51_SL_ATR_MULTIPLIER = 0.5
 P51_SL_MIN_TICK_BUFFER = 3
-P51_TP1_ATR_MULT = 1.5
-P51_TP2_ATR_MULT = 2.5
-P51_TP3_ATR_MULT = 3.5
-P51_TP3_TRAIL_ATR_MULT = 1.0
 
-P52_PARTIAL_EXIT_ENABLED: bool = True 
+# Phase 78: Single TP Multipliers (No Partials)
+P78_SINGLE_TP_ATR_MULT_DEFAULT = 1.0
+P78_SINGLE_TP_ATR_MULT_LOW_GAIN = 0.5
 P52_BREAKEVEN_AFTER_TP1: bool = True   
 P52_SL_MOVE_AFTER_TP2: bool = True     
 P52_CLEANUP_ON_STOP_FOCUS: bool = True 
@@ -244,3 +248,9 @@ def minutes_since_market_open() -> float:
         return 0.0
     delta = now - market_open
     return delta.total_seconds() / 60.0
+
+# Phase 81: Telegram Hardening & Menu
+P81_TELEGRAM_MENU_ENABLED        = True
+P81_TELEGRAM_RATE_LIMIT_HZ       = 2
+P81_TELEGRAM_BUFFER_WINDOW_SEC   = 2.0
+P81_TELEGRAM_STOP_CONFIRM_TIMEOUT = 30

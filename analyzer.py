@@ -387,10 +387,12 @@ class FyersAnalyzer:
             grl.record(gr)
             return None
 
-        # ── G13: Risk & Reward (Phase 65 Dynamic Scaling) ───────────
-        if getattr(config, 'P65_AMT_ENABLED', False) and gain_pct < 9.0:
-            signal_meta['tp1_atr_mult_override'] = 1.0
-            logger.info(f"[G13] Dynamic Risk Scaling applied for {symbol} (Gain: {gain_pct:.1f}%) -> TP1: 1.0x ATR")
+        # ── G13: Risk & Reward (Phase 78 Single TP) ───────────
+        if gain_pct < 9.0:
+            signal_meta['tp_atr_mult_override'] = getattr(config, 'P78_SINGLE_TP_ATR_MULT_LOW_GAIN', 0.5)
+            logger.info(f"[G13] Dynamic Risk Scaling applied for {symbol} (Gain: {gain_pct:.1f}%) -> TP: {signal_meta['tp_atr_mult_override']}x ATR")
+        else:
+            signal_meta['tp_atr_mult_override'] = getattr(config, 'P78_SINGLE_TP_ATR_MULT_DEFAULT', 1.0)
 
         # Phase 66: Snapshot Reference High (Peak of Day)
         # Ensure SL and Signal High are derived from the absolute top, even if rotating.
@@ -929,11 +931,12 @@ class FyersAnalyzer:
             grl.record(gr)
             return None
 
-        # ── G13: Risk & Reward (Phase 65 Dynamic Scaling) ───────────
-        if getattr(config, 'P65_AMT_ENABLED', False) and gain_pct < 9.0:
-            signal_meta['tp1_atr_mult_override'] = 1.0
-
-        # ── Finalize ───────────────────────────────────────────────────
+        # ── G13: Risk & Reward (Phase 78 Single TP) ───────────
+        if gain_pct < 9.0:
+            signal_meta['tp_atr_mult_override'] = getattr(config, 'P78_SINGLE_TP_ATR_MULT_LOW_GAIN', 0.5)
+            logger.info(f"[G13] dynamic scaling applied for {symbol} (gain: {gain_pct:.1f}%) -> TP: {signal_meta['tp_atr_mult_override']}x ATR")
+        else:
+            signal_meta['tp_atr_mult_override'] = getattr(config, 'P78_SINGLE_TP_ATR_MULT_DEFAULT', 1.0)
         gr.verdict = "ANALYZER_PASS"
         base_signal = self._finalize_signal(symbol, ltp, df, edge_desc, slope_now, "", signal_meta)
         if base_signal is None:
@@ -1031,9 +1034,7 @@ class FyersAnalyzer:
                 "nifty_trend": self.market_context.get_trend_label() if hasattr(self.market_context, 'get_trend_label') else "UNKNOWN",
                 "atr": atr,
                 "sl_price": sl_price,
-                "tp1_price": tp1,
-                "tp2_price": tp2,
-                "tp3_price": tp3,
+                "tp_price": ltp - (atr * signal_meta.get('tp_atr_mult_override', 1.0)),
             }
             
             obs_id = ml_logger.log_observation(symbol, ltp, features)
@@ -1065,7 +1066,7 @@ class FyersAnalyzer:
         signal_data["oi_direction"]   = signal_meta.get("oi_direction",   "unknown")
         
         # Phase 65: Dynamic Risk Scaling Override
-        if 'tp1_atr_mult_override' in signal_meta:
-            signal_data['tp1_atr_mult_override'] = signal_meta['tp1_atr_mult_override']
+        if 'tp_atr_mult_override' in signal_meta:
+            signal_data['tp_atr_mult_override'] = signal_meta['tp_atr_mult_override']
             
         return signal_data

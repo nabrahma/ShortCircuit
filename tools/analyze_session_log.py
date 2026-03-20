@@ -21,9 +21,10 @@ def parse_log_file(filepath):
     god_mode_re = re.compile(r"\[OK\] GOD MODE SIGNAL: NSE:([^ ]+) \| (.*)")
     gate_add_re = re.compile(r"\[GATE\] Added NSE:([^ ]+) to Validation Gate(.*)")
     gate_pass_re = re.compile(r"✅ \[VALIDATED\] NSE:([^ ]+) (.*)")
-    entry_re = re.compile(r"✅ \[ENTRY COMPLETE\] NSE:([^ ]+) (.*)")
+    entry_re = re.compile(r"(?:✅ \[ENTRY COMPLETE\]|\[ENTRY\]) (?:NSE:)?([A-Z0-9_\-]+) (.*)")
     exit_re = re.compile(r"\[EXIT\] (?:NSE:)?([^ ]+) (.*)")
     pnl_re = re.compile(r"Phase 69 Outcome recorded for (?:NSE:)?([^ ]+): ₹(-?\d+\.\d+)")
+    sync_re = re.compile(r"💰 CAPITAL SYNC \| .* \| slot=OCCUPIED → (?:NSE:)?([^ ]+)")
     
     # Events grouped by symbol. list of dicts: {'time': str, 'type': str, 'msg': str}
     traces = defaultdict(list)
@@ -122,18 +123,16 @@ def parse_log_file(filepath):
                 stats['entries'] += 1
                 continue
                 
-            # Exit
-            ex_m = exit_re.search(msg)
-            if ex_m:
-                sym = normalize_symbol(ex_m.group(1))
-                # Check for pnl= in exit message
-                if 'pnl=' in ex_m.group(2):
-                    try:
-                        pnl_str = ex_m.group(2).split('pnl=₹')[1]
-                        pnls[sym] = float(pnl_str)
-                    except:
-                        pass
                 traces[sym].append({'time': tstamp, 'type': 'EXIT', 'msg': f"Position Closed: {ex_m.group(2)}"})
+                continue
+                
+            # Capital Sync (Inferred Entry)
+            sync_m = sync_re.search(msg)
+            if sync_m:
+                sym = normalize_symbol(sync_m.group(1))
+                # Only add as inferred entry if we haven't seen an entry or inferred entry for this symbol yet
+                if not any(ev['type'] in ['ENTRY', 'INFERRED_ENTRY'] for ev in traces[sym]):
+                    traces[sym].append({'time': tstamp, 'type': 'INFERRED_ENTRY', 'msg': "Position detected via Capital Sync (Orphaned/Prev Session)"})
                 continue
 
     return traces, stats, pnls
@@ -166,8 +165,8 @@ def generate_markdown(filepath, traces, stats, pnls):
         for sym in sorted_syms:
             events = traces[sym]
             
-            # NOISE FILTER: Only include if the symbol reached PASSED_GATES or VALIDATION_WAIT
-            reached_validation = any(ev['type'] in ['PASSED_GATES', 'VALIDATION_WAIT', 'ENTRY'] for ev in events)
+            # NOISE FILTER: Only include if the symbol reached PASSED_GATES, VALIDATION_WAIT, ENTRY, or INFERRED_ENTRY
+            reached_validation = any(ev['type'] in ['PASSED_GATES', 'VALIDATION_WAIT', 'ENTRY', 'INFERRED_ENTRY'] for ev in events)
             if not reached_validation:
                 continue
                 
@@ -181,7 +180,7 @@ def generate_markdown(filepath, traces, stats, pnls):
             # Find the index of the first actual validation event (PASSED_GATES or VALIDATION_WAIT)
             first_val_idx = -1
             for i, ev in enumerate(events):
-                if ev['type'] in ['PASSED_GATES', 'VALIDATION_WAIT']:
+                if ev['type'] in ['PASSED_GATES', 'VALIDATION_WAIT', 'INFERRED_ENTRY']:
                     first_val_idx = i
                     break
                     
@@ -196,7 +195,7 @@ def generate_markdown(filepath, traces, stats, pnls):
             whitelist = ['PASSED_GATES', 'VALIDATION_WAIT', 'TRIGGERED', 'ENTRY', 'EXIT', 'PNL']
             
             for ev in filtered_events:
-                if ev['type'] not in whitelist:
+                if ev['type'] not in whitelist and ev['type'] != 'INFERRED_ENTRY':
                     continue
                     
                 emoji = "⏱️"
@@ -204,6 +203,7 @@ def generate_markdown(filepath, traces, stats, pnls):
                 elif ev['type'] == 'VALIDATION_WAIT': emoji = "⏳"
                 elif ev['type'] == 'TRIGGERED': emoji = "⚡"
                 elif ev['type'] == 'ENTRY': emoji = "🚀"
+                elif ev['type'] == 'INFERRED_ENTRY': emoji = "👻"
                 elif ev['type'] == 'EXIT': emoji = "🏁"
                 elif ev['type'] == 'PNL': emoji = "💰"
                 

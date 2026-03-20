@@ -59,6 +59,7 @@ class OrderManager:
         self.position_locks:   Dict[str, asyncio.Lock] = {}
         self.exit_in_progress: Dict[str, bool] = {}
         self.hard_stops:       Dict[str, str]  = {}
+        self.partial_exits_in_progress: Dict[str, Dict[str, float]] = {} # Phase 77: {symbol: {reason: timestamp}}
 
         # FIX 4: Execution failure cooldown tracker
         # { symbol: datetime_unblock }
@@ -135,34 +136,18 @@ class OrderManager:
         return self._round_sl_to_tick(sl_price, 'SELL', tick)
 
     def compute_take_profits(self, entry: float, signal: dict) -> dict:
-        """Phase 51: 40/40/20 Target Split. Phase 65: Dynamic scaling."""
+        """Phase 78: Single 100% Take Profit Target."""
         atr = signal.get('atr', 0)
         if atr == 0:
-            return {
-                'tp1': entry * 0.985, 'tp1_qty_pct': 0.40,
-                'tp2': entry * 0.975, 'tp2_qty_pct': 0.40,
-                'tp3': entry * 0.965, 'tp3_trail_atr': 0.05
-            }
+            return {'tp': entry * 0.985} # Default 1.5%
 
-        tp1_mult = signal.get('tp1_atr_mult_override', getattr(config, 'P51_TP1_ATR_MULT', 1.5))
-        tp2_mult = getattr(config, 'P51_TP2_ATR_MULT', 2.5)
-        tp3_mult = getattr(config, 'P51_TP3_ATR_MULT', 3.5)
+        # Use signal override or default
+        tp_mult = signal.get('tp_atr_mult_override') or \
+                  signal.get('tp1_atr_mult_override') or \
+                  getattr(config, 'P78_SINGLE_TP_ATR_MULT_DEFAULT', 1.0)
 
-        if signal.get('execution_mode') == 'CAUTIOUS' and 'tp1_atr_mult_override' not in signal:
-            # Tighter TP for wide spread (only if no Phase 65 override already present)
-            tp1_mult *= 0.7  # e.g. 1.5 -> 1.05
-            tp2_mult *= 0.7  # e.g. 2.5 -> 1.75
-            tp3_mult *= 0.7  # e.g. 3.5 -> 2.45
-
-        tp1 = entry - atr * tp1_mult
-        tp2 = entry - atr * tp2_mult
-        tp3 = entry - atr * tp3_mult
-
-        return {
-            'tp1': tp1, 'tp1_qty_pct': 0.40,
-            'tp2': tp2, 'tp2_qty_pct': 0.40,
-            'tp3': tp3, 'tp3_trail_atr': atr * getattr(config, 'P51_TP3_TRAIL_ATR_MULT', 1.0)
-        }
+        tp = entry - atr * tp_mult
+        return {'tp': tp}
 
     async def _verify_fill_via_rest(self, order_id: str) -> Optional[float]:
         """
@@ -482,6 +467,26 @@ class OrderManager:
                 logger.error(f"❌ [ENTRY] {symbol}: LTP is 0, cannot size position")
                 self._set_exec_cooldown(symbol, reason='LTP_ZERO', seconds=300)
                 return None
+
+            # ── PHASE 79: G14 Leverage Guard ──────────────────────────────
+            if getattr(config, 'P79_G14_LEVERAGE_GUARD_ENABLED', True):
+                leverage = await self.broker.get_symbol_leverage(symbol, ltp)
+                min_lev = getattr(config, 'P79_G14_MIN_LEVERAGE', 4.5)
+                
+                if leverage < min_lev:
+                    logger.info(f"[G14_REJECT] {symbol} — Leverage {leverage}x < {min_lev}x requirement")
+                    if self.telegram:
+                        await self.telegram.send_alert(
+                            f"🚫 **REJECTED (G14)**\n\n"
+                            f"Symbol: `{symbol}`\n"
+                            f"Reason:  **Low Leverage Guard**\n"
+                            f"Lev:     {leverage}x\n"
+                            f"MinReq:  {min_lev}x\n\n"
+                            f"Stock requires too much margin (CNC/Reduced Leverage). Skipping."
+                        )
+                    self._set_exec_cooldown(symbol, reason='G14_LOW_LEVERAGE', seconds=43200) # 12-hour session blacklist
+                    return None
+                logger.info(f"✅ [G14_PASS] {symbol} leverage {leverage}x verified.")
 
             if self.capital:
                 qty, required_capital, margin_req = self.capital.compute_qty(symbol, ltp)
@@ -861,6 +866,21 @@ class OrderManager:
                 pos = self.active_positions[symbol]
                 if pos['qty'] < quantity:
                     return {"status": "FAILED", "error": f"Insufficient qty: {pos['qty']} < {quantity}"}
+
+                # ── IDEMPOTENCY GUARD ──
+                # Phase 77: Reject if the same TP level for this symbol was triggered in last 30s
+                import time
+                now_ts = time.time()
+                symbol_partials = self.partial_exits_in_progress.get(symbol, {})
+                last_ts = symbol_partials.get(reason, 0)
+                if now_ts - last_ts < 30:
+                    logger.warning(f"🚫 [PARTIAL EXIT] Duplicate {reason} for {symbol} suppressed (last attempt {now_ts - last_ts:.1f}s ago)")
+                    return {"status": "FAILED", "error": "Duplicate request (idempotency)"}
+
+                # Mark as in progress
+                if symbol not in self.partial_exits_in_progress:
+                    self.partial_exits_in_progress[symbol] = {}
+                self.partial_exits_in_progress[symbol][reason] = now_ts
 
                 logger.info(f"🔻 [PARTIAL EXIT] Closing {quantity} shares of {symbol} ({reason})")
                 

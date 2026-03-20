@@ -1,6 +1,12 @@
 import os
 import sys
 
+# Standardize Environment for Tests
+os.environ.setdefault('FYERS_CLIENT_ID', 'dummy')
+os.environ.setdefault('FYERS_SECRET_ID', 'dummy')
+os.environ.setdefault('FYERS_REDIRECT_URI', 'http://localhost/')
+os.environ.setdefault('FYERS_ACCESS_TOKEN', 'token')
+
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:

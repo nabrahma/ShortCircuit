@@ -172,7 +172,7 @@ def test_g1_soft_threshold(analyzer, monkeypatch):
         print("Result is None in Case 1")
 
     assert res is not None
-    assert res.get('tp1_atr_mult_override') == 1.0
+    assert res.get('tp_atr_mult_override') == 0.5
 
     # CASE 2: 8.0% Gain + No Rejection -> Should REJECT G1 (req 9.0)
     analyzer.profile_analyzer.check_profile_rejection = MagicMock(return_value=(False, "VALUE_ACCEPTANCE"))

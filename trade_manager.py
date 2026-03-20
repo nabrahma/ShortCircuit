@@ -663,8 +663,20 @@ class TradeManager:
                         "offlineOrder": False
                     }
 
-                    logger.info(f"Squaring off {symbol}: Qty {exit_qty} Side {exit_side}")
+                    logger.info(f"[EOD] Squaring off {symbol}: Qty {exit_qty} Side {exit_side}")
                     res = self.fyers.place_order(data=data)
+                    
+                    # Phase 80: Standardize log for session analyzer
+                    avg_price = pos.get('avgPrice', 0)
+                    exit_price = pos.get('lp', ltp if 'ltp' in locals() else 0)
+                    pnl_estimate = 0.0
+                    if avg_price > 0 and exit_price > 0:
+                        if net_qty < 0: # SHORT
+                            pnl_estimate = (avg_price - exit_price) * abs(net_qty)
+                        elif net_qty > 0: # LONG
+                            pnl_estimate = (exit_price - avg_price) * abs(net_qty)
+                    
+                    logger.info(f"[EXIT] {symbol} reason=EOD_SQUAREOFF exit=₹{exit_price:.2f} pnl=₹{pnl_estimate:.2f}")
                     logger.info(f"Square-off Response: {res}")
                     
                     # Phase 51 [G13]: Record outcome

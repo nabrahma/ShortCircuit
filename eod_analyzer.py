@@ -160,11 +160,9 @@ class EODAnalyzer:
         """
         entry_price = obs.get("ltp")
         sl_price = obs.get("sl_price")
-        tp1 = obs.get("tp1_price")
-        tp2 = obs.get("tp2_price")
-        tp3 = obs.get("tp3_price")
+        tp_price = obs.get("tp_price") or obs.get("tp1_price")
         
-        if not all([entry_price, sl_price, tp1]):
+        if not all([entry_price, sl_price, tp_price]):
             return None
 
         # Position State
@@ -176,6 +174,7 @@ class EODAnalyzer:
         exit_time = None
         exit_price = None
         outcome = "LOSS" # Default
+        exit_reason = None
         
         # Scalping is SHORT only
         for _, row in df.iterrows():
@@ -196,6 +195,7 @@ class EODAnalyzer:
                 state = "CLOSED"
                 exit_price = current_sl
                 exit_time = row['dt']
+                exit_reason = "SL_HIT"
                 # Determine outcome based on current TP state (if we moved SL to BE)
                 if current_sl <= entry_price:
                     outcome = "BREAKEVEN" if abs(current_sl - entry_price) < 0.1 else "WIN"
@@ -205,24 +205,19 @@ class EODAnalyzer:
                 
             # Check Take Profits
             if state == "ACTIVE":
-                if low <= tp3 and tp3 > 0:
-                    # Final TP Hit
-                    outcome = "WIN"
-                    exit_price = tp3
-                    exit_time = row['dt']
+                if low <= tp_price and tp_price > 0:
+                    exit_price = tp_price
+                    exit_reason = "TP_HIT"
                     state = "CLOSED"
+                    outcome = "WIN"
+                    exit_time = row['dt']
                     break
-                elif low <= tp2 and tp2 > 0:
-                    # TP2 Hit -> Move SL to TP1 level
-                    current_sl = tp1
-                elif low <= tp1 and tp1 > 0:
-                    # TP1 Hit -> Move SL to Entry (Breakeven)
-                    current_sl = entry_price
 
         # EOD Square-off if still active
         if state == "ACTIVE":
             exit_price = df.iloc[-1]['close']
             exit_time = df.iloc[-1]['dt']
+            exit_reason = "EOD_SQUAREOFF"
             outcome = "WIN" if exit_price < entry_price else "LOSS"
 
         hold_time = (exit_time - start_time).total_seconds() / 60

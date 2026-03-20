@@ -94,9 +94,7 @@ def objective(trial, df):
     
     # 2. Define Exit Multiplier Search Space (ATR Multipliers)
     sl_mult = trial.suggest_float("P51_SL_ATR_MULTIPLIER", 0.3, 0.8)
-    tp1_mult = trial.suggest_float("P51_TP1_ATR_MULT", 1.0, 2.5)
-    tp2_mult = trial.suggest_float("P51_TP2_ATR_MULT", 2.0, 4.0)
-    tp3_mult = trial.suggest_float("P51_TP3_ATR_MULT", 3.0, 6.0)
+    tp_mult = trial.suggest_float("P78_SINGLE_TP_ATR_MULT_DEFAULT", 0.8, 2.5)
     
     # 3. Simulate Logic
     # Filter for trades that pass gates
@@ -122,25 +120,21 @@ def objective(trial, df):
         atr_pct = (atr / entry) * 100
         
         trial_sl_pct = sl_mult * atr_pct
-        trial_tp1_pct = tp1_mult * atr_pct
-        trial_tp2_pct = tp2_mult * atr_pct
-        trial_tp3_pct = tp3_mult * atr_pct
+        trial_tp_pct = tp_mult * atr_pct
         
+        # Override for low gain
+        if row['gain_pct'] < 9.0:
+            trial_tp_pct = 0.5 * atr_pct
+
         mae = row.get('max_adverse', 100) # MAE is price going AGAINST us
         mfe = row.get('max_favorable', -100) # MFE is price going WITH us
         
         # Virtual Simulation Check
         if mae >= trial_sl_pct:
             trade_pnl = -trial_sl_pct
-        elif mfe >= trial_tp3_pct:
-            trade_pnl = trial_tp3_pct
+        elif mfe >= trial_tp_pct:
+            trade_pnl = trial_tp_pct
             wins += 1
-        elif mfe >= trial_tp2_pct:
-            trade_pnl = trial_tp2_pct * 0.8 # Weighted exit
-            wins += 0.8
-        elif mfe >= trial_tp1_pct:
-            trade_pnl = trial_tp1_pct * 0.4
-            wins += 0.4
         else:
             trade_pnl = mfe * 0.1
             

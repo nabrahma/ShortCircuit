@@ -583,8 +583,6 @@ class FocusEngine:
                     del self.pending_signals[symbol]
                     continue
                 
-                # G11/G12 invalidation is handled by the buffer check above.
-
                 # C. TIMEOUT (Phase 51 G11: Dynamic expires_at)
                 elif datetime.datetime.now(pytz.timezone('Asia/Kolkata')) > pending.get('expires_at', datetime.datetime.now(pytz.timezone('Asia/Kolkata')) + datetime.timedelta(minutes=15)):
                     logger.info(f"⌛ [TIMEOUT] {symbol} expired at {pending.get('expires_at')}")
@@ -663,9 +661,7 @@ class FocusEngine:
 
         # Phase 52: Compute TP levels from OrderManager
         tps = {}
-        if (self.order_manager
-                and getattr(config, 'P52_PARTIAL_EXIT_ENABLED', True)
-                and entry_price > 0):
+        if (self.order_manager and entry_price > 0):
             try:
                 tps = self.order_manager.compute_take_profits(entry_price, position_data)
             except Exception as e:
@@ -676,9 +672,7 @@ class FocusEngine:
             'entry':           entry_price,
             'sl':              sl_price,
             'soft_sl':         soft_sl,
-            'qty':             actual_qty,
-            'remaining_qty':   actual_qty,       # Phase 52: tracks open qty
-            'sl_order_id':     position_data.get('sl_id', None),  # Phase 52: for SL modify
+            'tp':              tps.get('tp', entry_price * 0.985),
             'status':          'OPEN',
             'highest_profit':  -999,
             'message_id':      message_id,
@@ -688,27 +682,15 @@ class FocusEngine:
                 else (trade_id or f"Trd_{int(time.time())}")
             ),
             'last_price':      entry_price,
-            # Phase 41.3 legacy state (kept for dashboard compatibility)
-            'target_extended': False,
-            'current_target':  tps.get('tp1', entry_price * 0.985),
-            # Phase 52: Partial exit state
-            'tp1':             tps.get('tp1', 0),
-            'tp2':             tps.get('tp2', 0),
-            'tp3':             tps.get('tp3', 0),
-            'tp1_qty_pct':     tps.get('tp1_qty_pct', 0.40),
-            'tp2_qty_pct':     tps.get('tp2_qty_pct', 0.40),
-            'tp3_trail_atr':   tps.get('tp3_trail_atr', 0),
-            'tp1_hit':         False,
-            'tp2_hit':         False,
-            'tp3_hit':         False,
-            'trailing_sl':     None,             # Phase 52: trailing stop for TP3 runner
+            'qty':             actual_qty,
+            'remaining_qty':   actual_qty,
+            'start_time':      time.time(),
         }
         
         self.is_running = True
         logger.info(
-            f"[FOCUS] Started {symbol} entry=₹{entry_price} "
-            f"tp1=₹{tps.get('tp1',0):.2f} tp2=₹{tps.get('tp2',0):.2f} "
-            f"tp3=₹{tps.get('tp3',0):.2f} qty={actual_qty}"
+            f"[FOCUS] Started {symbol} qty={actual_qty} entry=₹{entry_price:.2f} "
+            f"tp=₹{self.active_trade['tp']:.2f} sl=₹{sl_price:.2f}"
         )
         
         # Start Loop
@@ -777,129 +759,17 @@ class FocusEngine:
                     
                     self.active_trade['last_price'] = ltp
                     
-                    # ── PHASE 52: PARTIAL EXIT ENGINE ────────────────────────────
+                    # ── PHASE 78: SINGLE TP ENGINE ────────────────────────────
                     t = self.active_trade
-                    partial_enabled = getattr(config, 'P52_PARTIAL_EXIT_ENABLED', True)
-
-                    if partial_enabled and t.get('tp1') and t['remaining_qty'] > 0:
-                        # ── TP1: Close 40%, move SL to breakeven ─────────────────
-                        if not t['tp1_hit'] and ltp <= t['tp1']:
-                            tp1_qty = max(1, int(t['qty'] * t['tp1_qty_pct']))
-                            logger.info(f"🎯 [TP1] {symbol} hit ₹{t['tp1']:.2f} — closing {tp1_qty} of {t['remaining_qty']}")
-
-                            if self._event_loop:
-                                future = asyncio.run_coroutine_threadsafe(
-                                    self.order_manager.close_partial_position(symbol, tp1_qty, "TP1_HIT"),
-                                    self._event_loop
-                                )
-                                # Wait synchronously for result to avoid state race
-                                result = future.result(timeout=10)
-                            else:
-                                result = {"status": "FAILED", "error": "No event loop"}
-
-                            if result and result.get('status') == 'SUCCESS':
-                                t['tp1_hit'] = True
-                                t['remaining_qty'] -= tp1_qty
-
-                                # Move SL to breakeven (entry price)
-                                if getattr(config, 'P52_BREAKEVEN_AFTER_TP1', True):
-                                    t['sl'] = t['entry']
-                                    if self._event_loop:
-                                        asyncio.run_coroutine_threadsafe(
-                                            self.order_manager.modify_sl_qty(symbol, t['remaining_qty']),
-                                            self._event_loop
-                                        )
-                                    logger.info(f"✅ [TP1] {symbol} SL moved to breakeven ₹{t['entry']:.2f}, remaining qty={t['remaining_qty']}")
-
-                                if self.telegram_bot:
-                                    asyncio.run_coroutine_threadsafe(
-                                        self.telegram_bot.send_alert(
-                                            f"🎯 **TP1 HIT** — `{symbol}`\n"
-                                            f"Closed {tp1_qty} shares @ ₹{t['tp1']:.2f}\n"
-                                            f"SL → Breakeven ₹{t['entry']:.2f}\n"
-                                            f"Remaining: {t['remaining_qty']} shares riding to TP2"
-                                        ),
-                                        self._event_loop
-                                    )
-                            else:
-                                logger.error(f"[TP1] Partial close FAILED for {symbol}: {result}")
-
-                        # ── TP2: Close another 40%, move SL to TP1 level ────────
-                        elif t['tp1_hit'] and not t['tp2_hit'] and t.get('tp2') and ltp <= t['tp2']:
-                            tp2_qty = max(1, int(t['qty'] * t['tp2_qty_pct']))
-                            logger.info(f"🎯 [TP2] {symbol} hit ₹{t['tp2']:.2f} — closing {tp2_qty}")
-
-                            if self._event_loop:
-                                future = asyncio.run_coroutine_threadsafe(
-                                    self.order_manager.close_partial_position(symbol, tp2_qty, "TP2_HIT"),
-                                    self._event_loop
-                                )
-                                result = future.result(timeout=10)
-                            else:
-                                result = {"status": "FAILED"}
-
-                            if result and result.get('status') == 'SUCCESS':
-                                t['tp2_hit'] = True
-                                t['remaining_qty'] -= tp2_qty
-
-                                # Move SL to TP1 level — lock in TP1 profit on remaining
-                                if getattr(config, 'P52_SL_MOVE_AFTER_TP2', True) and t.get('tp1'):
-                                    t['sl'] = t['tp1']
-                                    if self._event_loop:
-                                        asyncio.run_coroutine_threadsafe(
-                                            self.order_manager.modify_sl_qty(symbol, t['remaining_qty']),
-                                            self._event_loop
-                                        )
-                                    logger.info(f"✅ [TP2] {symbol} SL → TP1 level ₹{t['tp1']:.2f}, remaining qty={t['remaining_qty']}")
-
-                                # Initialise trailing SL for TP3 runner
-                                t['trailing_sl'] = ltp + t.get('tp3_trail_atr', ltp * 0.005)
-
-                                if self.telegram_bot:
-                                    asyncio.run_coroutine_threadsafe(
-                                        self.telegram_bot.send_alert(
-                                            f"🎯 **TP2 HIT** — `{symbol}`\n"
-                                            f"Closed {tp2_qty} shares @ ₹{t['tp2']:.2f}\n"
-                                            f"SL → ₹{t['tp1']:.2f} (TP1 lock)\n"
-                                            f"Runner: {t['remaining_qty']} shares, trailing active"
-                                        ),
-                                        self._event_loop
-                                    )
-                            else:
-                                logger.error(f"[TP2] Partial close FAILED for {symbol}: {result}")
-
-                        # ── TP3: Trail remaining 20% ──────────────────────────────
-                        elif t['tp2_hit'] and not t['tp3_hit'] and t['remaining_qty'] > 0:
-                            trail_atr = t.get('tp3_trail_atr', 0)
-                            if trail_atr > 0:
-                                new_trail_sl = ltp + trail_atr   # SHORT: trail SL above price
-                                # Only tighten — never widen the trailing stop
-                                if t['trailing_sl'] is None or new_trail_sl < t['trailing_sl']:
-                                    t['trailing_sl'] = new_trail_sl
-
-                                # If price hits trailing SL → close remaining
-                                if ltp >= t['trailing_sl']:
-                                    logger.info(f"🏁 [TP3 TRAIL EXIT] {symbol} trailing SL hit @ ₹{t['trailing_sl']:.2f}")
-                                    if self.order_manager and self._event_loop:
-                                        asyncio.run_coroutine_threadsafe(
-                                            self.order_manager.safe_exit(symbol, "TP3_TRAIL_STOP"),
-                                            self._event_loop
-                                        )
-                                    t['tp3_hit'] = True
-                                    self.stop_focus("TP3_TRAIL_HIT")
-                                    return
-
-                            # Hard TP3 level as fallback if ATR trail not configured
-                            elif t.get('tp3') and ltp <= t['tp3']:
-                                logger.info(f"🏁 [TP3] {symbol} hit hard level ₹{t['tp3']:.2f} — closing runner")
-                                if self.order_manager and self._event_loop:
-                                    asyncio.run_coroutine_threadsafe(
-                                        self.order_manager.safe_exit(symbol, "TP3_HIT"),
-                                        self._event_loop
-                                    )
-                                t['tp3_hit'] = True
-                                self.stop_focus("TP3_HIT")
-                                return
+                    if ltp <= t['tp']:
+                        logger.info(f"🎯 [TP] {symbol} hit ₹{t['tp']:.2f} — closing 100% ({t['remaining_qty']} shares)")
+                        if self.order_manager and self._event_loop:
+                            asyncio.run_coroutine_threadsafe(
+                                self.order_manager.safe_exit(symbol, "TP_HIT"),
+                                self._event_loop
+                            )
+                        self.stop_focus("TP_HIT")
+                        return
 
                     # ── SOFT STOP (existing logic — keep for non-partial-exit fallback) ──
                     elif not partial_enabled and self.discretionary_engine and self.order_manager:

@@ -198,6 +198,10 @@ class FyersBrokerInterface:
         self._quote_cache: dict[str, CacheEntry] = {}
         self._quote_cache_lock = threading.Lock()
         self._ws_subscribed_symbols: list[str] = []
+        
+        # Phase 79: Leverage cache (symbol -> leverage_float)
+        self._leverage_cache: dict[str, float] = {}
+        self._leverage_cache_lock = threading.Lock()
         self._ws_subscribed_symbols_set: set[str] = set()
 
         # PRD-007: Cache reliability state machine
@@ -1424,6 +1428,53 @@ class FyersBrokerInterface:
         except Exception as e:
             logger.error(f"get_funds failed: {e}")
             raise
+
+    async def get_symbol_leverage(self, symbol: str, price: float) -> float:
+        """
+        Phase 79: Fetch actual leverage for a symbol using fyers.order_calc.
+        Leverage = Price / Margin_Required.
+        """
+        if not symbol:
+            return 1.0
+
+        # Check Cache
+        with self._leverage_cache_lock:
+            if symbol in self._leverage_cache:
+                return self._leverage_cache[symbol]
+
+        # Fetch from Broker
+        try:
+            data = {
+                "data": [
+                    {
+                        "symbol": symbol,
+                        "qty": 1,
+                        "side": 1,  # 1 for Buy (margin check is same for both ideally)
+                        "type": 2,  # 2 for Market
+                        "productType": "INTRADAY",
+                        "limitPrice": 0,
+                        "stopPrice": 0
+                    }
+                ]
+            }
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(None, self.rest_client.order_calc, data)
+            
+            if response and response.get('s') == 'ok' and response.get('data'):
+                margin = response['data'][0].get('margin', 0)
+                if margin > 0:
+                    leverage = round(price / margin, 2)
+                    with self._leverage_cache_lock:
+                        self._leverage_cache[symbol] = leverage
+                    logger.info(f"[BROKER] Dynamic Leverage detected for {symbol}: {leverage}x (Margin: ₹{margin:.2f} @ ₹{price:.2f})")
+                    return leverage
+            
+            logger.warning(f"[BROKER] Could not detect leverage for {symbol}, response: {response}. Defaulting to 1.0x")
+            return 1.0
+            
+        except Exception as e:
+            logger.error(f"[BROKER] Leverage detection failed for {symbol}: {e}. Defaulting to 1.0x")
+            return 1.0
 
     async def get_all_positions(self) -> List[Dict]:
         """Get all open positions (Cache first)."""

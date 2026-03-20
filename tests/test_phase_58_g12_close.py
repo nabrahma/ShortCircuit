@@ -42,7 +42,8 @@ async def test_g12_wick_survival_and_close_entry(focus_engine):
     and a close below trigger price DOES execute the signal.
     """
     IST = pytz.timezone('Asia/Kolkata')
-    now = datetime.datetime.now(IST)
+    # Use a fixed morning time (10:00 AM IST) to avoid EOD Guard (15:10)
+    now = datetime.datetime(2026, 3, 20, 10, 0, 0, tzinfo=IST)
     current_min = now.replace(second=0, microsecond=0)
     expected_ts = int(current_min.timestamp()) - 60
     
@@ -81,40 +82,44 @@ async def test_g12_wick_survival_and_close_entry(focus_engine):
     ]
     focus_engine.fyers.history = MagicMock(return_value={'s': 'ok', 'candles': [wick_candle]})
     
-    # Run iteration
-    await focus_engine.check_pending_signals(None)
-    
-    # Verify:
-    # 1. Signal NOT deleted (should survive the wick since it didn't CLOSE above 105.21)
-    assert symbol in focus_engine.pending_signals
-    # 2. last_evaluated_minute should be set
-    assert focus_engine.pending_signals[symbol]['last_evaluated_minute'] == current_min
-    # 3. Enter position NOT called
-    assert focus_engine.order_manager.enter_position.call_count == 0
-    
-    # --- STEP 2: TEST CLOSE ENTRY ---
-    # Move time forward by 1 minute
-    new_min = current_min + datetime.timedelta(minutes=1)
-    new_expected_ts = int(new_min.timestamp()) - 60
-    
-    # Mock history to return a candle that closes below trigger
-    # Candle format: [epoch, open, high, low, close, volume]
-    entry_candle = [
-        new_expected_ts, 
-        100.5, 
-        101.0, 
-        99.5, 
-        99.5, # Close is 99.5 (Less than 100.0 - TRIGGERED!)
-        6000
-    ]
-    focus_engine.fyers.history = MagicMock(return_value={'s': 'ok', 'candles': [entry_candle]})
-    
-    # We need to mock datetime.now(IST) to return a time within the new_min
-    mock_now = new_min + datetime.timedelta(seconds=5)
+    # Step 1: Run with mocked time (10:00 AM IST)
+    mock_now = current_min + datetime.timedelta(seconds=5)
     with patch('datetime.datetime') as mock_dt:
         mock_dt.now.return_value = mock_now
-        mock_dt.timedelta = datetime.timedelta # Keep real timedelta
+        mock_dt.now.side_effect = None # ensure it returns mock_now
+        mock_dt.timedelta = datetime.timedelta
         
+        # Run iteration
+        await focus_engine.check_pending_signals(None)
+    
+        # Verify:
+        # 1. Signal NOT deleted (should survive the wick since it didn't CLOSE above 105.21)
+        assert symbol in focus_engine.pending_signals
+        # 2. last_evaluated_minute should be set
+        assert focus_engine.pending_signals[symbol]['last_evaluated_minute'] == current_min
+        # 3. Enter position NOT called
+        assert focus_engine.order_manager.enter_position.call_count == 0
+        
+        # --- STEP 2: TEST CLOSE ENTRY ---
+        # Move time forward by 1 minute
+        new_min = current_min + datetime.timedelta(minutes=1)
+        new_expected_ts = int(new_min.timestamp()) - 60
+        
+        # Mock history to return a candle that closes below trigger
+        # Candle format: [epoch, open, high, low, close, volume]
+        entry_candle = [
+            new_expected_ts, 
+            100.5, 
+            101.0, 
+            99.5, 
+            99.5, # Close is 99.5 (Less than 100.0 - TRIGGERED!)
+            6000
+        ]
+        focus_engine.fyers.history = MagicMock(return_value={'s': 'ok', 'candles': [entry_candle]})
+        
+        # Update mock time for Step 2
+        mock_dt.now.return_value = new_min + datetime.timedelta(seconds=5)
+            
         # Run iteration
         await focus_engine.check_pending_signals(None)
     

@@ -176,6 +176,7 @@ async def test_order_manager_backward_compatible():
     broker_mock.wait_for_fill.return_value = True
     broker_mock.get_order_status.return_value = 'FILLED'
     broker_mock.get_ltp.return_value = 100.0
+    broker_mock.get_symbol_leverage = AsyncMock(return_value=5.0)
 
     capital_mock.compute_qty.return_value = (2, 1000.0, 200.0)
     capital_mock.get_slot_status.return_value = {

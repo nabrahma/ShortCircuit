@@ -687,13 +687,32 @@ async def main() -> int:
                 ctx.focus_engine.stop("EOD_SQUAREOFF")
                 logger.info("[EOD] FocusEngine validation monitor stopped before square-off.")
 
-            message = await asyncio.to_thread(ctx.trade_manager.close_all_positions)
-            await _notify(f"[EOD] Square-off result:\n{message}")
+            try:
+                # Add timeout to prevent hanging on broker connection issues
+                message = await asyncio.wait_for(
+                    asyncio.to_thread(ctx.trade_manager.close_all_positions),
+                    timeout=60
+                )
+                await _notify(f"[EOD] Square-off result:\n{message}")
+            except asyncio.TimeoutError:
+                logger.error("[EOD] Square-off timed out after 60s!")
+                await _notify("⚠️ EOD Square-off TIMED OUT. Some positions might stay open!")
+            except Exception as exc:
+                logger.error("[EOD] Square-off failed: %s", exc)
+                await _notify(f"❌ EOD Square-off FAILED: {exc}")
 
         async def _run_analysis():
-            analyzer = EODAnalyzer(fyers_client=ctx.broker.rest_client, db=ctx.db_manager)
-            report = await analyzer.run_daily_analysis()
-            await _notify(f"EOD Analysis Complete.\n\n{str(report)[:3000]}")
+            try:
+                # Timeout covers both Simulation (Ghost Trading) and report generation
+                analyzer = EODAnalyzer(fyers_client=ctx.broker.rest_client, db=ctx.db_manager)
+                report = await asyncio.wait_for(analyzer.run_daily_analysis(), timeout=90)
+                await _notify(f"EOD Analysis Complete.\n\n{str(report)[:3000]}")
+            except asyncio.TimeoutError:
+                logger.error("[EOD] Analysis timed out after 90s!")
+                await _notify("⚠️ EOD Analysis (Ghost Trading) TIMED OUT.")
+            except Exception as exc:
+                logger.error("[EOD] Analysis failed: %s", exc)
+                await _notify(f"❌ EOD Analysis FAILED: {exc}")
 
             # PRD-008: Gate result EOD flush
             try:

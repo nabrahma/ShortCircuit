@@ -87,9 +87,7 @@ FEATURE_COLUMNS = [
     # Risk Parameters (for EOD Simulation)
     "atr",
     "sl_price",
-    "tp1_price",
-    "tp2_price",
-    "tp3_price",
+    "tp_price",
     
     # OI (if available)
     "oi",               # Open interest
@@ -231,9 +229,7 @@ class MLDataLogger:
             # Risk Parameters
             "atr": features.get("atr", 0),
             "sl_price": features.get("sl_price", 0),
-            "tp1_price": features.get("tp1_price", 0),
-            "tp2_price": features.get("tp2_price", 0),
-            "tp3_price": features.get("tp3_price", 0),
+            "tp_price": features.get("tp_price", 0),
             
             "oi": features.get("oi", 0),
             "oi_change_pct": features.get("oi_change_pct", 0),

@@ -12,11 +12,14 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional, Dict, Any
 from zoneinfo import ZoneInfo
+import config
 from telegram import (
     Update,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
-    Message
+    Message,
+    BotCommand,
+    BotCommandScopeDefault
 )
 from telegram.ext import (
     Application,
@@ -86,6 +89,9 @@ class ShortCircuitBot:
         self._session_trades = []     # Closed trades this session
         self._win_streak = 0
         self._loss_streak = 0
+        self._shutdown_event: Optional[asyncio.Event] = None
+        self._alert_queue = asyncio.Queue()
+        self._throttler_task: Optional[asyncio.Task] = None
         logger.info(f"🤖 Telegram Bot initialized | Auto Mode: OFF")
     # ════════════════════════════════════════════════════════════
     # PUBLIC API — used by other modules
@@ -626,14 +632,21 @@ class ShortCircuitBot:
         if not self.capital_manager:
             return "Capital: N/A\n"
         try:
-            cs = self.capital_manager.get_slot_status()
+            margin = self.capital_manager.get_available_margin()
+            real_cap = self.capital_manager.get_real_time_capital()
+            bp = real_cap * 5  # 5x leverage
+            
+            margin_str = f"₹{margin:.0f}" if margin > 0 else "N/A"
+            cap_str = f"₹{real_cap:.0f}" if real_cap > 0 else "N/A"
+            bp_str = f"₹{bp:.0f}" if bp > 0 else "N/A"
+            
             return (
-                f"Margin (Live): ₹{cs.get('real_margin', 0):.0f}\n"
-                f"Leverage:      {cs.get('leverage', 5)}×\n"
-                f"Buying Power:  ₹{cs.get('buying_power', 0):.0f}\n"
-                f"Slot Free:     {'Yes ✅' if cs.get('slot_free') else 'No 🔴'}\n"
+                f"Margin (Live): <b>{margin_str}</b>\n"
+                f"Capital:       <b>{cap_str}</b>\n"
+                f"Buying Power:  <b>{bp_str}</b>\n"
             )
-        except Exception:
+        except Exception as e:
+            logger.error(f"Failed to build capital block: {e}")
             return "Margin: Data Unavailable\n"
     def _get_signal_block(self) -> str:
         """Build signal manager status block."""
@@ -729,14 +742,21 @@ class ShortCircuitBot:
         if not self._is_authorized(update):
             await update.message.reply_text("⛔ Unauthorized.")
             return
-        if not self._auto_mode:
+        if not self._auto_mode and not self._auto_on_queued:
             await update.message.reply_text("ℹ️ Auto mode is already *OFF*.", parse_mode='Markdown')
             return
+        
         self._auto_mode = False
-        logger.warning("🔴 AUTO MODE DISABLED via Telegram /auto off")
+        self._auto_on_queued = False
+        
+        logger.critical("🛑 [AUTO] Auto-trading DISABLED via Telegram override (/auto off)")
+        
+        # Phase 81: Ensure immediate yield to event loop
+        await asyncio.sleep(0)
+        
         open_count = len(self.order_manager.active_positions) if self.order_manager and hasattr(self.order_manager, 'active_positions') else 0
         text = (
-            f"🔴 <b>AUTO TRADE OFF</b>\n"
+            f"🛑 <b>AUTO TRADE OFF</b>\n"
             f"Mode: <b>ON</b> → OFF\n\n"
             f"{self._get_capital_block()}"
             f"Positions: {open_count} active (still managed)\n"
@@ -744,51 +764,78 @@ class ShortCircuitBot:
             f"\nSignals sent as alerts with GO/SKIP buttons.\n"
             f"Send /auto on to re-enable."
         )
-        await update.message.reply_text(text, parse_mode='Markdown')
+        await update.message.reply_text(text, parse_mode='HTML')
     async def _cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """/status — Full system health snapshot."""
+        """/status — Full system health snapshot (Live Sync)."""
         if not self._is_authorized(update):
             return
+
+        # ── Step 1: Force Live Sync from Fyers ──
+        today_pnl = 0.0
+        unrealised = 0.0
+        open_positions = 0
+        sync_success = True
+
+        if self.order_manager and self.order_manager.broker:
+            broker = self.order_manager.broker
+            try:
+                # Sync Capital
+                if self.capital_manager:
+                    await self.capital_manager.sync(broker)
+                
+                # Sync Positions/PnL
+                trades = await self.order_manager.get_today_trades()
+                realised_pnl = sum(t.get('realised_pnl', 0.0) for t in trades)
+                unrealised = sum(t.get('unrealised_pnl', 0.0) for t in trades)
+                # Count only non-zero quantities as open
+                open_positions = len([t for t in trades if t.get('qty', 0) != 0])
+                today_pnl = realised_pnl
+                
+            except Exception as e:
+                logger.error(f"Live sync failed in /status: {e}")
+                sync_success = False
+                # Fallback to local memory
+                if self.signal_manager:
+                    today_pnl = getattr(self.signal_manager, 'daily_pnl', 0.0)
+                if hasattr(self.order_manager, 'active_positions'):
+                    open_positions = len(self.order_manager.active_positions)
+                    unrealised = sum(p.get('unrealised_pnl', 0.0) for p in self.order_manager.active_positions.values())
+
         mode_str = "🟢 AUTO" if self._auto_mode else "🔴 ALERT ONLY"
         if self._scanning_paused:
             mode_str += " (⏸️ PAUSED)"
-        # Aggregate P&L from memory
-        today_pnl = 0.0
-        open_positions = 0
-        unrealised = 0.0
         
-        if getattr(self, 'signal_manager', None):
-            today_pnl = getattr(self.signal_manager, 'daily_pnl', 0.0)
-            
-        if getattr(self, 'order_manager', None) and hasattr(self.order_manager, 'active_positions'):
-            open_positions = len(self.order_manager.active_positions)
-            unrealised = sum(p.get('unrealised_pnl', 0.0) for p in getattr(self.order_manager, 'active_positions').values())
         pnl_str = f"+₹{today_pnl:.2f}" if today_pnl >= 0 else f"-₹{abs(today_pnl):.2f}"
         unr_str = f"+₹{unrealised:.2f}" if unrealised >= 0 else f"-₹{abs(unrealised):.2f}"
+        
+        sync_indicator = "⚡ Live" if sync_success else "🕒 Cached"
+        
         text = (
-            f"📊 *ShortCircuit Status*\n\n"
+            f"📊 <b>ShortCircuit Status</b> ({sync_indicator})\n\n"
             f"Mode:      {mode_str}\n"
             f"{self._get_session_block()}"
             f"\n━━━━━ CAPITAL ━━━━━\n"
             f"{self._get_capital_block()}"
             f"\n━━━━━ TRADING ━━━━━\n"
             f"Open:      {open_positions} position(s)\n"
-            f"UnrlzdP&L: {unr_str}\n"
-            f"DayP&L:    {pnl_str}\n"
+            f"UnrlzdP&L: <b>{unr_str}</b>\n"
+            f"DayP&L:    <b>{pnl_str}</b>\n"
             f"{self._get_signal_block()}"
             f"\n━━━━━ HEALTH ━━━━━\n"
             f"{self._get_health_block()}"
-            f"\n_As of {datetime.now().strftime('%H:%M:%S')}_"
+            f"\n<i>As of {datetime.now().strftime('%H:%M:%S')}</i>"
         )
-        await update.message.reply_text(text, parse_mode='Markdown')
+        await update.message.reply_text(text, parse_mode='HTML')
     async def _cmd_positions(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """/positions — List all open positions as trade cards."""
         if not self._is_authorized(update):
             return
+        
         # Check order_manager active positions
         positions = {}
         if self.order_manager and hasattr(self.order_manager, 'active_positions'):
             positions = self.order_manager.active_positions
+            
         if not positions:
             # Show last closed trade if available
             last_trade = ""
@@ -797,30 +844,34 @@ class ShortCircuitBot:
                 pnl = lt.get('pnl', 0)
                 pnl_str = f"+₹{pnl:.2f}" if pnl >= 0 else f"-₹{abs(pnl):.2f}"
                 last_trade = f"\nLast trade: {lt.get('symbol', '?')} {pnl_str}"
+            
             await update.message.reply_text(
-                f"📭 *No active positions.*{last_trade}",
-                parse_mode='Markdown'
+                f"📭 <b>No active positions.</b>{last_trade}",
+                parse_mode='HTML'
             )
             return
+
         for sym, pos in positions.items():
             text = self._build_dashboard_text(pos)
             keyboard = self._build_dashboard_keyboard(pos)
-            await update.message.reply_text(text, parse_mode='Markdown', reply_markup=keyboard)
+            await update.message.reply_text(text, parse_mode='HTML', reply_markup=keyboard)
     async def _cmd_pnl(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """/pnl — Today's P&L breakdown."""
+        """/pnl — Today's P&L breakdown (Live Sync)."""
         if not self._is_authorized(update):
             return
+
         trades = []
         if self.order_manager:
             try:
                 get_trades = getattr(self.order_manager, 'get_today_trades', None)
                 if get_trades is None:
-                    await update.message.reply_text("❌ PnL unavailable — OrderManager method missing.")
+                    await update.message.reply_text("❌ PnL unavailable.")
                     return
                 trades = await get_trades()
             except Exception as e:
-                await update.message.reply_text(f"❌ Error: {e}")
+                await update.message.reply_text(f"❌ Error fetching trades: {e}")
                 return
+
         # Signal stats
         signals_fired = 0
         signals_rejected = 0
@@ -829,36 +880,46 @@ class ShortCircuitBot:
             signals_fired = st.get('signals_sent', 0)
             stats = st.get('stats', {})
             signals_rejected = stats.get('blocked_daily_limit', 0) + stats.get('blocked_cooldown', 0) + stats.get('blocked_paused', 0)
+
         if not trades:
             await update.message.reply_text(
-                f"📭 *No trades today.*\n\n"
+                f"📭 <b>No trades today.</b>\n\n"
                 f"Signals fired:    {signals_fired}\n"
                 f"Signals rejected: {signals_rejected}\n"
-                f"\n_As of {datetime.now().strftime('%H:%M:%S')}_",
-                parse_mode='Markdown'
+                f"\n<i>As of {datetime.now().strftime('%H:%M:%S')}</i>",
+                parse_mode='HTML'
             )
             return
+
         closed_trades = [t for t in trades if t.get('qty', 0) == 0]
         total_pnl = sum(t.get('realised_pnl', 0) for t in trades)
+        unrealised = sum(t.get('unrealised_pnl', 0) for t in trades)
         wins = [t for t in closed_trades if t.get('realised_pnl', 0) > 0]
         losses = [t for t in closed_trades if t.get('realised_pnl', 0) < 0]
+
         total_str = f"+₹{total_pnl:.2f}" if total_pnl >= 0 else f"-₹{abs(total_pnl):.2f}"
+        unr_str = f"+₹{unrealised:.2f}" if unrealised >= 0 else f"-₹{abs(unrealised):.2f}"
         win_rate = (len(wins) / len(closed_trades) * 100) if closed_trades else 0
-        text = f"💰 *Session P&L*\n\n"
+
+        text = f"💰 <b>Today's P&L (Live)</b>\n\n"
         for i, t in enumerate(trades, 1):
             pnl = t.get('realised_pnl', 0)
             pnl_str = f"+₹{pnl:.2f}" if pnl >= 0 else f"-₹{abs(pnl):.2f}"
             emoji = "✅" if pnl > 0 else "❌" if pnl < 0 else "⚪"
-            text += f"{emoji} {t['symbol']}: {pnl_str}\n"
+            cur_qty = t.get('qty', 0)
+            qty_str = f" ({cur_qty} open)" if cur_qty != 0 else ""
+            text += f"{emoji} <code>{t['symbol']:<15}</code> {pnl_str}{qty_str}\n"
+
         text += (
-            f"\n━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"Gross P&L:  {total_str}\n"
-            f"Wins:       {len(wins)} | Losses: {len(losses)}\n"
-            f"Win Rate:   {win_rate:.0f}%\n\n"
-            f"Signals:    {signals_fired} fired, {signals_rejected} rejected\n"
-            f"\n_As of {datetime.now().strftime('%H:%M:%S')}_"
+            f"\n━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"Gross Realised: <b>{total_str}</b>\n"
+            f"Unrealised:     <b>{unr_str}</b>\n"
+            f"Wins: {len(wins)} | Losses: {len(losses)} | WR: {win_rate:.0f}%\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"Signals: {signals_fired} fired, {signals_rejected} rejected\n"
+            f"\n<i>As of {datetime.now().strftime('%H:%M:%S')}</i>"
         )
-        await update.message.reply_text(text, parse_mode='Markdown')
+        await update.message.reply_text(text, parse_mode='HTML')
     async def _cmd_why(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """/why SYMBOL [HH:MM] — Diagnostic replay."""
         if not self._is_authorized(update):
@@ -1005,12 +1066,12 @@ class ShortCircuitBot:
         # Active positions still managed
         open_count = len(self.order_manager.active_positions) if self.order_manager and hasattr(self.order_manager, 'active_positions') else 0
         await update.message.reply_text(
-            f"⏸️ *Scanning PAUSED*\n\n"
+            f"⏸️ <b>Scanning PAUSED</b>\n\n"
             f"New signal detection is halted.\n"
             f"Active positions: {open_count} (still managed)\n"
             f"{self._get_signal_block()}"
             f"\nSend /resume to reactivate.",
-            parse_mode='Markdown'
+            parse_mode='HTML'
         )
     async def _cmd_resume(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """/resume — Reactivate scanning."""
@@ -1020,29 +1081,57 @@ class ShortCircuitBot:
         logger.warning("▶️ Scanning RESUMED via Telegram")
         scan_count = self._scan_metadata.get('candidate_count', 0)
         await update.message.reply_text(
-            f"▶️ *Scanning RESUMED*\n\n"
+            f"▶️ <b>Scanning RESUMED</b>\n\n"
             f"{self._get_session_block()}"
             f"Last scan: {scan_count} candidates\n"
             f"{self._get_signal_block()}"
             f"\nSignal detection is active.",
-            parse_mode='Markdown'
+            parse_mode='HTML'
         )
     async def _cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """/help"""
         if not self._is_authorized(update):
             return
         await update.message.reply_text(
-            "⚡ *ShortCircuit Commands*\n\n"
-            "`/auto on`   — Arm auto-trading\n"
-            "`/auto off`  — Disarm (alert only)\n"
-            "`/editable on|off` � Toggle in-place signal updates\n"
-            "`/status`    — Full system health\n"
-            "`/positions` — Active trades\n"
-            "`/pnl`       — Session P\\&L\n"
-            "`/why SYM`   — Gate diagnostic\n"
-            "`/pause`     — Stop scanning\n"
-            "`/resume`    — Resume scanning",
-            parse_mode='Markdown'
+            "⚡ <b>ShortCircuit Commands</b>\n\n"
+            "<b>/auto</b> <code>on|off</code>\n"
+            "↳ Arm auto-trading or set to alert-only.\n\n"
+            "<b>/status</b>\n"
+            "↳ Full system health & live P&L sync.\n\n"
+            "<b>/positions</b>\n"
+            "↳ View/manage open trade cards.\n\n"
+            "<b>/pnl</b>\n"
+            "↳ Today's realized/unrealized breakdown.\n\n"
+            "<b>/why</b> <code>SYMBOL [HH:MM]</code>\n"
+            "↳ Replay gate results for any symbol.\n\n"
+            "<b>/pause</b> | <b>/resume</b>\n"
+            "↳ Suspend or resume scanning universe.\n\n"
+            "<b>/stop</b>\n"
+            "↳ Emergency bot shutdown (requires confirmation).\n\n"
+            "<i>Use the menu button below for quick access.</i>",
+            parse_mode='HTML'
+        )
+
+    async def _cmd_stop(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """/stop — Request bot termination with confirmation."""
+        if not self._is_authorized(update):
+            return
+        
+        keyboard = [
+            [
+                InlineKeyboardButton("🛑 YES, STOP BOT", callback_data="system_stop:confirm"),
+                InlineKeyboardButton("❌ CANCEL", callback_data="system_stop:cancel")
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(
+            "⚠️ <b>CRITICAL: BOT TERMINATION REQUESTED</b>\n\n"
+            "This will shut down ShortCircuit immediately. "
+            "Pending orders will be cancelled and active positions will be closed if a supervisor cleanup is configured.\n\n"
+            "<b>Are you absolutely sure?</b>",
+            reply_markup=reply_markup,
+            parse_mode='HTML'
         )
     # ════════════════════════════════════════════════════════════
     # HANDLERS
@@ -1067,6 +1156,26 @@ class ShortCircuitBot:
             symbol = parts[1]
             order_id = parts[2] if len(parts) > 2 else None
             await self._handle_close(query, symbol, order_id)
+        elif action == 'system_stop':
+            sub_action = parts[1]
+            if sub_action == 'confirm':
+                await self._handle_stop_confirm(query)
+            else:
+                await self._handle_stop_cancel(query)
+
+    async def _handle_stop_confirm(self, query):
+        """Final execution of shutdown from Telegram."""
+        if not self._shutdown_event:
+            await query.edit_message_text("❌ Error: Shutdown event not linked. Use Ctrl+C.")
+            return
+
+        logger.critical("🚨 [SHUTDOWN] Terminating bot via Telegram /stop command (User Confirmed)")
+        await query.edit_message_text("🛑 *Bot is shutting down...* Check logs for cleanup status.", parse_mode='Markdown')
+        self._shutdown_event.set()
+
+    async def _handle_stop_cancel(self, query):
+        """Abort shutdown."""
+        await query.edit_message_text("✅ *Shutdown cancelled.* Bot continues monitoring.", parse_mode='Markdown')
     async def _handle_go(self, query, signal_id: str):
         signal = self._pending_signals.get(signal_id)
         if not signal:
@@ -1261,6 +1370,7 @@ class ShortCircuitBot:
         self.app.add_handler(CommandHandler("pause", self._cmd_pause))
         self.app.add_handler(CommandHandler("resume", self._cmd_resume))
         self.app.add_handler(CommandHandler("help", self._cmd_help))
+        self.app.add_handler(CommandHandler("stop", self._cmd_stop))
         self.app.add_handler(CallbackQueryHandler(self._handle_callback))
     async def _cmd_auto(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         args = context.args
@@ -1304,9 +1414,58 @@ class ShortCircuitBot:
         if not self.app:
             return
         try:
-            await self.send_message(message)
+            # Add to throttler queue
+            await self._alert_queue.put(message)
         except Exception as e:
-            logger.error(f"send_alert failed: {e}")
+            logger.error(f"send_alert (queued) failed: {e}")
+
+    async def _alert_throttler_loop(self):
+        """
+        Phase 81: Background task to process the alert queue with rate limiting.
+        Bundles multiple fast alerts into a single message to avoid Telegram API lag.
+        """
+        logger.info("Telegram Alert Throttler started")
+        buffer = []
+        last_send_time = 0
+        
+        while not self._shutdown_event or not self._shutdown_event.is_set():
+            try:
+                # Wait for first message
+                msg = await self._alert_queue.get()
+                buffer.append(msg)
+                
+                # Check for burst (up to 0.5s wait for next if we have space)
+                try:
+                    while len(buffer) < 5:
+                        msg = await asyncio.wait_for(self._alert_queue.get(), timeout=0.5)
+                        buffer.append(msg)
+                except asyncio.TimeoutError:
+                    pass
+
+                # Rate limiting (HZ)
+                hz = getattr(config, 'P81_TELEGRAM_RATE_LIMIT_HZ', 2)
+                interval = 1.0 / hz
+                elapsed = time.time() - last_send_time
+                if elapsed < interval:
+                    await asyncio.sleep(interval - elapsed)
+
+                # Send bundled
+                final_text = "\n\n".join(buffer)
+                if len(final_text) > 4000:
+                    final_text = final_text[:3900] + "\n\n...(truncated)..."
+                
+                await self.send_message(final_text)
+                last_send_time = time.time()
+                
+                for _ in range(len(buffer)):
+                    self._alert_queue.task_done()
+                buffer = []
+                
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Throttler loop error: {e}")
+                await asyncio.sleep(1)
     # ════════════════════════════════════════════════════════════
     # AUTHORIZATION — Security Gate
     # ════════════════════════════════════════════════════════════
@@ -1369,13 +1528,36 @@ class ShortCircuitBot:
         self._ready_event.set()
         await self._start_cleanup_task()
         await self.app.updater.start_polling(drop_pending_updates=True)
-        logger.info("Telegram Bot started")
+        
+        # Phase 81: Telegram Command Menu
+        if getattr(config, 'P81_TELEGRAM_MENU_ENABLED', True):
+            commands = [
+                BotCommand("help", "Show all commands and explanation"),
+                BotCommand("auto", "Toggle Auto-Trade Toggle (on/off)"),
+                BotCommand("status", "Live Dashboard Snapshot"),
+                BotCommand("positions", "Current Open Positions list"),
+                BotCommand("pnl", "Today's Unrealised/Realised PnL"),
+                BotCommand("why", "Why did the last scan reject?"),
+                BotCommand("pause", "Pause Strategy Execution"),
+                BotCommand("resume", "Resume Strategy Execution"),
+                BotCommand("stop", "🛑 TERMINATE BOT (Requires Confirmation)"),
+            ]
+            try:
+                await self.app.bot.set_my_commands(commands, scope=BotCommandScopeDefault())
+                logger.info("Telegram Command Menu registered")
+            except Exception as e:
+                logger.error(f"Failed to register Telegram Menu: {e}")
+
+        # Phase 81: Alert Throttler
+        self._throttler_task = asyncio.create_task(self._alert_throttler_loop())
+        logger.info("Telegram Bot started & Throttler active")
     async def run(self, shutdown_event: asyncio.Event):
         """
         Structured runtime entrypoint.
         Starts polling, waits for shutdown_event, then guarantees PTB teardown.
         """
         await self.start()
+        self._shutdown_event = shutdown_event # Store for /stop command
         try:
             await shutdown_event.wait()
         finally:

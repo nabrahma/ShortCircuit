@@ -123,11 +123,14 @@ class ReconciliationEngine:
         # Broker has positions OR we think DB has positions
 
         # Step 2: Get broker positions (cache-first, REST fallback)
+        broker_positions = {}
         try:
             broker_positions = await self._get_broker_positions_cached(broker_open)
         except Exception as e:
-            logger.error(f"Reconcile: Broker fetch failed: {e}")
-            return
+            # Phase 77: Resilience Fix. Log but don't return early.
+            # If broker is down, we cannot confirm phantoms, but we shouldn't kill the engine.
+            logger.error(f"Reconcile: Broker fetch failed (API Degraded): {e}")
+            # return  # <--- REMOVED early return
 
         # Step 3: Get DB positions (only if dirty)
         try:
@@ -161,10 +164,15 @@ class ReconciliationEngine:
 
         # Step 5: Alert on divergence
         if orphans or phantoms or mismatched:
-            await self._handle_divergence(
-                db_positions, broker_positions,
-                orphans, phantoms, mismatched
-            )
+            # Phase 77: Only handle divergence if broker_positions fetch actually succeeded (non-empty)
+            # or if it's a confirmed flat state.
+            if broker_positions or not broker_open:
+                await self._handle_divergence(
+                    db_positions, broker_positions,
+                    orphans, phantoms, mismatched
+                )
+            else:
+                logger.warning("⚠️ Skipping divergence handling — Broker API failed and cache is empty.")
 
     # ── Private Helpers ───────────────────────────────────────────────
 
@@ -527,11 +535,26 @@ class ReconciliationEngine:
             finalized = False
             if self.order_manager and sym in self.order_manager.active_positions:
                 try:
+                    # Phase 78.2: Fetch LTP for accurate PnL logging
+                    pos = self.order_manager.active_positions[sym]
+                    exit_price = 0.0
+                    pnl = 0.0
+                    try:
+                        exit_price = await self.broker.get_ltp(sym) or 0.0
+                        if exit_price > 0:
+                            entry_price = pos.get('entry_price', 0.0)
+                            qty = pos.get('qty', 0)
+                            if entry_price > 0 and qty > 0:
+                                # Short-only bot: PnL = (Entry - Exit) * Qty
+                                pnl = (entry_price - exit_price) * qty
+                    except Exception as e:
+                        logger.warning(f"[GHOST] Could not fetch exit price for {sym}: {e}")
+
                     await self.order_manager._finalize_closed_position(
                         symbol=sym,
                         reason='MANUAL_CLOSE_DETECTED',
-                        exit_price=0.0,
-                        pnl=0.0,
+                        exit_price=exit_price,
+                        pnl=pnl,
                         send_alert=False,
                     )
                     finalized = True
