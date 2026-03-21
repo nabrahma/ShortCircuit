@@ -254,3 +254,9 @@ P81_TELEGRAM_MENU_ENABLED        = True
 P81_TELEGRAM_RATE_LIMIT_HZ       = 2
 P81_TELEGRAM_BUFFER_WINDOW_SEC   = 2.0
 P81_TELEGRAM_STOP_CONFIRM_TIMEOUT = 30
+
+# ============================================================================
+# PHASE 82: LOCAL CANDLE ENGINE
+# ============================================================================
+P82_LOCAL_CANDLES_ENABLED = True
+P82_MAX_LOCAL_CANDLES = 500

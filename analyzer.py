@@ -80,7 +80,28 @@ class FyersAnalyzer:
     def get_history(self, symbol: str, interval: str = "1") -> Optional[pd.DataFrame]:
         """
         Fetch intraday historical data for a symbol.
+        Phase 82: Prefer local candle aggregator. Fallback to REST if cache is cold or non-1m interval.
         """
+        # 1. Try local aggregator first (1-minute only)
+        if interval == "1" and getattr(config, 'P82_LOCAL_CANDLES_ENABLED', False) and self.broker:
+            # Request enough bars for strategy (max of RVOL_MIN_CANDLES and 100 default)
+            n_bars = max(100, getattr(config, 'RVOL_MIN_CANDLES', 15) + 5)
+            local_candles = self.broker.get_local_candles(symbol, n=n_bars)
+            
+            # Use local cache only if we have a substantial buffer (e.g. at least RVOL_MIN_CANDLES)
+            # This ensures we don't return partial data for cold symbols
+            min_required = getattr(config, 'RVOL_MIN_CANDLES', 15)
+            if local_candles and len(local_candles) >= min_required:
+                data = []
+                for c in local_candles:
+                    data.append([c.epoch, c.open, c.high, c.low, c.close, c.volume])
+                cols = ["epoch", "open", "high", "low", "close", "volume"]
+                df = pd.DataFrame(data, columns=cols)
+                df['datetime'] = pd.to_datetime(df['epoch'], unit='s').dt.tz_localize('UTC').dt.tz_convert('Asia/Kolkata')
+                # logger.debug(f"[Phase 82] Using local candles for {symbol} ({len(df)} bars)")
+                return df
+
+        # 2. Fallback to REST
         today = datetime.date.today().strftime("%Y-%m-%d")
         data = {
             "symbol": symbol,

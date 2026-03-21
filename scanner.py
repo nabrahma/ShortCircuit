@@ -101,21 +101,41 @@ class FyersScanner:
         - PASSES if insufficient data (don't reject liquid stocks due to API lag).
         """
         try:
-            # Get 1min history — 5-day window ensures early morning has enough bars
+            import config
             import datetime as _dt
-            today     = _dt.date.today()
-            five_back = today - _dt.timedelta(days=5)
+            
+            # --- Phase 82: Local Candle Engine ---
+            candles = None
+            if getattr(config, 'P82_LOCAL_CANDLES_ENABLED', False) and self.broker:
+                n_bars = max(100, getattr(config, 'RVOL_MIN_CANDLES', 15) + 5)
+                local_data = self.broker.get_local_candles(symbol, n=n_bars)
+                if local_data and len(local_data) >= getattr(config, 'RVOL_MIN_CANDLES', 15):
+                    candles = [[c.epoch, c.open, c.high, c.low, c.close, c.volume] for c in local_data]
+                    # logger.debug(f"[Phase 82] Scanner using local candles for {symbol}")
 
-            data = {
-                "symbol": symbol,
-                "resolution": "1",
-                "date_format": "1",                              # "1" = YYYY-MM-DD (Fyers v3 requirement)
-                "range_from": five_back.strftime("%Y-%m-%d"),    # 5 days back for early-morning coverage
-                "range_to":   today.strftime("%Y-%m-%d"),
-                "cont_flag": "1"
-            }
+            if not candles:
+                # Fallback to REST history
+                today     = _dt.date.today()
+                five_back = today - _dt.timedelta(days=5)
 
-            response = self.fyers.history(data=data)
+                data = {
+                    "symbol": symbol,
+                    "resolution": "1",
+                    "date_format": "1",                              # "1" = YYYY-MM-DD (Fyers v3 requirement)
+                    "range_from": five_back.strftime("%Y-%m-%d"),    # 5 days back for early-morning coverage
+                    "range_to":   today.strftime("%Y-%m-%d"),
+                    "cont_flag": "1"
+                }
+                response = self.fyers.history(data=data)
+                candles = response.get('candles', [])
+
+                if not candles:
+                     # BUG-03 debug — one-shot per session
+                     if not hasattr(self, '_candle_debug_done'):
+                         logger.info(f"[CANDLE DEBUG] {symbol} → status={response.get('s')} | bars=0")
+                         self._candle_debug_done = True
+                     logger.warning(f"SKIP {symbol} — Insufficient candle data (0). Blocking.")
+                     return False, None, None
 
             # BUG-03 debug — one-shot per session, remove after first successful trading day
             if not hasattr(self, '_candle_debug_done'):

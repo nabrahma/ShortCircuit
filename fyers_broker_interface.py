@@ -20,6 +20,7 @@ Usage (from order_manager.py):
 import os
 import asyncio
 import logging
+import config
 from pathlib import Path
 from collections import deque, defaultdict
 from dataclasses import dataclass
@@ -115,6 +116,88 @@ class CacheEntry:
     tick_count: int = 0
 
 
+@dataclass
+class Candle:
+    """Data class for a single OHLCV candle."""
+    symbol: str
+    epoch: int        # Unix timestamp of the start of the candle
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float
+    datetime: datetime
+
+
+class MinuteCandleAggregator:
+    """
+    Aggregates raw WebSocket ticks into 1-minute OHLCV candles.
+    Maintains a rolling buffer for the Analyzer to consume.
+    """
+    def __init__(self, max_candles: int = 500):
+        self.max_candles = max_candles
+        self.history: Dict[str, deque[Candle]] = {}  # symbol -> deque[Candle]
+        self.current_candles: Dict[str, Candle] = {}  # symbol -> partially formed Candle
+        self._lock = threading.Lock()
+
+    def update(self, tick: TickData, timestamp: Optional[float] = None):
+        """Processes a new tick and updates/finalizes candles."""
+        symbol = tick.symbol
+        if not symbol:
+            return
+
+        # Calculate minute start (epoch)
+        now_ts = int(timestamp if timestamp is not None else time.time())
+        minute_start = (now_ts // 60) * 60
+
+        with self._lock:
+            current = self.current_candles.get(symbol)
+
+            if current and current.epoch == minute_start:
+                # Update existing candle
+                current.high = max(current.high, tick.ltp)
+                current.low = min(current.low, tick.ltp)
+                current.close = tick.ltp
+                # Volume from Fyers is cumulative daily. We need to calculate delta?
+                # Actually, Fyers history returns periodic volume.
+                # To match history, we should store current_day_volume and subtract.
+                # But for now, let's keep it simple: store the latest daily volume 
+                # and the analyzer can diff it if needed, or we diff it here.
+                # History Volume = Volume at minute_end - Volume at minute_start.
+                current.volume = tick.volume 
+            else:
+                # Finalize old candle if it exists
+                if current:
+                    if symbol not in self.history:
+                        self.history[symbol] = deque(maxlen=self.max_candles)
+                    self.history[symbol].append(current)
+
+                # Initialize new candle
+                new_candle = Candle(
+                    symbol=symbol,
+                    epoch=minute_start,
+                    open=tick.ltp,
+                    high=tick.ltp,
+                    low=tick.ltp,
+                    close=tick.ltp,
+                    volume=tick.volume,
+                    datetime=datetime.fromtimestamp(minute_start)
+                )
+                self.current_candles[symbol] = new_candle
+
+    def get_candles(self, symbol: str, n: int = 100) -> List[Candle]:
+        """Returns the last N candles for a symbol, including the current one."""
+        with self._lock:
+            hist = list(self.history.get(symbol, []))
+            current = self.current_candles.get(symbol)
+            
+            result = hist
+            if current:
+                result = result + [current]
+            
+            return result[-n:]
+
+
 class FyersBrokerInterface:
     """
     Unified broker interface with WebSocket-first architecture.
@@ -159,6 +242,11 @@ class FyersBrokerInterface:
         # WebSocket state
         self.ws_connected = False
         self.ws_reconnecting = False
+        
+        # Phase 82: Local Candle Engine
+        self.aggregator = MinuteCandleAggregator(
+            max_candles=getattr(config, "P82_MAX_LOCAL_CANDLES", 500)
+        )
         
         # Real-time caches (updated by WebSocket)
         self.tick_cache: Dict[str, deque] = {}  # symbol -> deque of TickData
@@ -236,6 +324,10 @@ class FyersBrokerInterface:
         # Background tasks
         self.tasks = []
         
+    def get_local_candles(self, symbol: str, n: int = 100) -> List[Candle]:
+        """Exposes aggregated local candles to the Analyzer."""
+        return self.aggregator.get_candles(symbol, n)
+
     async def initialize(self):
         logger.info("Initializing Fyers Broker Interface...")
         self._loop = asyncio.get_running_loop()
@@ -480,6 +572,10 @@ class FyersBrokerInterface:
                 self.tick_cache[tick.symbol] = deque(maxlen=100)
             
             self.tick_cache[tick.symbol].append(tick)
+            
+            # Phase 82: Update Local Candle Engine
+            if getattr(config, "P82_LOCAL_CANDLES_ENABLED", False):
+                self.aggregator.update(tick)
             
             # Call registered callbacks
             for callback in self.on_tick_callbacks:
