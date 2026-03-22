@@ -24,8 +24,9 @@ def update_log():
         print(f"Found {len(matching_lines)} lines for {DATE_STR}")
         
         # Ensure output directory exists (if path has dirs)
-
-
+        out_dir = os.path.dirname(OUTPUT_FILE)
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
         with open(OUTPUT_FILE, 'w', encoding='utf-8') as f:
             if matching_lines:
                 for line in matching_lines:

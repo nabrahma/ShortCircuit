@@ -67,7 +67,6 @@ class EODAnalyzer:
         
         # 4. Persistence
         await self._save_summary_db(target_date, stats, audit_results)
-        self._generate_session_log(target_date)
         
         return report_text
 
@@ -443,38 +442,6 @@ class EODAnalyzer:
                 await maybe_awaitable
         except Exception:
             pass
-
-    def _generate_session_log(self, date):
-        log_path = getattr(config, "LOG_FILE", "logs/bot.log")
-        output_path = "md/terminal_log.md"
-        date_str = str(date)
-
-        if not os.path.exists(log_path):
-            logger.warning("Log file not found at %s", log_path)
-            return
-
-        try:
-            os.makedirs(os.path.dirname(output_path), exist_ok=True)
-            matches = []
-            with open(log_path, "r", encoding="utf-8", errors="replace") as f:
-                for line in f:
-                    if line.startswith(date_str):
-                        matches.append(line.rstrip())
-
-            with open(output_path, "w", encoding="utf-8") as f:
-                f.write("# ShortCircuit Session Log\n")
-                f.write(f"> **Date:** {date_str}\n\n")
-                if matches:
-                    f.write(f"Total log entries: {len(matches)}\n\n")
-                    f.write("```log\n")
-                    for line in matches:
-                        f.write(line + "\n")
-                    f.write("```\n")
-                else:
-                    f.write(f"No log entries found for {date_str}.\n")
-        except Exception as exc:
-            logger.error("Failed to generate session log: %s", exc)
-
 
 if __name__ == "__main__":
     db = DatabaseManager()

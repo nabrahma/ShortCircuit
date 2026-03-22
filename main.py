@@ -48,6 +48,12 @@ def _configure_logging() -> None:
             pass
 
     log_formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+    
+    # Ensure log directory exists
+    log_dir = os.path.dirname(config.LOG_FILE)
+    if log_dir:
+        os.makedirs(log_dir, exist_ok=True)
+        
     file_handler = logging.handlers.RotatingFileHandler(
         config.LOG_FILE,
         maxBytes=10 * 1024 * 1024,
