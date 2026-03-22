@@ -1,4 +1,4 @@
-# ShortCircuit ⚡
+# ShortCircuit
 
 > *The market is not a place. It is a conversation between participants
 > with asymmetric information, asymmetric conviction, and asymmetric speed.
