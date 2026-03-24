@@ -51,7 +51,7 @@ class DatabaseManager:
                 # Try to get config from env vars first
                 config = DB_CONFIG.copy()
                 config['user'] = os.getenv('DB_USER', config['user'])
-                config['password'] = os.getenv('DB_PASSWORD', config['password'])
+                config['password'] = os.getenv('DB_PASS', os.getenv('DB_PASSWORD', config['password']))
                 config['host'] = os.getenv('DB_HOST', config['host'])
                 
                 cls._pool = await asyncpg.create_pool(**config)
@@ -121,7 +121,7 @@ class DatabaseManager:
         params = params or ()
         cfg = DB_CONFIG.copy()
         cfg["user"] = os.getenv("DB_USER", cfg["user"])
-        cfg["password"] = os.getenv("DB_PASSWORD", cfg["password"])
+        cfg["password"] = os.getenv("DB_PASS", os.getenv("DB_PASSWORD", cfg["password"]))
         cfg["host"] = os.getenv("DB_HOST", cfg["host"])
         cfg["port"] = int(os.getenv("DB_PORT", cfg["port"]))
         cfg["database"] = os.getenv("DB_NAME", cfg["database"])

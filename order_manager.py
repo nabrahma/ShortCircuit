@@ -13,7 +13,7 @@ import json
 import logging
 import math
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, UTC
 from typing import Dict, Optional, Any
 import config
 from fyers_broker_interface import FyersBrokerInterface
@@ -82,7 +82,7 @@ class OrderManager:
         if symbol not in self._exec_cooldowns:
             return False, 0
         unblock_at = self._exec_cooldowns[symbol]
-        now = datetime.utcnow()
+        now = datetime.now(UTC)
         if now < unblock_at:
             remaining = int((unblock_at - now).total_seconds())
             return True, remaining
@@ -92,7 +92,7 @@ class OrderManager:
 
     def _set_exec_cooldown(self, symbol: str, reason: str, seconds: int = 900):
         """Phase 44.6: Block symbol from new entries after local logic failure."""
-        unblock_at = datetime.utcnow() + timedelta(seconds=seconds)
+        unblock_at = datetime.now(UTC) + timedelta(seconds=seconds)
         self._exec_cooldowns[symbol] = unblock_at
         logger.warning(
             f"⏳ [COOLDOWN] {symbol} blocked for {seconds}s | Reason: {reason} | Until: {unblock_at.strftime('%H:%M:%S')}"

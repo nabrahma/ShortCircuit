@@ -12,7 +12,7 @@ Key changes from Phase 42.1:
 
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, UTC
 from math import floor
 from typing import Optional
 
@@ -76,7 +76,7 @@ class CapitalManager:
                 funds = await broker.get_funds()
                 margin = self._parse_fyers_funds(funds)
                 self._real_margin = margin
-                self._last_sync = datetime.utcnow()
+                self._last_sync = datetime.now(UTC)
 
                 logger.info(
                     f"💰 CAPITAL SYNC | real_margin=₹{self._real_margin:.2f} | "

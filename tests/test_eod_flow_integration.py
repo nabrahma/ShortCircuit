@@ -19,7 +19,7 @@ def _run(coro):
 def _db_config():
     return {
         "user": os.getenv("DB_USER", "postgres"),
-        "password": os.getenv("DB_PASSWORD", "password"),
+        "password": os.getenv("DB_PASS", os.getenv("DB_PASSWORD", "password")),
         "database": "shortcircuit_trading",
         "host": os.getenv("DB_HOST", "localhost"),
         "port": int(os.getenv("DB_PORT", "5432")),

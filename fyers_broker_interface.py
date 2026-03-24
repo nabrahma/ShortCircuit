@@ -24,7 +24,7 @@ import config
 from pathlib import Path
 from collections import deque, defaultdict
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, UTC
 from enum import Enum
 from typing import Optional, Dict, List, Any, Callable, Set
 import time
@@ -63,7 +63,7 @@ class OrderUpdate:
         self.status = data.get('status')  # PENDING, OPEN, FILLED, REJECTED, CANCELLED
         self.filled_qty = data.get('filledQty', 0)
         self.avg_price = data.get('tradedPrice', 0)
-        self.timestamp = datetime.utcnow()
+        self.timestamp = datetime.now(UTC)
         self.raw_data = data
 
 
@@ -75,7 +75,7 @@ class PositionUpdate:
         self.avg_price = data.get('avgPrice', 0)
         self.realized_pnl = data.get('realized_profit', 0)
         self.unrealized_pnl = data.get('unrealized_profit', 0)
-        self.timestamp = datetime.utcnow()
+        self.timestamp = datetime.now(UTC)
         self.raw_data = data
 
 
@@ -91,7 +91,7 @@ class TickData:
         self.high = data.get('high_price', 0)
         self.low = data.get('low_price', 0)
         self.prev_close = data.get('prev_close_price', 0)
-        self.timestamp = datetime.utcnow()
+        self.timestamp = datetime.now(UTC)
         self.raw_data = data
 
 
@@ -684,7 +684,7 @@ class FyersBrokerInterface:
                     self._position_cache = {}
                 self._position_cache[symbol] = {
                     'data': message,
-                    'timestamp': datetime.utcnow()
+                    'timestamp': datetime.now(UTC)
                 }
 
         except Exception as e:
@@ -742,7 +742,7 @@ class FyersBrokerInterface:
         while True:
             await asyncio.sleep(300)  # Every 5 minutes
             try:
-                now = datetime.utcnow()
+                now = datetime.now(UTC)
                 # Use list(keys) to avoid runtime errors during modification
                 for symbol in list(self.tick_cache.keys()):
                     ticks = self.tick_cache[symbol]
@@ -1347,7 +1347,7 @@ class FyersBrokerInterface:
             return
         
         limit, window = self.rate_limits[endpoint]
-        now = datetime.utcnow().timestamp()
+        now = datetime.now(UTC).timestamp()
         
         # Clean old
         while self.api_calls[endpoint] and self.api_calls[endpoint][0] < now - window:
@@ -1438,7 +1438,7 @@ class FyersBrokerInterface:
 
     async def get_order_status(self, order_id: str) -> str:
         if order_id in self.order_status_cache:
-            age = (datetime.utcnow() - self.order_status_cache[order_id].timestamp).total_seconds()
+            age = (datetime.now(UTC) - self.order_status_cache[order_id].timestamp).total_seconds()
             if age < 5.0:
                 return self.order_status_cache[order_id].status
         return await self._check_order_status_rest(order_id)
@@ -1448,7 +1448,7 @@ class FyersBrokerInterface:
         # Try WebSocket cache first (0ms latency)
         if symbol in self.tick_cache and self.tick_cache[symbol]:
             latest_tick = self.tick_cache[symbol][-1]
-            age = (datetime.utcnow() - latest_tick.timestamp).total_seconds()
+            age = (datetime.now(UTC) - latest_tick.timestamp).total_seconds()
             if age < 5.0:  # Cache valid for 5 seconds
                 return latest_tick.ltp
         
@@ -1468,7 +1468,7 @@ class FyersBrokerInterface:
         """Get quotes for multiple symbols."""
         quotes = {}
         missing = []
-        now = datetime.utcnow()
+        now = datetime.now(UTC)
         
         for sym in symbols:
             if sym in self.tick_cache and self.tick_cache[sym]:
@@ -1576,7 +1576,7 @@ class FyersBrokerInterface:
         """Get all open positions (Cache first)."""
         positions = []
         for symbol, pos_update in self.position_cache.items():
-            age = (datetime.utcnow() - pos_update.timestamp).total_seconds()
+            age = (datetime.now(UTC) - pos_update.timestamp).total_seconds()
             if age < 10.0 and pos_update.net_qty != 0:
                 positions.append({
                     'symbol': symbol,

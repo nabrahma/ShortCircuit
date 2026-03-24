@@ -4,7 +4,7 @@ import asyncpg
 import os
 
 def load_env():
-    env_path = "d:/For coding/ShortCircuit/.env"
+    env_path = ".env"
     if os.path.exists(env_path):
         with open(env_path, "r") as f:
             for line in f:
@@ -23,7 +23,7 @@ async def apply_migration(file_path: str):
         # Connect to DB
         conn = await asyncpg.connect(
             user=os.environ.get("DB_USER", "postgres"),
-            password=os.environ.get("DB_PASSWORD", "password"),
+            password=os.environ.get("DB_PASS", os.environ.get("DB_PASSWORD", "password")),
             database=os.environ.get("DB_NAME", "shortcircuit_trading"),
             host=os.environ.get("DB_HOST", "localhost"),
             port=os.environ.get("DB_PORT", "5432")
@@ -48,7 +48,4 @@ if __name__ == "__main__":
         sys.exit(1)
     
     target_file = sys.argv[1]
-    if not os.path.isabs(target_file):
-        target_file = os.path.join("d:/For coding/ShortCircuit", target_file)
-        
     asyncio.run(apply_migration(target_file))

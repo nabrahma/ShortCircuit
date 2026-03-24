@@ -134,8 +134,21 @@ class FyersConnect:
         except:
             pass
 
-        print(f"2. Login and copy the 'auth_code' from the URL after redirect.\n")
-        auth_code = input("👉 Paste the Auth Code here: ").strip()
+        auth_code_raw = input("👉 Paste the Auth Code (or complete redirect URL) here: ").strip()
+        auth_code = auth_code_raw
+        
+        # Smart URL Pasting (Phase 85)
+        if "auth_code=" in auth_code_raw:
+             try:
+                 # Extract auth_code from URL parameters
+                 from urllib.parse import urlparse, parse_qs
+                 parsed_url = urlparse(auth_code_raw)
+                 query_params = parse_qs(parsed_url.query)
+                 if 'auth_code' in query_params:
+                     auth_code = query_params['auth_code'][0]
+                     logger.info(f"✅ Extracted auth_code from URL: {auth_code[:5]}...{auth_code[-5:]}")
+             except Exception as e:
+                 logger.warning(f"Failed to parse auth_code from URL: {e}")
 
         # Exchange auth_code for access_token
         session.set_token(auth_code)

@@ -4,7 +4,7 @@ Previously: logged only. Now: acts.
 """
 import logging
 import asyncio
-from datetime import datetime
+from datetime import datetime, UTC
 
 logger = logging.getLogger(__name__)
 
@@ -120,7 +120,7 @@ class StartupRecovery:
             'entry_id':    'STARTUP_ORPHAN',
             'sl_id':       sl_id,
             'status':      'OPEN',
-            'entry_time':  datetime.utcnow(),
+            'entry_time':  datetime.now(UTC),
             'entry_price': avg_price,
             'stop_loss':   sl_price if sl_id else 0.0,
             'source':      'STARTUP_ORPHAN_ADOPTED',

@@ -203,7 +203,7 @@ async def _initialize_runtime() -> RuntimeContext:
     import os as _os
     _db_dsn = (
         f"postgresql://{_os.getenv('DB_USER', _db_cfg['user'])}"
-        f":{_os.getenv('DB_PASSWORD', _db_cfg['password'])}"
+        f":{_os.getenv('DB_PASS', _os.getenv('DB_PASSWORD', _db_cfg['password']))}"
         f"@{_os.getenv('DB_HOST', _db_cfg['host'])}"
         f":{_db_cfg['port']}/{_db_cfg['database']}"
     )
