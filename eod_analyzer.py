@@ -78,7 +78,8 @@ class EODAnalyzer:
         from ml_logger import get_ml_logger
         ml_logger = get_ml_logger()
         
-        unlabeled = ml_logger.get_unlabeled_observations()
+        unlabeled_df = ml_logger.get_unlabeled_observations()
+        unlabeled = unlabeled_df.to_dict('records') if not unlabeled_df.empty else []
         if not unlabeled:
             logger.info("No unlabeled observations to audit.")
             return {"processed": 0, "wins": 0, "losses": 0}
