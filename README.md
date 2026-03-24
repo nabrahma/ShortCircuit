@@ -147,6 +147,12 @@ Capital Manager
     Parses 3 Fyers response shapes. 2% safety buffer. Single-position slot lock.
     release_slot() calls sync() outside asyncio.Lock — deadlock prevention.
 
+Deployment & SEBI 2026
+    Azure VPS (`ShortCircuit-Server`) with static IP for SEBI compliance.
+    `ShortCircuit.sh` for `tmux`-persisted execution. 
+    "Smart URL Pasting" for zero-friction 9:15 AM manual 2FA.
+    Standardized `DB_PASS` architecture for multi-env reliability.
+
 GateResultLogger
     Every gate evaluation → 36-column PostgreSQL record. Always. Regardless of outcome.
     Batched async flush. JSON-Lines fallback on any DB failure — zero silent data loss.
