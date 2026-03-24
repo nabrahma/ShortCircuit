@@ -41,6 +41,11 @@ python-telegram-bot>=21.0.0
 # ── Serialization ──────────────────────────────────────────
 protobuf>=4.25.0
 
+# ── Dashboard (AEGIS HUD) ──────────────────────────────────
+fastapi>=0.109.0
+uvicorn>=0.27.0
+starlette>=0.35.0
+
 # ── Build Tools ────────────────────────────────────────────
 wheel>=0.43.0
 
