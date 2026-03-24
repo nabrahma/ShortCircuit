@@ -139,10 +139,8 @@ class FyersScanner:
 
             # BUG-03 debug — one-shot per session, remove after first successful trading day
             if not hasattr(self, '_candle_debug_done'):
-                candle_n = len(response.get('candles', []))
                 logger.info(
-                    f"[CANDLE DEBUG] {symbol} → status={response.get('s')} | "
-                    f"bars={candle_n} | params={data}"
+                    f"[CANDLE DEBUG] {symbol} → bars={len(candles)}"
                 )
                 self._candle_debug_done = True
             
@@ -168,9 +166,7 @@ class FyersScanner:
                 # Rollback to pre-PRD heuristic behavior
                 min_candles = 5 if is_early_morning else 10
             
-            if 'candles' in response and len(response['candles']) >= min_candles:
-                candles = response['candles'] # [[ts, o, h, l, c, v], ...]
-                
+            if len(candles) >= min_candles:
                 total = len(candles)
                 zero_vol = 0
                 
@@ -191,12 +187,14 @@ class FyersScanner:
                     
                 # Return Success AND the Dataframe (Reuse Strategy)
                 cols = ["epoch", "open", "high", "low", "close", "volume"]
-                df = pd.DataFrame(response["candles"], columns=cols)
+                df = pd.DataFrame(candles, columns=cols)
                 df['datetime'] = pd.to_datetime(df['epoch'], unit='s').dt.tz_localize('UTC').dt.tz_convert('Asia/Kolkata')
                 
                 # Phase 51: Pre-fetch 15m candles for G9 trend exhaustion
                 df_15m = None
                 try:
+                    today     = _dt.date.today()
+                    five_back = today - _dt.timedelta(days=5)
                     data_15m = {
                         "symbol": symbol, "resolution": "15", "date_format": "1",
                         "range_from": five_back.strftime("%Y-%m-%d"),
@@ -212,8 +210,7 @@ class FyersScanner:
                 return True, df, df_15m
             
             # Fix #4: Hard block 0-candle data instead of allowing
-            candle_count = len(response.get('candles', []))
-            logger.warning(f"SKIP {symbol} — Insufficient candle data ({candle_count}). Blocking.")
+            logger.warning(f"SKIP {symbol} — Insufficient candle data ({len(candles)}). Blocking.")
             # self.quality_reject_counts[symbol] = self.quality_reject_counts.get(symbol, 0) + 1 # DEPRECATED Phase 64 (Transient skip)
             return False, None, None
             
