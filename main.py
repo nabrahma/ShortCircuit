@@ -391,8 +391,13 @@ async def _trading_loop(shutdown_event: asyncio.Event, ctx: RuntimeContext):
     while not shutdown_event.is_set():
         try:
             if hasattr(ctx.capital_manager, "_last_sync") and ctx.capital_manager._last_sync:
-                from datetime import datetime, timezone
-                if (datetime.now(timezone.utc).replace(tzinfo=None) - ctx.capital_manager._last_sync).total_seconds() > 300:
+                from datetime import datetime, timezone, UTC
+                now_utc = datetime.now(UTC)
+                last_sync = ctx.capital_manager._last_sync
+                # Ensure both are aware (handle legacy naive timestamps)
+                if last_sync.tzinfo is None:
+                    last_sync = last_sync.replace(tzinfo=UTC)
+                if (now_utc - last_sync).total_seconds() > 300:
                     await ctx.capital_manager.sync(ctx.broker)
             if not ctx.market_session.should_trade_now():
                 current_state = ctx.market_session.get_current_state()

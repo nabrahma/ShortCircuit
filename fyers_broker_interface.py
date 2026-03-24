@@ -83,14 +83,14 @@ class TickData:
     """Data class for market tick data from WebSocket."""
     def __init__(self, data: dict):
         self.symbol = data.get('symbol')
-        self.ltp = data.get('ltp')
-        self.volume = data.get('volume', 0)
-        self.bid = data.get('bid', self.ltp)
-        self.ask = data.get('ask', self.ltp)
-        self.open = data.get('open_price', 0)
-        self.high = data.get('high_price', 0)
-        self.low = data.get('low_price', 0)
-        self.prev_close = data.get('prev_close_price', 0)
+        self.ltp = data.get('ltp') or 0  # Phase 85: Coerce None → 0
+        self.volume = data.get('volume', 0) or 0
+        self.bid = data.get('bid', self.ltp) or 0
+        self.ask = data.get('ask', self.ltp) or 0
+        self.open = data.get('open_price', 0) or 0
+        self.high = data.get('high_price', 0) or 0
+        self.low = data.get('low_price', 0) or 0
+        self.prev_close = data.get('prev_close_price', 0) or 0
         self.timestamp = datetime.now(UTC)
         self.raw_data = data
 
@@ -143,7 +143,7 @@ class MinuteCandleAggregator:
     def update(self, tick: TickData, timestamp: Optional[float] = None):
         """Processes a new tick and updates/finalizes candles."""
         symbol = tick.symbol
-        if not symbol:
+        if not symbol or not tick.ltp:
             return
 
         # Calculate minute start (epoch)
@@ -529,15 +529,16 @@ class FyersBrokerInterface:
                     prev_entry = self._quote_cache.get(symbol)
                     
                     # Merge incoming tick data with prev_entry fallbacks
-                    ltp = message.get('ltp', prev_entry.last_price if prev_entry else 0)
-                    volume = message.get('vol_traded_today', message.get('v', prev_entry.volume if prev_entry else 0))
-                    oi = message.get('oi', prev_entry.oi if prev_entry else 0)
-                    bid = message.get('bid', prev_entry.bid if prev_entry else 0)
-                    ask = message.get('ask', prev_entry.ask if prev_entry else 0)
-                    open_price = message.get('open_price', message.get('o', prev_entry.open_price if prev_entry else 0))
-                    high_price = message.get('high_price', message.get('h', prev_entry.high_price if prev_entry else 0))
-                    prev_close = message.get('prev_close_price', message.get('pc', prev_entry.prev_close if prev_entry else 0))
-                    ch_oc = message.get('ch_oc', message.get('chp', prev_entry.ch_oc if prev_entry else 0))
+                    # Phase 85: Coerce None → 0 to prevent NoneType comparison crashes on pre-market ticks
+                    ltp = message.get('ltp', prev_entry.last_price if prev_entry else 0) or 0
+                    volume = message.get('vol_traded_today', message.get('v', prev_entry.volume if prev_entry else 0)) or 0
+                    oi = message.get('oi', prev_entry.oi if prev_entry else 0) or 0
+                    bid = message.get('bid', prev_entry.bid if prev_entry else 0) or 0
+                    ask = message.get('ask', prev_entry.ask if prev_entry else 0) or 0
+                    open_price = message.get('open_price', message.get('o', prev_entry.open_price if prev_entry else 0)) or 0
+                    high_price = message.get('high_price', message.get('h', prev_entry.high_price if prev_entry else 0)) or 0
+                    prev_close = message.get('prev_close_price', message.get('pc', prev_entry.prev_close if prev_entry else 0)) or 0
+                    ch_oc = message.get('ch_oc', message.get('chp', prev_entry.ch_oc if prev_entry else 0)) or 0
 
                     # Re-calculate ch_oc manually if it evaluates to 0 but prev_close > 0 and ltp > 0
                     if message.get('ch_oc', message.get('chp', 0)) == 0 and prev_close > 0 and ltp > 0:
