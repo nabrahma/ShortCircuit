@@ -632,18 +632,18 @@ class ShortCircuitBot:
         if not self.capital_manager:
             return "Capital: N/A\n"
         try:
-            margin = self.capital_manager.get_available_margin()
-            real_cap = self.capital_manager.get_real_time_capital()
-            bp = real_cap * 5  # 5x leverage
+            real_margin = self.capital_manager._real_margin
+            bp = self.capital_manager.buying_power
+            slot_status = self.capital_manager.get_slot_status()
+            slot_str = "🟢 FREE" if slot_status['slot_free'] else f"🔴 {slot_status['active_symbol']}"
             
-            margin_str = f"₹{margin:.0f}" if margin > 0 else "N/A"
-            cap_str = f"₹{real_cap:.0f}" if real_cap > 0 else "N/A"
+            margin_str = f"₹{real_margin:.0f}" if real_margin > 0 else "N/A"
             bp_str = f"₹{bp:.0f}" if bp > 0 else "N/A"
             
             return (
                 f"Margin (Live): <b>{margin_str}</b>\n"
-                f"Capital:       <b>{cap_str}</b>\n"
                 f"Buying Power:  <b>{bp_str}</b>\n"
+                f"Slot:          {slot_str}\n"
             )
         except Exception as e:
             logger.error(f"Failed to build capital block: {e}")

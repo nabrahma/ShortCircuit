@@ -13,8 +13,9 @@ async def test_cmd_status_live_sync():
     
     capital_manager = MagicMock()
     capital_manager.sync = AsyncMock()
-    capital_manager.get_real_time_capital = MagicMock(return_value=1800.0)
-    capital_manager.get_available_margin = MagicMock(return_value=9000.0)
+    capital_manager._real_margin = 1800.0
+    capital_manager.buying_power = 9000.0
+    capital_manager.get_slot_status = MagicMock(return_value={'slot_free': True, 'active_symbol': None, 'real_margin': 1800.0, 'buying_power': 9000.0, 'leverage': 5.0, 'last_sync': 'NEVER'})
     
     config = {
         'TELEGRAM_BOT_TOKEN': 'fake_token',
