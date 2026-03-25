@@ -83,14 +83,21 @@ class TickData:
     """Data class for market tick data from WebSocket."""
     def __init__(self, data: dict):
         self.symbol = data.get('symbol')
-        self.ltp = data.get('ltp') or 0  # Phase 85: Coerce None → 0
-        self.volume = data.get('volume', 0) or 0
+        # Fyers V3 uses 'lp' for LTP in ticks, and 'ltp' in some SDK-parsed formats.
+        self.ltp = data.get('ltp', data.get('lp', 0)) or 0
+        
+        # Volume: 'vol_traded_today' (Mode Full) or 'v' (Mode SymbolUpdate)
+        self.volume = data.get('vol_traded_today', data.get('v', data.get('volume', 0))) or 0
+        
         self.bid = data.get('bid', self.ltp) or 0
         self.ask = data.get('ask', self.ltp) or 0
-        self.open = data.get('open_price', 0) or 0
-        self.high = data.get('high_price', 0) or 0
-        self.low = data.get('low_price', 0) or 0
-        self.prev_close = data.get('prev_close_price', 0) or 0
+        
+        # OHLC: 'h'/'l'/'o' vs 'high_price'/'low_price'/'open_price'
+        self.open = data.get('open_price', data.get('o', 0)) or 0
+        self.high = data.get('high_price', data.get('h', 0)) or 0
+        self.low = data.get('low_price', data.get('l', 0)) or 0
+        self.prev_close = data.get('prev_close_price', data.get('pc', 0)) or 0
+        
         self.timestamp = datetime.now(UTC)
         self.raw_data = data
 
@@ -138,6 +145,7 @@ class MinuteCandleAggregator:
         self.max_candles = max_candles
         self.history: Dict[str, deque[Candle]] = {}  # symbol -> deque[Candle]
         self.current_candles: Dict[str, Candle] = {}  # symbol -> partially formed Candle
+        self.minute_start_volume: Dict[str, float] = {} # symbol -> volume at start of current minute
         self._lock = threading.Lock()
 
     def update(self, tick: TickData, timestamp: Optional[float] = None):
@@ -158,13 +166,10 @@ class MinuteCandleAggregator:
                 current.high = max(current.high, tick.ltp)
                 current.low = min(current.low, tick.ltp)
                 current.close = tick.ltp
-                # Volume from Fyers is cumulative daily. We need to calculate delta?
-                # Actually, Fyers history returns periodic volume.
-                # To match history, we should store current_day_volume and subtract.
-                # But for now, let's keep it simple: store the latest daily volume 
-                # and the analyzer can diff it if needed, or we diff it here.
-                # History Volume = Volume at minute_end - Volume at minute_start.
-                current.volume = tick.volume 
+                
+                # Fyers ticks have cumulative volume. Periodic volume = Total - Start of Minute.
+                start_vol = self.minute_start_volume.get(symbol, tick.volume)
+                current.volume = max(0, tick.volume - start_vol)
             else:
                 # Finalize old candle if it exists
                 if current:
@@ -173,6 +178,10 @@ class MinuteCandleAggregator:
                     self.history[symbol].append(current)
 
                 # Initialize new candle
+                # We record the volume ALREADY traded before this minute starts.
+                # If this is the very first tick for the symbol, we assume volume 0 for this minute.
+                self.minute_start_volume[symbol] = tick.volume
+
                 new_candle = Candle(
                     symbol=symbol,
                     epoch=minute_start,
@@ -180,7 +189,7 @@ class MinuteCandleAggregator:
                     high=tick.ltp,
                     low=tick.ltp,
                     close=tick.ltp,
-                    volume=tick.volume,
+                    volume=0, # First tick of the minute
                     datetime=datetime.fromtimestamp(minute_start)
                 )
                 self.current_candles[symbol] = new_candle
@@ -888,7 +897,7 @@ class FyersBrokerInterface:
                         continue
                     self._quote_cache[symbol] = CacheEntry(
                         last_price=ltp,
-                        volume=qv.get("volume", 0),
+                        volume=qv.get("v", qv.get("volume", 0)),
                         ch_oc=qv.get("chp", qv.get("ch_oc", 0)),
                         oi=qv.get("oi", 0),
                         bid=qv.get("bid", 0),

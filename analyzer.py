@@ -75,7 +75,6 @@ class FyersAnalyzer:
         self.tape_reader = TapeReader()
         self.profile_analyzer = ProfileAnalyzer()
         self.oi_history = {} # Symbol -> deque of (timestamp, oi, price) use deque(maxlen=20)
-        self.slope_decay_tracker = {} # Phase 66: Symbol -> first_decay_time (datetime)
 
     def get_history(self, symbol: str, interval: str = "1") -> Optional[pd.DataFrame]:
         """
@@ -172,22 +171,14 @@ class FyersAnalyzer:
         slope_now, _  = self.gm_analyst.calculate_vwap_slope(df.iloc[-30:])
         slope_prev, _ = self.gm_analyst.calculate_vwap_slope(df.iloc[-31:-1])
 
-        # Phase 66: Momentum Decay Tracker (Stateful)
+        # Phase 66 → Phase 86: Momentum Decay Detection (Immediate)
+        # Murphy: "Momentum divergence IS the confirmation — one bar is enough."
+        # Leung & Li: "Optimal mean-reversion entry is when reversion force is active."
+        # No timer needed — slope declining + price extended = confirmed decay.
         is_decaying = False
         if getattr(config, 'P66_ADAPTIVE_G1_ENABLED', False):
-            # Condition: Momentum is slowing AND price is extended
             if slope_now < slope_prev and vwap_sd > config.P66_G4_DECAY_SD_THRESHOLD:
-                if symbol not in self.slope_decay_tracker:
-                    self.slope_decay_tracker[symbol] = datetime.datetime.now()
-                
-                # Check confirmation window (120s)
-                first_decay = self.slope_decay_tracker[symbol]
-                duration = (datetime.datetime.now() - first_decay).total_seconds()
-                if duration >= config.P66_G4_DECAY_CONFIRMATION_SEC:
-                    is_decaying = True
-            else:
-                # Reset if momentum accelerates or extension drops
-                self.slope_decay_tracker.pop(symbol, None)
+                is_decaying = True
 
         # Standardize Gain Calculation
         pc = 0

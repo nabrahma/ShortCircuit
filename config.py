@@ -132,10 +132,11 @@ P65_G1_NORMAL_THRESHOLD = 9.0
 P65_G1_AMT_REQUIRED_BELOW_9 = True
 P65_G1_TIME_SINCE_HIGH_CANDLES = 45
 
-# Phase 66: Adaptive Retrace
+# Phase 86: Adaptive Momentum Decay — No longer uses 120s timer
+# Murphy: Momentum divergence IS the confirmation.
 P66_ADAPTIVE_G1_ENABLED: bool = True
 P66_G1_ROTATION_THRESHOLD_PCT: float = 0.030 
-P66_G4_DECAY_CONFIRMATION_SEC: int = 120 
+# P66_G4_DECAY_CONFIRMATION_SEC: int = 120 (Deprecated in Phase 86)
 
 # ============================================================================
 # PHASE 79: LEVERAGE GUARD (G14)

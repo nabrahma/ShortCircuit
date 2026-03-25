@@ -319,7 +319,7 @@ class FyersScanner:
                                     continue
                                 sym = stock.get('n')
                                 ltp = quote_data.get('lp', 0)
-                                volume = quote_data.get('volume', 0)
+                                volume = quote_data.get('v', quote_data.get('volume', 0))
                                 chp = quote_data.get('chp', 0)
                                 if sym:
                                     all_quotes[sym] = {
@@ -358,7 +358,7 @@ class FyersScanner:
                     gain   = quote.get('ch_oc', 0)
                     oi     = quote.get('oi', 0)
 
-                    if gain >= 9.0 and gain <= 18.0 and volume >= 100_000 and ltp >= config.SCANNER_MIN_LTP:
+                    if gain >= config.SCANNER_GAIN_MIN_PCT and gain <= config.SCANNER_GAIN_MAX_PCT and volume >= config.SCANNER_MIN_VOLUME and ltp >= config.SCANNER_MIN_LTP:
                         if self.quality_reject_counts.get(symbol, 0) >= 3:
                             logger.debug(f"BLACKLIST {symbol} — Quality rejected 3x today, skipping.")
                             continue
@@ -409,7 +409,7 @@ class FyersScanner:
 
                         symbol = stock.get('n')
                         ltp = quote_data.get('lp')
-                        volume = quote_data.get('volume')
+                        volume   = quote_data.get('v', quote_data.get('volume', 0))
                         change_p = quote_data.get('chp')
 
                         if ltp is None or volume is None or change_p is None:
