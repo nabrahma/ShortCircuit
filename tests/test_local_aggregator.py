@@ -9,36 +9,38 @@ def test_candle_formation_and_transition():
     # Base timestamp (Start of a minute)
     t0 = 1710000000.0  # Just a fixed timestamp
     
-    # 1. Start a candle at T+0s
+    # 1. Start a candle at T+0s (First tick sets baseline, volume 0)
     agg.update(TickData({'symbol': symbol, 'ltp': 100, 'volume': 1000}), timestamp=t0)
     
     candles = agg.get_candles(symbol)
     assert len(candles) == 1
     assert candles[0].open == 100
     assert candles[0].epoch == 1710000000
+    assert candles[0].volume == 0
     
     # 2. Update at T+30s (Same minute)
+    # Volume delta: 1500 - 1000 = 500
     agg.update(TickData({'symbol': symbol, 'ltp': 110, 'volume': 1500}), timestamp=t0 + 30)
     c = agg.get_candles(symbol)[0]
     assert c.high == 110
     assert c.close == 110
-    assert c.volume == 1500
+    assert c.volume == 500
     assert len(agg.get_candles(symbol)) == 1
 
-    # 3. Transition to next minute at T+65s
+    # 3. Transition to next minute at T+65s (New minute resets baseline)
     agg.update(TickData({'symbol': symbol, 'ltp': 105, 'volume': 2000}), timestamp=t0 + 65)
     
     candles = agg.get_candles(symbol)
     assert len(candles) == 2
     
-    # Old candle (finalized)
-    assert candles[0].epoch == 1710000000
+    # Old candle (finalized) volume should be the final delta of that minute
+    assert candles[1].epoch == 1710000060 # second candle is the current one
     assert candles[0].close == 110
+    assert candles[0].volume == 500
     
-    # New candle (current)
-    assert candles[1].epoch == 1710000060
+    # New candle (current) starts at 0 for the first tick
     assert candles[1].open == 105
-    assert candles[1].volume == 2000
+    assert candles[1].volume == 0
 
 def test_max_candles_limit():
     agg = MinuteCandleAggregator(max_candles=2)

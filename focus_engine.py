@@ -177,23 +177,34 @@ class FocusEngine:
         for symbol, meta in list(self.cooldown_signals.items()):
             if now >= meta['unlock_at']:
                 # Re-validate live gain before promoting
-                try:
-                    data = {"symbols": symbol}
-                    resp = self.fyers.quotes(data=data)
-                    if 'd' in resp and resp['d']:
-                        ltp = resp['d'][0]['v']['lp']
-                        open_val = resp['d'][0]['v']['open_price']
-                        if open_val > 0:
-                            gain = ((ltp - open_val) / open_val) * 100
-                            
-                            # Assuming SC uses DAY_GAIN_PCT_THRESHOLD as positive scalar e.g. 5.0
-                            if abs(gain) >= config.DAY_GAIN_PCT_THRESHOLD: 
-                                logger.info(f"PROMOTED {symbol} from pending — cooldown expired, gain {gain:.2f}%")
-                                self.add_pending_signal(meta['data'])
-                            else:
-                                logger.info(f"DROPPED {symbol} from pending — gain {gain:.2f}% < threshold")
-                except Exception as e:
-                    logger.error(f"Failed to re-evaluate cooldown signal {symbol}: {e}")
+                ltp = 0
+                open_val = 0
+                if self.order_manager and self.order_manager.broker:
+                    snapshot = self.order_manager.broker.get_quote_cache_snapshot()
+                    if symbol in snapshot:
+                        entry = snapshot[symbol]
+                        ltp = entry['ltp']
+                        open_val = entry['open']
+                
+                if ltp == 0:
+                    try:
+                        data = {"symbols": symbol}
+                        resp = self.fyers.quotes(data=data)
+                        if 'd' in resp and resp['d']:
+                            ltp = resp['d'][0]['v']['lp']
+                            open_val = resp['d'][0]['v']['open_price']
+                    except Exception as e:
+                        logger.error(f"Failed to re-evaluate cooldown signal {symbol}: {e}")
+                        continue
+
+                if open_val > 0:
+                    gain = ((ltp - open_val) / open_val) * 100
+                    # Assuming SC uses DAY_GAIN_PCT_THRESHOLD as positive scalar e.g. 5.0
+                    if abs(gain) >= config.DAY_GAIN_PCT_THRESHOLD: 
+                        logger.info(f"PROMOTED {symbol} from pending — cooldown expired, gain {gain:.2f}%")
+                        self.add_pending_signal(meta['data'])
+                    else:
+                        logger.info(f"DROPPED {symbol} from pending — gain {gain:.2f}% < threshold")
                     
                 del self.cooldown_signals[symbol]
 
@@ -265,7 +276,7 @@ class FocusEngine:
             except Exception as e:
                 logger.error(f"Monitor Loop Error: {e}")
 
-            await asyncio.sleep(2)
+            await asyncio.sleep(0.5)
 
     async def check_pending_signals(self, trade_manager):
         """
@@ -330,11 +341,19 @@ class FocusEngine:
                     else:
                         continue 
                 else:
-                    # Legacy LTP-touch logic
-                    data = {"symbols": symbol}
-                    resp = await asyncio.to_thread(self.fyers.quotes, data=data)
-                    if 'd' not in resp or not resp['d']: continue
-                    ltp = resp['d'][0]['v']['lp']
+                    # WebSocket Cache-First LTP-touch logic
+                    ltp = 0
+                    if self.order_manager and self.order_manager.broker:
+                        snapshot = self.order_manager.broker.get_quote_cache_snapshot()
+                        if symbol in snapshot:
+                            ltp = snapshot[symbol]['ltp']
+                    
+                    if ltp == 0:
+                        # Fallback to direct REST if cache miss
+                        data = {"symbols": symbol}
+                        resp = await asyncio.to_thread(self.fyers.quotes, data=data)
+                        if 'd' not in resp or not resp['d']: continue
+                        ltp = resp['d'][0]['v']['lp']
                 timestamp = pending['timestamp']
 
                 def _queue_validation_update(outcome, details=None):
@@ -748,14 +767,21 @@ class FocusEngine:
                     self.stop_focus("EOD")
                     return
 
-                # 1. Fetch Quote & Process
-                data = {"symbols": symbol}
-                response = self.fyers.quotes(data=data)
+                # 1. Fetch Price from WebSocket Cache (0ms latency, high frequency)
+                ltp = 0
+                if self.order_manager and self.order_manager.broker:
+                    snapshot = self.order_manager.broker.get_quote_cache_snapshot()
+                    if symbol in snapshot:
+                        ltp = snapshot[symbol]['ltp']
                 
-                if 'd' in response and len(response['d']) > 0:
-                    quote = response['d'][0]
-                    qt = quote.get('v', quote)
-                    ltp = qt.get('lp')
+                # Fallback to REST only if cache miss
+                if ltp == 0:
+                    data = {"symbols": symbol}
+                    response = self.fyers.quotes(data=data)
+                    if 'd' in response and len(response['d']) > 0:
+                        quote = response['d'][0]
+                        qt = quote.get('v', quote)
+                        ltp = qt.get('lp')
                     
                     self.active_trade['last_price'] = ltp
                     
@@ -789,7 +815,8 @@ class FocusEngine:
                     # Or just rely on Hard SL (monitored by order_manager)
                     
                     
-                time.sleep(2)
+                # Increase frequency for faster TP execution
+                time.sleep(0.5)
                 
             except Exception as e:
                 logger.error(f"Focus Loop Error: {e}")
