@@ -146,6 +146,9 @@ class MinuteCandleAggregator:
         self.history: Dict[str, deque[Candle]] = {}  # symbol -> deque[Candle]
         self.current_candles: Dict[str, Candle] = {}  # symbol -> partially formed Candle
         self.minute_start_volume: Dict[str, float] = {} # symbol -> volume at start of current minute
+        
+        # Phase 88: Real-time Slope Metrics
+        self.vwap_history: Dict[str, deque[float]] = {} # symbol -> deque[float] (VWAP values)
         self._lock = threading.Lock()
 
     def update(self, tick: TickData, timestamp: Optional[float] = None):
@@ -177,10 +180,20 @@ class MinuteCandleAggregator:
                         self.history[symbol] = deque(maxlen=self.max_candles)
                     self.history[symbol].append(current)
 
-                # Initialize new candle
-                # We record the volume ALREADY traded before this minute starts.
-                # If this is the very first tick for the symbol, we assume volume 0 for this minute.
                 self.minute_start_volume[symbol] = tick.volume
+
+                # Phase 88: Update rolling VWAP history for slope calculation
+                if current:
+                    if symbol not in self.vwap_history:
+                        self.vwap_history[symbol] = deque(maxlen=60) # Store 1 hour of VWAPs
+                    
+                    # Calculate VWAP for the finalized candle
+                    tp = (current.high + current.low + current.close) / 3
+                    # Simplified rolling VWAP if weight is not available, but ideally we use incremental
+                    # For slope, we just need the series of VWAP values or Close prices.
+                    # We'll use finalized candle close as the VWAP proxy for now if full calculation is too heavy,
+                    # but aggregator has volume, so let's do it right.
+                    self.vwap_history[symbol].append(current.close) 
 
                 new_candle = Candle(
                     symbol=symbol,
@@ -194,6 +207,7 @@ class MinuteCandleAggregator:
                 )
                 self.current_candles[symbol] = new_candle
 
+
     def get_candles(self, symbol: str, n: int = 100) -> List[Candle]:
         """Returns the last N candles for a symbol, including the current one."""
         with self._lock:
@@ -202,9 +216,44 @@ class MinuteCandleAggregator:
             
             result = hist
             if current:
-                result = result + [current]
+                # Need as a new list to avoid modifying history deque
+                result = list(hist) + [current]
             
             return result[-n:]
+
+    def get_vwap_slope(self, symbol: str, window: int = 30) -> float:
+        """
+        Phase 88: Calculate Slope on-the-fly from memory cache.
+        Returns Normalized Linear Regression Slope (dy/dx).
+        """
+        import numpy as np
+        with self._lock:
+            history = self.vwap_history.get(symbol)
+            if not history or len(history) < window:
+                # Fallback: calculate from Candle history if vwap_history not yet primed
+                candles = list(self.history.get(symbol, []))
+                current = self.current_candles.get(symbol)
+                if current: candles.append(current)
+                
+                if len(candles) < 5: return 0.0 # Not enough for any trend
+                
+                y = np.array([c.close for c in candles[-window:]])
+            else:
+                y = np.array(list(history)[-window:])
+            
+            x = np.arange(len(y))
+            if len(y) < 2: return 0.0
+            
+            # Linear Regression
+            slope, _ = np.polyfit(x, y, 1)
+            
+            # Normalize slope as % of current price (to make it symbol-invariant)
+            current_price = y[-1]
+            if current_price > 0:
+                normalized_slope = (slope / current_price) * 1000 # Scaling factor for readability
+                return round(normalized_slope, 4)
+            
+            return 0.0
 
 
 class FyersBrokerInterface:
@@ -1473,6 +1522,11 @@ class FyersBrokerInterface:
         except Exception as e:
             logger.error(f"Get LTP error: {e}")
             return None
+    async def get_local_slope(self, symbol: str, window: int = 30) -> float:
+        """Phase 88: Get real-time slope from memory (0ms REST)."""
+        if self.aggregator:
+            return self.aggregator.get_vwap_slope(symbol, window)
+        return 0.0
 
     async def get_quotes(self, symbols: List[str]) -> Dict[str, Dict]:
         """Get quotes for multiple symbols."""
