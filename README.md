@@ -1,30 +1,22 @@
 # ShortCircuit
 
-> *The market is not a place. It is a conversation between participants
-> with asymmetric information, asymmetric conviction, and asymmetric speed.
-> This system is an attempt to listen more carefully than the other side.*
+> *The market is not a place. It is a collision of asymmetric speed and conviction. 
+> Most participants react to the past; ShortCircuit observes the present in high-frequency 
+> to exploit the exhaustion of momentum before the crowd realizes the music has stopped.*
 
 ***
 
 ## Origin
 
-This project did not start with code. It started with a conversation.
+ShortCircuit was not born at a keyboard; it was born in the observation of fragility.
 
-A friend — a sharper market observer than most — had a simple thesis:
-*Pumped stocks fail. Every time. The question is only when.*
+The market has a recurring character arc: the "Gamma Climax." A stock pushed up 10% on retail FOMO and institutional spoofing creates a specific microstructure tension. It is a conversation between those who are trapped at the high and those who are hiding their supply in the order book.
 
-He was right. The microstructure of a stock up 10% intraday on retail FOMO
-is consistent, readable, and tradeable. The absorption at the top. The trapped longs.
-The 15-minute structure breaking down quietly while the 1-minute chart still looks
-like momentum.
+The thesis is simple: **Pumped stocks fail.** Not because they have to, but because the physics of liquidity eventually demands a reversion. The challenge has always been the "Gap" — the psychological chasm between seeing a setup and executing it with absolute, cold-blooded precision.
 
-I borrowed that thesis entirely. What I added was the attempt to formalize it —
-to ask: what does this look like, precisely, in data? What are the exact conditions
-that separate the setups that work from the ones that look identical but don't?
-And can those conditions be verified automatically, without hesitation, every time?
+ShortCircuit is the bridge across that chasm. It borrows the keen observations of professional microstructure traders and formalizes them into a 13-gate execution engine. It removes the human element — the negotiation, the hesitation, and the hope — and replaces it with a rigorous, event-driven algorithm that waits for exhaustion to become a fact before firing.
 
-ShortCircuit is the answer to those questions. The core idea belongs to him.
-The implementation is mine. The debt is acknowledged.
+The core idea belongs to the observers; the implementation belongs to the machine.
 
 ***
 
@@ -101,46 +93,37 @@ Silence in a live system is always the most dangerous state.
 
 ***
 
-## The Architecture
+## The Architecture (Phase 87 "Turbo")
 
 ```
 NSE Market (9:15 AM → 3:30 PM IST)
     │
-    ├─ Data WebSocket (fyers_apiv3)
-    │   Real-time tick feed. UNINITIALIZED → PRIMING → READY state machine.
-    │   Seeded from REST at startup. Freshness tracked by WS-tick count, not REST age.
-    │   Powers: Live P&L, SL monitoring, and multi-factor price validation.
+    ├─ Data WebSocket (0ms Latency Cache)
+    │   Direct high-frequency tick stream. UNINITIALIZED → PRIMING → READY.
+    │   Powers: 500ms Instant TP/SL Monitoring, and Multi-Factor Validation.
+    │   Seeded from REST at startup to ensure zero-gap coverage.
     │
-    └─ REST API (fyers_apiv3)
-        Batch quotes (fallback only), candle history, order submission.
-        Powers: Scan, Gates 1–12, entry/partial/exit orders.
+    └─ Order WebSocket
+        Real-time fill confirmation. No polling. Zero internal latency 
+        between broker fill and system state transition.
 
-Scanner
-    2,418 NSE-EQ symbols. WS cache first — REST batch fallback (50 symbols/call).
-    Pre-filter: gain ≥7.5%, volume >100k, LTP ≥₹50 (Fyers basket-rule safety floor).
-    Minimum 45 candles (15 in Climax Window) before RVOL is treated as valid.
-    Chart quality check: rejects symbols with >50% zero-volume or >50% doji candles.
-    Output: candidate list, every ~60 seconds.
+Scanner (The Sieve)
+    2,400+ NSE-EQ symbols. WebSocket-First analysis.
+    Pre-filter: Gain ≥7.5%, Periodic Volume (Delta) checks, LTP ≥₹50.
+    Hard Quality Guard: Rejects "Ghost Liquidity" (>50% zero-volume candles).
+    Output: Verified candidates promoted to the 13-Gate Pipeline.
 
-13-Gate Validation Framework
-    Sequential. Failure at any gate = immediate rejection + GateResultLogger record.
-    Gates 1–9: analyzer.py — REST snapshot + NIFTY macro context.
-    Gates 10–12: focus_engine.py — WebSocket real-time price confirmation.
-    Gate 13: signal_manager.py — post-trade outcome recording + loss streak guard.
+FocusEngine (Execution & Monitoring)
+    Validation: High-frequency triggers (LTP-touch) or Structural (Candle-Close).
+    Monitoring: 500ms Duty Cycle. Reads from local WebSocket cache for 
+                zero-network-latency Take Profit and Stop Loss execution.
+    Target Tracking: Adaptive logic derived from ATR and Intraday Gain.
 
 Order Manager
-    Entry: REST submit → WebSocket fill confirmation (15s timeout, REST verify fallback).
-    SL: ATR-derived, tick-rounded, REST submit atomically with entry.
-    Partial exits: cancel-first safe_exit() — phantom order prevention.
-    SL qty sync: modify_sl_qty() after every partial close — accidental long prevention.
-
-Position Manager
-    40/40/20 partial exit engine.
-    TP1: 40% closed → SL moves to breakeven.
-    TP2: 40% closed → SL locks to TP1 level.
-    TP3: 20% runner → ATR × 0.5 trailing stop.
-    CLOSED_EXTERNALLY detection → cleanup_orders() fires, no phantom SL left behind.
-    sfp_watch_loop() monitors for Sweep-and-Flip pattern 10 minutes post-exit.
+    Phase 78 Precision: Single 100% exit targets for maximum reliability.
+    Atomic Entry/SL: SL-Limit orders placed immediately on fill.
+    Safety: Automated SL quantity sync and "Cancel-First" exit logic.
+```
 
 Capital Manager
     Source of truth: Fyers /funds API. Never a hardcoded base capital.
@@ -192,19 +175,19 @@ from a lesson that cost something to learn. They are not additions. They are cor
 
 | Gate | ID | What It Kills |
 |---|---|---|
-| **G1** | STRUCTURAL_INTEGRITY | Time-since-high (45 candles), Kill Backdoor (price dropped >1.5% from high) |
-| **G2** | DATA_QUALITY | Insufficient candles (<45 or <15 in Climax) — makes indicators unreliable |
-| **G3** | CIRCUIT_GUARD | Session-permanent blacklist: any symbol that touched upper circuit today |
-| **G4** | MOMENTUM | VWAP slope > 3.0 or RVOL > 5.0x (Momentum Decay fallback allowed) |
-| **G5** | EXHAUSTION | Gain outside 7.5–14.5%, price not above VAH, volume fade > 0.65 ratio |
-| **G6** | TIERED_SCORING | Confluence score < 2 (DPOC, OI, Tape, Patterns) — no auto-passes |
-| **G7** | MARKET_REGIME | Pre-09:30 AM, Post-15:10 PM, or Nifty Trend > 1.5% against the move |
-| **G8** | SIGNAL_LIMIT | Unlimited signals, 45-min per-symbol cooldown, ₹500 session loss pause |
-| **G9** | MATH_PHYSICS | Z-Score Stretch (>3.0) / Momentum Stall / Alpha Strike Bypass (>3.0 SD) |
-| **G10** | EXEC_PRECISION | Spread >0.4% → CAUTIOUS mode (50% qty) |
-| **G11** | FIXED_TIMEOUT | Signals expire after exactly 15 minutes. |
-| **G12** | CANDLE_CLOSE | Rejects intraday wicks. Requires **1-minute candle close** below trigger to enter |
-| **G13** | OUTCOME_LOG | Post-trade result recorded. Finalizes feedback loop. |
+| **G1** | STRUCTURAL_INTEGRITY | Time-since-high (45 candles), Kill Backdoor (price dropped >2.0% from high) |
+| **G2** | DATA_QUALITY | Insufficient candles (<45 or <15 in Climax) |
+| **G3** | CIRCUIT_GUARD | Session-permanent blacklist: any symbol that is <0.5% from Upper Circuit |
+| **G4** | MOMENTUM_DECAY | Rejects if price is extending with high slope. Refactored for **Immediate Decay Detection** in Phase 87. |
+| **G5** | EXHAUSTION | Gain outside 7.5–14.5%, price not above VAH, volume fade |
+| **G6** | TIERED_SCORING | Confluence score < 2 (DPOC, Trapped Longs, Patterns) |
+| **G7** | MARKET_REGIME | Pre-09:30 AM, Post-15:10 PM, or Nifty Trend conflict |
+| **G8** | SIGNAL_LIMIT | Max 5 trades today, 45-min per-symbol cooldown, Session loss pause |
+| **G9** | MATH_PHYSICS | Z-Score Stretch / Momentum Stall / institutional absorption detection |
+| **G10** | EXEC_PRECISION | Spread guard / Cautious qty mode |
+| **G11** | FIXED_TIMEOUT | Signals expire after exactly 15 minutes to prevent stale execution |
+| **G12** | INSTANT_TRIGGER | High-frequency WebSocket confirmation. Requires structure break to engage. |
+| **G13** | OUTCOME_LOG | Post-trade result recorded. Finalizes the feedback loop. |
 
 Every rejection at every gate produces a `GateResult` record with the exact failing value,
 the threshold it failed against, and the timestamp. The system cannot be accused of opacity.
