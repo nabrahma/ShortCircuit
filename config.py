@@ -142,7 +142,7 @@ P66_G1_ROTATION_THRESHOLD_PCT: float = 0.030
 # PHASE 79: LEVERAGE GUARD (G14)
 # ============================================================================
 P79_G14_LEVERAGE_GUARD_ENABLED = True
-P79_G14_MIN_LEVERAGE = 4.5  # Reject if leverage < 4.5
+P79_G14_MIN_LEVERAGE = 1.1  # Reject if leverage < 1.1 (Allows all non-1x stocks)
 
 # ============================================================================
 # 6. EXIT ENGINE & RISK MULTIPLIERS

@@ -21,6 +21,8 @@ import os
 import asyncio
 import logging
 import config
+import requests
+import json
 from pathlib import Path
 from collections import deque, defaultdict
 from dataclasses import dataclass
@@ -1604,7 +1606,7 @@ class FyersBrokerInterface:
 
         # Fetch from Broker
         try:
-            data = {
+            payload = {
                 "data": [
                     {
                         "symbol": symbol,
@@ -1617,8 +1619,20 @@ class FyersBrokerInterface:
                     }
                 ]
             }
+            
+            # Phase 88.1: Manual REST call to bypass missing SDK 'order_calc' method
+            url = "https://api-t1.fyers.in/api/v3/order-calc"
+            headers = {
+                "Authorization": f"{self.client_id}:{self.access_token}",
+                "Content-Type": "application/json"
+            }
+            
             loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(None, self.rest_client.order_calc, data)
+            def _make_request():
+                return requests.post(url, headers=headers, json=payload, timeout=5)
+            
+            resp = await loop.run_in_executor(None, _make_request)
+            response = resp.json() if resp.status_code == 200 else {}
             
             if response and response.get('s') == 'ok' and response.get('data'):
                 margin = response['data'][0].get('margin', 0)
