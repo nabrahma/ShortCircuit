@@ -1627,8 +1627,9 @@ class FyersBrokerInterface:
                 ]
             }
             
-            # Manual REST call
-            url = "https://api-t1.fyers.in/api/v3/order-calc"
+            # Manual REST call - Phase 88.1 correction
+            # Using api.fyers.in instead of api-t1
+            url = "https://api.fyers.in/api/v3/order-calc"
             headers = {
                 "Authorization": f"{self.client_id}:{self.access_token}",
                 "Content-Type": "application/json"
@@ -1646,7 +1647,12 @@ class FyersBrokerInterface:
                     logger.info(f"[BROKER] Dynamic Leverage detected for {symbol}: {leverage}x (Margin: ₹{margin:.2f} @ ₹{price:.2f})")
                     return leverage
             
-            logger.warning(f"[BROKER] Could not detect leverage for {symbol}, response: {response}. Defaulting to 1.0x")
+            # Diagnostic Logging for empty/failed responses
+            logger.warning(
+                f"[BROKER] Could not detect leverage for {symbol}. "
+                f"Status: {resp.status_code} | "
+                f"Response: {response}. Defaulting to 1.0x"
+            )
             return 1.0
             
         except Exception as e:

@@ -2,6 +2,7 @@ import asyncio
 import inspect
 import logging
 import os
+import pandas as pd
 from datetime import date, datetime
 
 import config
@@ -32,7 +33,6 @@ class EODAnalyzer:
         """
         Main async entrypoint for EOD analysis.
         """
-        import pandas as pd
         if self.db is None:
             raise RuntimeError("EODAnalyzer: db is None — DatabaseManager was not injected.")
 
