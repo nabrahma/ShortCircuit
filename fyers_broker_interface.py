@@ -1593,7 +1593,14 @@ class FyersBrokerInterface:
 
     async def get_symbol_leverage(self, symbol: str, price: float) -> float:
         """
-        Phase 79: Fetch actual leverage for a symbol using fyers.order_calc.
+        Phase 79: Fetch actual leverage for a symbol (Async).
+        """
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self.get_symbol_leverage_sync, symbol, price)
+
+    def get_symbol_leverage_sync(self, symbol: str, price: float) -> float:
+        """
+        Phase 88.1: Synchronous leverage fetch for Scanner thread.
         Leverage = Price / Margin_Required.
         """
         if not symbol:
@@ -1611,7 +1618,7 @@ class FyersBrokerInterface:
                     {
                         "symbol": symbol,
                         "qty": 1,
-                        "side": 1,  # 1 for Buy (margin check is same for both ideally)
+                        "side": 1,  # 1 for Buy
                         "type": 2,  # 2 for Market
                         "productType": "INTRADAY",
                         "limitPrice": 0,
@@ -1620,18 +1627,14 @@ class FyersBrokerInterface:
                 ]
             }
             
-            # Phase 88.1: Manual REST call to bypass missing SDK 'order_calc' method
+            # Manual REST call
             url = "https://api-t1.fyers.in/api/v3/order-calc"
             headers = {
                 "Authorization": f"{self.client_id}:{self.access_token}",
                 "Content-Type": "application/json"
             }
             
-            loop = asyncio.get_event_loop()
-            def _make_request():
-                return requests.post(url, headers=headers, json=payload, timeout=5)
-            
-            resp = await loop.run_in_executor(None, _make_request)
+            resp = requests.post(url, headers=headers, json=payload, timeout=5)
             response = resp.json() if resp.status_code == 200 else {}
             
             if response and response.get('s') == 'ok' and response.get('data'):

@@ -362,6 +362,16 @@ class FyersScanner:
                         if self.quality_reject_counts.get(symbol, 0) >= 3:
                             logger.debug(f"BLACKLIST {symbol} — Quality rejected 3x today, skipping.")
                             continue
+                            
+                        # Phase 88.1: Leverage Filter (Early Rejection for 1x only stocks)
+                        leverage = 1.0
+                        if self.broker:
+                            leverage = self.broker.get_symbol_leverage_sync(symbol, ltp)
+                            
+                        if leverage <= 1.0:
+                            logger.info(f"[SCANNER] SKIP {symbol} — 1x Leverage detected (Delivery only).")
+                            continue
+
                         tick_size = self.symbols.get(symbol, 0.05)
                         pre_candidates.append({
                             'symbol': symbol, 'ltp': ltp,
