@@ -377,6 +377,7 @@ class FyersScanner:
                             'symbol': symbol, 'ltp': ltp,
                             'volume': volume, 'change': gain,
                             'tick_size': tick_size, 'oi': oi,
+                            'leverage': leverage, 
                         })
 
             # Elapsed for tier 1/2
@@ -500,9 +501,13 @@ class FyersScanner:
                         c['history_df'] = df
                         c['history_df_15m'] = df_15m # Phase 51
                         
+                        # Phase 88.1: Enhanced HUD Logging
+                        leverage = c.get('leverage', 1.0)
                         logger.info(
                             f"[CANDIDATE] {c['symbol']} | "
                             f"Gain: {c['change']}% | "
+                            f"Vol: {c['volume']:,} | "
+                            f"Lev: {leverage}x | "
                             f"Tick: {c['tick_size']} | OI: {c['oi']}"
                         )
                         filtered_candidates.append(c)
