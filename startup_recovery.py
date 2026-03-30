@@ -18,14 +18,18 @@ class StartupRecovery:
         self.telegram       = telegram         # NEW
         logger.info("[RECOVERY] StartupRecovery initialized (Phase 44.6 — adoption enabled).")
 
-    def scan_orphaned_trades(self):
+    async def scan_orphaned_trades(self):
         """
-        Synchronous startup scan.
-        Calls async adoption via asyncio.get_event_loop().run_until_complete
-        only if an orphan is found.
+        Asynchronous startup scan with strict timeout.
+        Adopts orphans and recovers state if any are found.
         """
         try:
-            positions = self.fyers.positions()
+            # Phase 89.1: Enforce strict timeout to prevent indefinite sync hangs
+            positions = await asyncio.wait_for(
+                asyncio.to_thread(self.fyers.positions), 
+                timeout=15.0
+            )
+
             if positions.get('s') != 'ok':
                 logger.error(f"Recovery scan failed: {positions}")
                 return
@@ -50,18 +54,10 @@ class StartupRecovery:
                 # Phase 44.6: Attempt adoption instead of just logging
                 if self.order_manager and self.capital:
                     try:
-                        loop = asyncio.get_event_loop()
-                        if loop.is_running():
-                            # Inside async context — schedule as task
-                            asyncio.create_task(
-                                self._adopt_orphan_async(sym, qty, side, avg)
-                            )
-                        else:
-                            loop.run_until_complete(
-                                self._adopt_orphan_async(sym, qty, side, avg)
-                            )
+                        # Since we're now async, directly await the adoption
+                        await self._adopt_orphan_async(sym, qty, side, avg)
                     except Exception as e:
-                        logger.critical(f"[RECOVERY] Adoption failed for {sym}: {e}")
+                        logger.error(f"[RECOVERY] Failed to schedule adoption for {sym}: {e}")
                 else:
                     # Fallback: alert only (old behaviour if managers not injected)
                     logger.critical(
@@ -74,6 +70,8 @@ class StartupRecovery:
                             f"Cannot auto-adopt — managers not wired."
                         ))
 
+        except asyncio.TimeoutError:
+            logger.error("❌ [RECOVERY] Fyers 'positions' API timed out after 15s. Skipping recovery.")
         except Exception as e:
             logger.error(f"Recovery scan failed: {e}")
 

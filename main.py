@@ -343,7 +343,7 @@ async def _initialize_runtime() -> RuntimeContext:
         capital_manager=capital_manager,
         telegram=bot,
     )
-    startup_recovery.scan_orphaned_trades()
+    await startup_recovery.scan_orphaned_trades()
 
     return RuntimeContext(
         fyers_client=fyers_client,
@@ -743,7 +743,7 @@ async def main() -> int:
             return await ctx.broker.get_all_positions()
 
         async def _restart_recovery():
-            await asyncio.to_thread(ctx.startup_recovery.scan_orphaned_trades)
+            await ctx.startup_recovery.scan_orphaned_trades()
 
         _update_terminal_log()
 
