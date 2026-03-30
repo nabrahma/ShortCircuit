@@ -779,12 +779,28 @@ class ShortCircuitBot:
         if self.order_manager and self.order_manager.broker:
             broker = self.order_manager.broker
             try:
-                # Sync Capital
+                # Phase 88.2: Timeout Protection for Live Sync
+                # Prevents /status from hanging when Fyers API is slow/down
                 if self.capital_manager:
-                    await self.capital_manager.sync(broker)
+                    try:
+                        await asyncio.wait_for(self.capital_manager.sync(broker), timeout=3.0)
+                    except asyncio.TimeoutError:
+                        logger.warning("/status: Capital sync timed out. Using cached values.")
                 
                 # Sync Positions/PnL
-                trades = await self.order_manager.get_today_trades()
+                try:
+                    trades = await asyncio.wait_for(self.order_manager.get_today_trades(), timeout=3.0)
+                except asyncio.TimeoutError:
+                    logger.warning("/status: Trade sync timed out. Using cached values.")
+                    # Fallback to local position cache if API hung
+                    trades = []
+                    for s, pos in getattr(self.order_manager, 'active_positions', {}).items():
+                        trades.append({
+                            'symbol': s,
+                            'realised_pnl': 0.0, # Not in cache
+                            'unrealised_pnl': pos.get('unrealised_pnl', 0.0),
+                            'qty': pos.get('qty', 0)
+                        })
                 realised_pnl = sum(t.get('realised_pnl', 0.0) for t in trades)
                 unrealised = sum(t.get('unrealised_pnl', 0.0) for t in trades)
                 # Count only non-zero quantities as open

@@ -217,11 +217,13 @@ class MarketSession:
 
     def _fetch_morning_range(self):
         """Fetch 9:15-9:30 range for NIFTY"""
-        fallback_high = 25500 # Dummy
-        fallback_low = 25300
+        # Default fallbacks (kept for ultimate safety)
+        fallback_high = 25500 
+        fallback_low = 23300
         
         try:
             today_str = datetime.now(IST).strftime('%Y-%m-%d')
+            # Phase 88.3: Real data fetch
             data = {
                 "symbol": self.NIFTY_SYMBOL,
                 "resolution": "5",
@@ -230,6 +232,23 @@ class MarketSession:
                 "range_to": f"{today_str}",
                 "cont_flag": "1"
             }
+            
+            response = self.fyers.history(data=data)
+            if response and "candles" in response and len(response["candles"]) > 0:
+                # Filter for candles before 09:30 IST
+                valid_candles = []
+                for c in response["candles"]:
+                    dt = datetime.fromtimestamp(c[0], tz=timezone.utc).astimezone(IST)
+                    if dt.time() < dtime(9, 30):
+                        valid_candles.append(c)
+                
+                if valid_candles:
+                    high = max(c[2] for c in valid_candles)
+                    low = min(c[3] for c in valid_candles)
+                    logger.info(f"✅ NIFTY Morning Range Fetched: {low} - {high}")
+                    return {'high': high, 'low': low}
+
+            logger.warning(f"No morning candles for {self.NIFTY_SYMBOL}. Using dummy fallback.")
             return {'high': fallback_high, 'low': fallback_low} 
             
         except Exception as e:

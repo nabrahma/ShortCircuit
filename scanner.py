@@ -368,8 +368,8 @@ class FyersScanner:
                         if self.broker:
                             leverage = self.broker.get_symbol_leverage_sync(symbol, ltp)
                             
-                        if leverage <= 1.0:
-                            logger.info(f"[SCANNER] SKIP {symbol} — 1x Leverage detected (Delivery only).")
+                        if leverage < getattr(config, 'MIN_LEVERAGE', 3.0):
+                            logger.info(f"[SCANNER] SKIP {symbol} — {leverage}x Leverage detected (Requires >= {getattr(config, 'MIN_LEVERAGE', 3.0)}x).")
                             continue
 
                         tick_size = self.symbols.get(symbol, 0.05)

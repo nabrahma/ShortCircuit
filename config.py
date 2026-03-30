@@ -26,6 +26,7 @@ AUTO_MODE = False          # NEVER change this to True. Enable via Telegram /aut
 AUTO_MODE_DEFAULT = False 
 MAX_SESSION_LOSS_INR = 500 # Max cumulative intra-day loss before bot halts (Phase 69)
 INTRADAY_LEVERAGE = 5.0    # Fixed 5× leverage (NSE standard requirement)
+MIN_LEVERAGE = 3.0         # Minimum leverage allowed for a stock to pass the scanner
 CAPITAL_PER_TRADE = 9000   # OFFLINE FALLBACK ONLY (Buying power for 1800 margin)
 
 # Timing (IST)
@@ -39,7 +40,7 @@ VALIDATION_TIMEOUT_MINUTES = 15
 SCANNER_GAIN_MIN_PCT: float = 7.5  # Phase 65: Synchronized with P65_G1 floor
 SCANNER_GAIN_MAX_PCT: float = 18.0 # Protection against upper-circuit runners
 SCANNER_MIN_VOLUME:   int   = 100000 # Minimum liquidity floor
-SCANNER_MIN_LTP:      float = 50.0   # Filter sub-₹50 manipulation vehicles
+SCANNER_MIN_LTP:      float = 40.0   # Filter sub-₹40 manipulation vehicles
 
 # G5 Stretch Thresholds
 G5_STRETCH_LOW_PCT:  float = 7.5   # Synchronized with Scanner Min

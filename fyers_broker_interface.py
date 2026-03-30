@@ -1628,8 +1628,8 @@ class FyersBrokerInterface:
             }
             
             # Manual REST call - Phase 88.1 correction
-            # Using api.fyers.in instead of api-t1
-            url = "https://api.fyers.in/api/v3/order-calc"
+            # Using multiorder/margin instead of order-calc which returns 500
+            url = "https://api.fyers.in/api/v3/multiorder/margin"
             headers = {
                 "Authorization": f"{self.client_id}:{self.access_token}",
                 "Content-Type": "application/json"
