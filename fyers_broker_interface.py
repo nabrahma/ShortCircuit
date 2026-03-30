@@ -1648,16 +1648,18 @@ class FyersBrokerInterface:
                     return leverage
             
             # Diagnostic Logging for empty/failed responses
+            fallback_lev = 5.0 if resp.status_code >= 500 else 1.0
+            
             logger.warning(
                 f"[BROKER] Could not detect leverage for {symbol}. "
                 f"Status: {resp.status_code} | "
-                f"Response: {response}. Defaulting to 1.0x"
+                f"Response: {response}. Defaulting to {fallback_lev}x (Emergency: {resp.status_code >= 500})"
             )
-            return 1.0
+            return fallback_lev
             
         except Exception as e:
-            logger.error(f"[BROKER] Leverage detection failed for {symbol}: {e}. Defaulting to 1.0x")
-            return 1.0
+            logger.error(f"[BROKER] Leverage detection failed for {symbol}: {e}. Emergency defaulting to 5.0x")
+            return 5.0
 
     async def get_all_positions(self) -> List[Dict]:
         """Get all open positions (Cache first)."""
