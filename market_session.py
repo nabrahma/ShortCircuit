@@ -138,22 +138,19 @@ class MarketSession:
             f"🌄 **EARLY MARKET WARMUP**\n\n"
             f"⏰ Current: `{now.strftime('%H:%M:%S')}`\n"
             f"⏳ Trading Starts: `09:30` ({wait_mins:.0f} mins)\n\n"
-            f"**Status:** Monitor Mode Only.\n"
-            f"Collecting candle data..."
+            f"**Status:** Initializing infra (DB, WS, Cache).\n"
+            f"Bot will be live for /auto on shortly."
         )
         self._notify(msg)
         set_trading_enabled(False) # Ensure disabled
         
-        logger.info(f"🚫 EARLY MARKET: Warmup. Trading Disabled. Waiting {wait_seconds}s...")
-        # Optional: We could run a loop here to 'warm up' scanner without trading,
-        # but for simplicity/reliability, we'll sleep or use main loop with disabled flag.
-        # PRD suggests sleep.
-        await asyncio.sleep(wait_seconds)
-        
-        # Transition
-        self.session_state = 'MID_MARKET'
-        set_trading_enabled(True)
-        self._notify("🟢 **TRADING ENABLED**\n\nWarmup Complete. Good Luck!")
+        # Phase 89: Don't sleep! Return immediately so main.py can run heavy init
+        # (DB, Broker, WS subscribe, REST seed, cache warmup) during 9:15-9:30.
+        # Trading stays disabled. _handle_transition() will flip TRADING_ENABLED=True
+        # when should_trade_now() detects MID_MARKET at 9:30.
+        logger.info(
+            f"🔧 EARLY MARKET: Trading disabled. Using {wait_mins:.0f}min window for heavy init."
+        )
 
     def handle_mid_market(self):
         now = datetime.now(IST)

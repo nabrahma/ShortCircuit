@@ -408,9 +408,14 @@ async def _trading_loop(shutdown_event: asyncio.Event, ctx: RuntimeContext):
                 continue
 
             if not config.TRADING_ENABLED:
-                logger.info("[TRADING] Trading disabled; waiting.")
-                await asyncio.sleep(30)
+                # Phase 89: Log once, not every 30s during warmup
+                if not getattr(ctx, '_trading_disabled_logged', False):
+                    logger.info("[TRADING] Trading disabled (warmup); waiting for 09:30 transition.")
+                    ctx._trading_disabled_logged = True
+                await asyncio.sleep(5)  # Check every 5s so we catch 9:30 transition fast
                 continue
+            else:
+                ctx._trading_disabled_logged = False  # Reset for future pauses
 
             start_ts = time.monotonic()
             logger.info("[SCAN] Scanning market...")
