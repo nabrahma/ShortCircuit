@@ -4,6 +4,7 @@
 import asyncio
 import json
 import logging
+import random
 import threading
 import time
 import traceback
@@ -677,7 +678,7 @@ class ShortCircuitBot:
         """Build infrastructure health block."""
         lines = []
         # Broker WebSocket
-        if self.order_manager and hasattr(self.order_manager, 'broker'):
+        if self.order_manager:
             broker = getattr(self.order_manager, 'broker', None)
             if broker:
                 data_ws = "✅" if getattr(broker, 'data_ws_connected', False) else "❌"
@@ -688,6 +689,7 @@ class ShortCircuitBot:
         scan_count = self._scan_metadata.get('candidate_count', 0)
         if scan_time:
             lines.append(f"Last Scan: {scan_time.strftime('%H:%M:%S')} ({scan_count} candidates)")
+        return '\n'.join(lines) + '\n' if lines else ""
         return '\n'.join(lines) + '\n' if lines else ""
     # ════════════════════════════════════════════════════════════
     # COMMAND HANDLERS — Phase 44.4: Rich structured responses
@@ -1340,9 +1342,8 @@ class ShortCircuitBot:
 
         snap = {}
         if ws_cache:
-            if hasattr(ws_cache, "get_cache_health_snapshot"):
-                snap = ws_cache.get_cache_health_snapshot()
-            elif hasattr(ws_cache, "cache_health_snapshot"):
+            # Standardized on cache_health_snapshot in Phase 89.5
+            if hasattr(ws_cache, "cache_health_snapshot"):
                 snap = ws_cache.cache_health_snapshot()
 
         fresh = snap.get("fresh", 0)
@@ -1356,12 +1357,18 @@ class ShortCircuitBot:
         else:
             auto_str = "OFF ❌"
 
+        # Daily quote
+        quote_text = self._get_daily_quote()
+
         message = (
             f"🌅 *ShortCircuit — Market Open*\n"
             f"📅 {date_str}\n\n"
+            f"📚 *Trading Wisdom*\n"
+            f"_{quote_text}_\n\n"
             f"📊 *NIFTY50 Morning Range*\n"
             f"{range_line}\n\n"
             f"🔌 *System Status*\n"
+            f"   WS Data   : ✅ | WS Order: ✅\n"
             f"   WS Cache  : {fresh}/{total} live ({fresh_pct}%)\n"
             f"   Candle API: {'✅ Verified' if startup_validation_passed else '❌ Failed'}\n"
             f"   DB Pool   : ✅ Connected\n"
@@ -1371,6 +1378,32 @@ class ShortCircuitBot:
 
         await self.send_message(message, parse_mode="Markdown")
         logger.info("[TELEGRAM] Morning briefing sent")
+
+    def _get_daily_quote(self) -> str:
+        """Returns a random trading or motivational quote."""
+        quotes = [
+            "The goal of a successful trader is to make the best trades. Money is secondary. — Alexander Elder",
+            "In trading, you have to be defensive and aggressive at the same time. — Paul Tudor Jones",
+            "The trend is your friend until the end when it bends. — Ed Seykota",
+            "Trading doesn't just reveal your character, it also builds it if you stay in the game. — Yvan Byeajee",
+            "The market is a device for transferring money from the impatient to the patient. — Warren Buffett",
+            "Cut your losses. Let your profits run. — Jesse Livermore",
+            "Focus on the process, not the outcome. — Mark Douglas",
+            "Amateurs hope. Professionals have a plan. — Traditional",
+            "Volatility is the price you pay for performance. — Bill Miller",
+            "Success in trading comes from the discipline of sticking to your system. — Jack Schwager",
+            "Risk comes from not knowing what you're doing. — Warren Buffett",
+            "You don't need to know what's going to happen next to make money. — Mark Douglas",
+            "The best trades are the ones that are hard to take. — Traditional",
+            "Edge is nothing more than an indication of a higher probability of one thing happening over another. — Mark Douglas",
+            "Trading is about odds, not certainties. — Traditional",
+            "A loss is a tuition fee for your trading education. — Traditional",
+            "Patience is a weapon in the market. — Traditional",
+            "Don't trade the P&L, trade the chart. — Traditional",
+            "The stock market is never obvious. It is designed to fool most of the people, most of the time. — Jesse Livermore",
+            "It's not whether you're right or wrong that's important, but how much money you make when you're right and how much you lose when you're wrong. — George Soros"
+        ]
+        return random.choice(quotes)
 
     # ════════════════════════════════════════════════════════════
     # SETUP

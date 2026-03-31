@@ -301,6 +301,8 @@ class FyersBrokerInterface:
         
         # WebSocket state
         self.ws_connected = False
+        self.data_ws_connected = False
+        self.order_ws_connected = False
         self.ws_reconnecting = False
         
         # Phase 82: Local Candle Engine
@@ -508,6 +510,7 @@ class FyersBrokerInterface:
         """Called by Fyers SDK when Data WebSocket opens."""
         logger.info("✅ Data WebSocket connected")
         self.ws_connected = True
+        self.data_ws_connected = True
 
         # Subscribe to all watched symbols immediately on connect
         if self.subscribed_symbols:
@@ -519,6 +522,7 @@ class FyersBrokerInterface:
     def _on_order_ws_connect(self):
         """Called by Fyers SDK when Order WebSocket opens."""
         logger.info("✅ Order WebSocket connected")
+        self.order_ws_connected = True
         # Subscribe to all order/position events
         if self.order_ws:
             self.order_ws.subscribe(data_type="OnOrders,OnTrades,OnPositions,OnGeneral")
@@ -527,9 +531,11 @@ class FyersBrokerInterface:
     def _on_data_ws_close(self, message):
         logger.warning(f"Data WebSocket closed: {message}")
         self.ws_connected = False
+        self.data_ws_connected = False
 
     def _on_order_ws_close(self, message):
         logger.warning(f"Order WebSocket closed: {message}")
+        self.order_ws_connected = False
 
     def _on_data_ws_error(self, message):
         logger.error(f"Data WebSocket error: {message}")
@@ -1366,9 +1372,6 @@ class FyersBrokerInterface:
                             )
                         except Exception:
                             pass
-
-            except Exception as e:
-                logger.error(f"[WS Cache] Health monitor error: {e}")
 
             except Exception as e:
                 logger.error(f"[WS Cache] Health monitor error: {e}")
