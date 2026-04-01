@@ -29,6 +29,7 @@ class CapitalManager:
     def __init__(self, leverage: float = 5.0):
         self.leverage = leverage
         self._real_margin: float = 0.0        # always from Fyers, never hardcoded
+        self._initial_margin: float = 0.0     # starting ledger for the day (Dynamic Target base)
         self._last_sync: Optional[datetime] = None
         self._position_active: bool = False
         self._active_symbol: Optional[str] = None
@@ -55,6 +56,10 @@ class CapitalManager:
     def active_symbol(self) -> Optional[str]:
         return self._active_symbol
 
+    @property
+    def initial_margin(self) -> float:
+        return self._initial_margin
+
     # ─────────────────────────────────────────────────────────────────────────
     # Fyers Sync
     # ─────────────────────────────────────────────────────────────────────────
@@ -77,6 +82,11 @@ class CapitalManager:
                 margin = self._parse_fyers_funds(funds)
                 self._real_margin = margin
                 self._last_sync = datetime.now(UTC)
+
+                # Capture morning ledger for dynamic goals (5% target)
+                if self._initial_margin == 0.0:
+                    self._initial_margin = margin
+                    logger.info(f"🎯 [INITIAL CAPITAL] Captured morning balance: ₹{self._initial_margin:.2f}")
 
                 logger.info(
                     f"💰 CAPITAL SYNC | real_margin=₹{self._real_margin:.2f} | "

@@ -352,6 +352,7 @@ class FyersBrokerInterface:
         # Phase 79: Leverage cache (symbol -> leverage_float)
         self._leverage_cache: dict[str, float] = {}
         self._leverage_cache_lock = threading.Lock()
+        self._low_leverage_blacklist: set[str] = set() # Phase 89.7: Session-long block
         self._ws_subscribed_symbols_set: set[str] = set()
 
         # PRD-007: Cache reliability state machine
@@ -1609,6 +1610,10 @@ class FyersBrokerInterface:
         if not symbol:
             return 1.0
 
+        # Check Blacklist (Phase 89.7)
+        if symbol in self._low_leverage_blacklist:
+            return 1.0
+
         # Check Cache
         with self._leverage_cache_lock:
             if symbol in self._leverage_cache:
@@ -1651,13 +1656,12 @@ class FyersBrokerInterface:
                     return leverage
             
             # Diagnostic Logging for empty/failed responses
-            fallback_lev = 5.0 if resp.status_code >= 500 else 1.0
-            
+            # Phase 89.7: "Execution-First" strategy. Assume 5x if Fyers fails so we don't miss trades.
             logger.warning(
-                f"[BROKER] Could not detect leverage for {symbol}. "
-                f"Status: {resp.status_code} | "
-                f"Response: {response}. Defaulting to {fallback_lev}x (Emergency: {resp.status_code >= 500})"
+                f"[BROKER] API Error detecting leverage for {symbol} (Status: {resp.status_code}). "
+                f"Assuming 5.0x to avoid missing trade entry."
             )
+            return 5.0
             return fallback_lev
             
         except Exception as e:

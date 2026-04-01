@@ -384,15 +384,6 @@ class TradeManager:
                         except Exception as e:
                             logger.warning(f"SL Attempt {attempt} Exception: {e}")
 
-                    # FINAL CHECK — SL failed
-                    if not sl_placed:
-                        logger.critical(f"[STOP] ALL 3 SL ATTEMPTS FAILED for {symbol}. Triggering EMERGENCY EXIT.")
-                        self.emergency_exit(symbol, qty)
-                        return {
-                            "status": "ERROR",
-                            "msg": f"[FAIL] SL Failed (x3). Emergency Exit Triggered for {symbol}."
-                        }
-
                     return {
                         "status": "EXECUTED",
                         "order_id": entry_order_id,
@@ -400,7 +391,7 @@ class TradeManager:
                         "ltp": ltp,
                         "sl": sl,
                         "symbol": symbol,
-                        "msg": f"[EXEC] Auto-Shorted {symbol} @ ~{ltp} with SL Order"
+                        "msg": f"[EXEC] Shorted {symbol} @ ~{ltp}. SL @ {sl_trigger}"
                     }
 
                 else:
@@ -609,9 +600,27 @@ class TradeManager:
             logger.warning(f"[SCALPER] No pending SL order found for {symbol}")
             return {"status": "NOT_FOUND"}
 
+    # ==================================================================
+    # PHASE 89.9: ZERO-GHOST ORDER SAFETY
+    # ==================================================================
+
+    def cleanup_active_orders(self, symbol: str):
+        """
+        Cancels all pending orders for a symbol. 
+        Called after TP/SL hit or manual exit.
+        """
+        logger.info(f"🧹 [SAFETY] Cleaning up orphaned orders for {symbol}")
+        try:
+            orders = self.fyers.orderbook()
+            if "orderBook" not in orders:
+                return
+            
+            for order in orders["orderBook"]:
+                if order["symbol"] == symbol and order["status"] in [6]: # 6=Pending
+                    logger.warning(f"❌ [SAFETY] Cancelling orphaned order: {order['id']} ({order['type']})")
+                    self.fyers.cancel_order(data={"id": order["id"]})
         except Exception as e:
-            logger.error(f"[SCALPER] SL update exception: {e}")
-            return {"status": "FAILED", "error": str(e)}
+            logger.error(f"❌ [SAFETY] Order cleanup failed for {symbol}: {e}")
 
     def close_all_positions(self):
         """

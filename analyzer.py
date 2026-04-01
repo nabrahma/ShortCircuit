@@ -137,6 +137,25 @@ class FyersAnalyzer:
         signal_meta = {}
 
         # ── G1+G2: Data Fetching & Enrichment (Phase 65 Order) ───────
+        # Phase 89.6 Override: Leverage check moved from Scanner to Analyzer for speed
+        if self.broker:
+            leverage = self.broker.get_symbol_leverage_sync(symbol, ltp)
+            if leverage < getattr(config, 'MIN_LEVERAGE', 5.0):
+                gr.g2_pass = False
+                gr.g2_value = leverage
+                gr.verdict = "REJECTED"
+                gr.first_fail_gate = "G2_LEVERAGE"
+                gr.rejection_reason = f"Low Leverage: {leverage}x (Min: {getattr(config, 'MIN_LEVERAGE', 5.0)}x)"
+                logger.warning(f"SKIP {symbol} — {gr.rejection_reason}")
+                
+                # Phase 89.7: Session-long block ONLY if leverage is confirmed (not an error)
+                if leverage > 0.0 and hasattr(self.broker, '_low_leverage_blacklist'):
+                    self.broker._low_leverage_blacklist.add(symbol)
+                    logger.info(f"🚫 [BLACKLIST] {symbol} (Permanent for session)")
+                    
+                grl.record(gr)
+                return None
+
         if pre_fetched_df is not None:
              df = pre_fetched_df
              df = df.copy()
@@ -369,7 +388,9 @@ class FyersAnalyzer:
 
         # ── G8: Signal Manager gate ───────────────────────────────
         sm = self.signal_manager
-        can_signal, sm_reason = sm.can_signal(symbol) if hasattr(sm, 'can_signal') else (True, "")
+        confidence = signal_meta.get('confidence', '')
+        can_signal, sm_reason = sm.can_signal(symbol, confidence=confidence) if hasattr(sm, 'can_signal') else (True, "")
+
         gr.g8_pass = can_signal
         gr.g8_value = None
         get_dashboard_bridge().broadcast("GATE_UPDATE", {"gate": "G8", "status": "PASS" if can_signal else "FAIL"})

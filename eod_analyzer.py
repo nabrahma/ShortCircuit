@@ -54,7 +54,7 @@ class EODAnalyzer:
         stats = self.calculate_performance(trades)
         
         # 2. Phase 73: Ghost Signal Auditing (labeling missed opportunities)
-        ghost_stats = {"processed": 0, "wins": 0, "losses": 0}
+        ghost_stats = {"processed": 0, "wins": 0, "losses": 0, "tp_hits": 0, "eod_wins": 0}
         try:
             # Force target_date passed to audit
             ghost_stats = await self.audit_missed_signals(target_date)
@@ -85,7 +85,7 @@ class EODAnalyzer:
             return {"processed": 0, "wins": 0, "losses": 0}
 
         logger.info(f"Auditing {len(unlabeled)} missed signals for {target_date}...")
-        results = {"processed": 0, "wins": 0, "losses": 0}
+        results = {"processed": 0, "wins": 0, "losses": 0, "tp_hits": 0, "eod_wins": 0}
 
         for obs in unlabeled:
             symbol = obs.get("symbol")
@@ -137,12 +137,17 @@ class EODAnalyzer:
                         exit_price=outcome_data["exit_price"],
                         max_favorable=outcome_data["max_favorable"],
                         max_adverse=outcome_data["max_adverse"],
-                        pnl_pct=outcome_data["pnl_pct"],
                         hold_time_mins=outcome_data["hold_time_mins"]
                     )
                     results["processed"] += 1
-                    if outcome_data["outcome"] == "WIN": results["wins"] += 1
-                    elif outcome_data["outcome"] == "LOSS": results["losses"] += 1
+                    if outcome_data["outcome"] == "WIN":
+                        results["wins"] += 1
+                        if outcome_data.get("exit_reason") == "TP_HIT":
+                            results["tp_hits"] += 1
+                        elif outcome_data.get("exit_reason") == "EOD_SQUAREOFF":
+                            results["eod_wins"] += 1
+                    elif outcome_data["outcome"] == "LOSS":
+                        results["losses"] += 1
 
             except Exception as e:
                 logger.warning(f"Failed to audit {symbol}: {e}")
@@ -224,6 +229,7 @@ class EODAnalyzer:
         pnl_pct = ((entry_price - exit_price) / entry_price) * 100
         
         return {
+            "exit_reason": exit_reason,
             "outcome": outcome,
             "exit_price": exit_price,
             "max_favorable": max_favorable,
@@ -385,8 +391,10 @@ class EODAnalyzer:
             lines.extend([
                 "## 👻 Ghost Signal Audit (Missed Trades)",
                 f"- **Processed**: {ghost_stats['processed']}",
+                f"- **Real TP Hits (1.0x ATR)**: {ghost_stats.get('tp_hits', 0)} 🎯",
+                f"- **EOD Profit Closures**: {ghost_stats.get('eod_wins', 0)} ⏰",
+                f"- **Losses**: {ghost_stats['losses']}",
                 f"- **Win Rate**: {round(ghost_stats['wins'] / ghost_stats['processed'] * 100, 1) if ghost_stats['processed'] else 0}%",
-                f"- Outcome: {ghost_stats['wins']}W / {ghost_stats['losses']}L",
                 "> These signals were validated by the bot but not traded (risk/cooldown/skip).",
                 "",
             ])

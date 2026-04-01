@@ -575,17 +575,28 @@ class ReconciliationEngine:
                     self.order_manager.hard_stops.pop(sym, None)
                     self.order_manager.exit_in_progress.pop(sym, None)
 
+            # Step 1.5: Phase 89.9 Cleanup orphaned orders for this symbol
+            if hasattr(self.order_manager, 'trade_manager'):
+                 self.order_manager.trade_manager.cleanup_active_orders(sym)
+            elif hasattr(self, 'trade_manager'):
+                 self.trade_manager.cleanup_active_orders(sym)
+
             # Step 2: Release capital slot if still occupied.
             # BUG FIX: Do NOT check active_symbol == sym.
             # This is a single-position bot — any phantom means slot should be free.
+            # Step 2: Release capital slot if still occupied.
+            # Phase 89.8: Aggressive Force-Clear to ensure no trade is missed after manual exit.
             if self.capital and not self.capital.is_slot_free:
                 try:
+                    logger.critical(f"🚨 [RECOVERY] Force-clearing slot for manually closed position: {sym}")
                     await self.capital.release_slot(broker=self.broker)
-                    # Trigger immediate sync to refresh balance/buying power after manual close
                     await self.capital.sync(self.broker)
-                    logger.info(f"[GHOST] Capital slot force-released and synced for phantom {sym}")
+                    logger.info(f"✅ [RECOVERY] Slot successfully released and capital synced.")
                 except Exception as e:
-                    logger.error(f"[GHOST] Capital force-release/sync failed for {sym}: {e}")
+                    logger.error(f"❌ [RECOVERY] Critical failure clearing slot for {sym}: {e}")
+                    # Emergency direct reset as final fallback
+                    self.capital.is_slot_free = True
+                    self.capital.active_symbol = None
 
             # Step 3: CRITICAL — mark DB dirty so next cycle re-fetches fresh positions.
             # Without this, _get_db_positions_cached() keeps returning stale cache

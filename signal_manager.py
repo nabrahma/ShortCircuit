@@ -30,6 +30,7 @@ class SignalManager:
         self.daily_pnl = 0.0
         self.max_session_loss = getattr(config, 'MAX_SESSION_LOSS_INR', 500.0)
         self.is_paused = False
+        self.daily_target_inr: float = 0.0  # Dynamic target calculated at startup
         
         # Stats
         self.stats = defaultdict(int)
@@ -49,21 +50,24 @@ class SignalManager:
             self.current_date = today
             self.stats = defaultdict(int)
     
-    def can_signal(self, symbol, is_execution=False):
+    def can_signal(self, symbol, is_execution=False, confidence: str = ""):
         """
         Check if we can send a signal for this symbol.
-        
+
         Args:
-            symbol: The stock symbol (e.g., "NSE:HINDCOPPER-EQ")
+            symbol:       The stock symbol (e.g., "NSE:HINDCOPPER-EQ")
             is_execution: If True, skips discovery-level cooldown check (Phase 73 Fix)
-            
+            confidence:   Signal confidence tier from G5 ('MEDIUM','HIGH','EXTREME','MAX_CONVICTION').
+                          Used for the Daily Target gate — after 5% target is hit only
+                          EXTREME or MAX_CONVICTION signals are allowed.
+
         Returns:
             tuple: (allowed, reason)
         """
         with self._lock:
             self._reset_if_new_day()
             now = datetime.now()
-            
+
             # Check 0: Execution failure cooldown (Hard block on broker errors)
             cd = self._exec_cooldowns.get(symbol)
             if cd:
@@ -74,13 +78,12 @@ class SignalManager:
                     return False, f"Exec cooldown: {symbol} blocked {remaining}s ({cd['reason']})"
                 else:
                     del self._exec_cooldowns[symbol]  # expired
-            
 
             # Check 2: Paused due to max session loss
             if self.is_paused:
                 self.stats['blocked_paused'] += 1
                 return False, f"Trading paused: Max session loss reached (₹{self.daily_pnl:.2f})"
-            
+
             # Check 3: Per-symbol cooldown (Discovery only)
             if not is_execution and symbol in self.last_signal_time:
                 unlock_at = self.last_signal_time[symbol]
@@ -88,7 +91,33 @@ class SignalManager:
                     remaining = (unlock_at - now).total_seconds() / 60
                     self.stats['blocked_cooldown'] += 1
                     return False, f"Cooldown: {symbol} blocked for {remaining:.1f}m"
+
+            # ── Daily Target Gate ─────────────────────────────────────────────
+            # Once daily profit ≥ target, only EXTREME / MAX_CONVICTION allowed.
+            # Favor dynamic_target_inr if config is set to -1.
             
+            daily_target = getattr(config, 'DAILY_TARGET_INR', 0)
+            if daily_target == -1:
+                daily_target = self.daily_target_inr
+            
+            if daily_target > 0 and self.daily_pnl >= daily_target:
+                HIGH_CONVICTION = ('EXTREME', 'MAX_CONVICTION')
+                if confidence not in HIGH_CONVICTION:
+                    self.stats['blocked_daily_target'] = self.stats.get('blocked_daily_target', 0) + 1
+                    logger.info(
+                        f"🎯 [DAILY TARGET] {symbol} skipped — target ₹{daily_target:.0f} hit "
+                        f"(PnL=₹{self.daily_pnl:.2f}). Confidence '{confidence}' not EXTREME+."
+                    )
+                    return False, (
+                        f"Daily target ₹{daily_target:.0f} hit — only EXTREME/MAX_CONVICTION allowed "
+                        f"(got: {confidence or 'UNKNOWN'})"
+                    )
+                else:
+                    logger.info(
+                        f"⭐ [DAILY TARGET] {symbol} ALLOWED post-target "
+                        f"— confidence={confidence} qualifies."
+                    )
+
             return True, "OK"
     
     def record_signal(self, symbol, entry_price, stop_loss, pattern):

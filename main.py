@@ -197,16 +197,6 @@ async def _initialize_runtime() -> RuntimeContext:
     db_manager = DatabaseManager()
     await db_manager.initialize()
 
-    # PRD-008: Enable periodic gate result flush — set DSN once after DB pool is ready
-    from gate_result_logger import get_gate_result_logger
-    from database import DB_CONFIG as _db_cfg
-    import os as _os
-    _db_dsn = (
-        f"postgresql://{_os.getenv('DB_USER', _db_cfg['user'])}"
-        f":{_os.getenv('DB_PASS', _os.getenv('DB_PASSWORD', _db_cfg['password']))}"
-        f"@{_os.getenv('DB_HOST', _db_cfg['host'])}"
-        f":{_db_cfg['port']}/{_db_cfg['database']}"
-    )
     get_gate_result_logger().set_dsn(_db_dsn)
 
     broker = FyersBrokerInterface(
@@ -219,9 +209,22 @@ async def _initialize_runtime() -> RuntimeContext:
     # PRD-3: Wire Telegram bot to broker for WS cache alerts
     broker.set_telegram(bot)
 
+    # ── Phase 89.9: Dynamic 5% Target Initialization ──────────────────
+    # Perform initial sync to capture morning ledger balance
+    await capital_manager.sync(broker)
+    
     analyzer = FyersAnalyzer(fyers_client, broker=broker, morning_high=mh, morning_low=ml)
+    
+    # Calculate 5% mission target automatically
+    if getattr(config, 'DAILY_TARGET_INR', 0) == -1:
+        initial_bal = capital_manager.initial_margin
+        target_inr = initial_bal * 0.05
+        analyzer.signal_manager.daily_target_inr = target_inr
+        logger.info(f"🎯 [DYNAMIC TARGET] Morning Ledger: ₹{initial_bal:.2f} | 5% Goal: ₹{target_inr:.2f}")
+    
     bot.signal_manager = analyzer.signal_manager
     bot.market_session = market_session
+
 
     # ── PRD-007: Phase 44.7 + Startup Gate ───────────────────────────
     # 1. Create scanner with broker reference
@@ -437,25 +440,28 @@ async def _trading_loop(shutdown_event: asyncio.Event, ctx: RuntimeContext):
                 "status": "SCANNING"
             })
 
-            for cand in candidates or []:
-                if shutdown_event.is_set():
-                    return
-
-                symbol = cand["symbol"]
+            # Phase 89.6: Parallelized Analysis
+            async def run_analysis(cand):
                 signal = await asyncio.to_thread(
                     ctx.analyzer.check_setup,
-                    symbol,
+                    cand["symbol"],
                     cand["ltp"],
                     cand.get("oi", 0),
                     cand.get("history_df"),
-                    cand.get("history_df_15m"), # Phase 51: Pass pre-fetched 15m
+                    cand.get("history_df_15m"),
                     _scan_id,
                     _data_tier,
                 )
-                if not signal:
-                    continue
+                return signal
 
-                if signal.get("cooldown_blocked"):
+            analysis_tasks = [run_analysis(cand) for cand in (candidates or [])]
+            analysis_results = await asyncio.gather(*analysis_tasks) if analysis_tasks else []
+
+            for signal in (res for res in analysis_results if res):
+                if shutdown_event.is_set():
+                    return
+                symbol = signal["symbol"]
+                if signal.get("cooldown_blocked"): # Added back
                     try:
                         unlock_at = (
                             ctx.analyzer.signal_manager.last_signal_time[symbol]

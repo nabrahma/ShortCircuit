@@ -704,6 +704,12 @@ class FocusEngine:
             'qty':             actual_qty,
             'remaining_qty':   actual_qty,
             'start_time':      time.time(),
+            
+            # Phase 89.9: Precalculated True Breakeven (3.5% profit @ 5x)
+            # Trigger = 0.7% drop for Short. New SL = 0.25% drop for Short (covers fees).
+            'be_trigger':      entry_price * 0.993,
+            'be_sl':           entry_price * 0.9975,
+            'be_activated':    False
         }
         
         self.is_running = True
@@ -784,9 +790,31 @@ class FocusEngine:
                         ltp = qt.get('lp')
                     
                     self.active_trade['last_price'] = ltp
+                    t = self.active_trade
+
+                    # ── Phase 89.9: TRUE BREAKEVEN (3.5% Trigger) ──────────────
+                    if not t.get('be_activated', False) and ltp <= t['be_trigger']:
+                        new_sl = t['be_sl']
+                        old_sl = t['sl']
+                        t['sl'] = new_sl
+                        t['be_activated'] = True
+                        
+                        logger.info(f"🛡️ [PROTECTION] {symbol} up 3.5% (leveraged)! SL → ₹{new_sl:.2f} (Fee-Protected BE)")
+                        
+                        if self.telegram_bot and self._event_loop:
+                            msg = (
+                                f"🛡️ **Fee-Protected BE Activated**\n"
+                                f"Symbol: `{symbol}`\n"
+                                f"Target: +3.5% hit (0.7% move)\n"
+                                f"New SL: ₹{new_sl:.2f} (+0.25% profit zone)\n"
+                                f"_Your fees are now covered._"
+                            )
+                            asyncio.run_coroutine_threadsafe(
+                                self.telegram_bot.send_alert(msg),
+                                self._event_loop
+                            )
                     
                     # ── PHASE 78: SINGLE TP ENGINE ────────────────────────────
-                    t = self.active_trade
                     if ltp <= t['tp']:
                         logger.info(f"🎯 [TP] {symbol} hit ₹{t['tp']:.2f} — closing 100% ({t['remaining_qty']} shares)")
                         if self.order_manager and self._event_loop:
@@ -815,8 +843,8 @@ class FocusEngine:
                     # Or just rely on Hard SL (monitored by order_manager)
                     
                     
-                # Increase frequency for faster TP execution
-                time.sleep(0.5)
+                # Phase 89.9: High-frequency heartbeat for 200ms latency execution
+                time.sleep(0.2)
                 
             except Exception as e:
                 logger.error(f"Focus Loop Error: {e}")

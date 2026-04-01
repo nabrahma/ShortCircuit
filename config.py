@@ -24,7 +24,10 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 # Session Safety
 AUTO_MODE = False          # NEVER change this to True. Enable via Telegram /auto only.
 AUTO_MODE_DEFAULT = False 
-MAX_SESSION_LOSS_INR = 500 # Max cumulative intra-day loss before bot halts (Phase 69)
+MAX_SESSION_LOSS_INR = 500  # Max cumulative intra-day loss before bot halts (Phase 69)
+DAILY_TARGET_INR = -1       # Set to -1 for Dynamic 5% Mode (Automatic calculation)
+                            # Or set a fixed amount like ₹75 to override.
+                            # When hit: only EXTREME or MAX_CONVICTION signals allowed.
 INTRADAY_LEVERAGE = 5.0    # Fixed 5× leverage (NSE standard requirement)
 MIN_LEVERAGE = 3.0         # Minimum leverage allowed for a stock to pass the scanner
 CAPITAL_PER_TRADE = 9000   # OFFLINE FALLBACK ONLY (Buying power for 1800 margin)

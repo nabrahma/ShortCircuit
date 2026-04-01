@@ -64,32 +64,6 @@ class ShortCircuitBot:
         self.chat_id = str(config_settings.get('TELEGRAM_CHAT_ID'))
         self.app: Optional[Application] = None
         self._ready_event = threading.Event()
-        # ── Dashboard State ───────────────────────────────────
-        self._dashboard_message_id: Optional[int] = None
-        self._active_signal_message_id: Optional[int] = None
-        self._dashboard_task: Optional[asyncio.Task] = None
-        # ── Scanning State ────────────────────────────────────
-        self._scanning_paused: bool = False
-        # ── Pending Signals (for Manual Gate) ────────────────
-        self._pending_signals = {}
-        self._editable_signal_flow_override: Optional[bool] = None
-        self._signal_msg_index: Dict[str, SignalMsgState] = {}
-        # threading.Lock used across sync and async contexts. Event loop thread may block
-        # for microseconds on lock contention. Acceptable at current signal frequency (<5/day).
-        # Replace with asyncio.Lock + sync-bridge if frequency increases.
-        self._signal_msg_index_lock = threading.Lock()
-        self._cleanup_task: Optional[asyncio.Task] = None
-        # ── Phase 44.4: External References (set after init) ──
-        self.signal_manager = None    # Injected from main.py
-        self.market_session = None    # Injected from main.py
-        self._scan_metadata = {       # Updated by main loop
-            'last_scan_time': None,
-            'candidate_count': 0,
-        }
-        # ── Session tracking ──────────────────────────────────
-        self._session_trades = []     # Closed trades this session
-        self._win_streak = 0
-        self._loss_streak = 0
         self._shutdown_event: Optional[asyncio.Event] = None
         self._alert_queue = asyncio.Queue()
         self._throttler_task: Optional[asyncio.Task] = None
@@ -126,7 +100,7 @@ class ShortCircuitBot:
     async def edit_message(self, message_id: int, text: str,
                            parse_mode='HTML',
                            reply_markup=None) -> bool:
-        """Edit existing message (used for live dashboard updates)."""
+        """Edit existing message."""
         if not self.app: return False
         try:
             await self.app.bot.edit_message_text(
@@ -138,7 +112,6 @@ class ShortCircuitBot:
             )
             return True
         except Exception as e:
-            # Telegram throws if message hasn't changed — ignore that
             if "Message is not modified" in str(e):
                 return True
             logger.error(f"Telegram edit_message failed: {e}")
@@ -372,35 +345,11 @@ class ShortCircuitBot:
             f"Pattern:  {pattern}\n"
         )
         if self._auto_mode:
-            # Auto mode: order is already being placed
-            text += "\n✅ <i>Order being placed automatically...</i>"
-            await self.send_message(text)
+            text += "\n✅ <i>Order placed automatically.</i>"
         else:
-            # Manual mode: give user GO/SKIP/Details buttons
-            text += "\n⚠️ <i>Auto mode OFF — tap GO to execute.</i>"
-            keyboard = InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton(
-                        "✅ GO",
-                        callback_data=f"go:{signal_id}"
-                    ),
-                    InlineKeyboardButton(
-                        "❌ SKIP",
-                        callback_data=f"skip:{signal_id}"
-                    ),
-                ],
-                [
-                    InlineKeyboardButton(
-                        "📊 Details",
-                        callback_data=f"details:{signal_id}"
-                    )
-                ]
-            ])
-            msg = await self.send_message(text, reply_markup=keyboard)
-            if msg:
-                # Store signal for GO callback to reference
-                self._pending_signals[signal_id] = signal
-                self._active_signal_message_id = msg.message_id
+            text += "\n👁️ <i>Bot is in Alert-Only mode. No order placed.</i>"
+            
+        await self.send_message(text)
     async def send_order_confirmation(self, signal: dict, order_id: str):
         """
         Sent after order fills. Replaces signal alert message.
@@ -425,124 +374,11 @@ class ShortCircuitBot:
     # LIVE DASHBOARD — auto-refreshes every 2 seconds
     # ════════════════════════════════════════════════════════════
     async def start_live_dashboard(self, position: dict):
-        """
-        Start auto-refreshing live P&L dashboard for an active position.
-        """
-        # Cancel any existing dashboard
-        if self._dashboard_task:
-            self._dashboard_task.cancel()
-        # Send initial dashboard message
-        text = self._build_dashboard_text(position)
-        keyboard = self._build_dashboard_keyboard(position)
-        msg = await self.send_message(text, reply_markup=keyboard)
-        if msg:
-            self._dashboard_message_id = msg.message_id
-            # Start auto-refresh loop
-            self._dashboard_task = asyncio.create_task(
-                self._dashboard_refresh_loop(position)
-            )
-    async def _dashboard_refresh_loop(self, initial_position: dict):
-        """Edit dashboard message every 2 seconds with fresh data."""
-        symbol = initial_position.get('symbol')
-        while True:
-            try:
-                await asyncio.sleep(2)
-                # Get latest position data from focus engine (or order manager)
-                position = None
-                if self.focus_engine:
-                    position = await self.focus_engine.get_position_snapshot(symbol)
-                # If focus engine doesn't have it, maybe it closed?
-                if not position:
-                    break
-                if position.get('status') == 'CLOSED':
-                    break
-                text = self._build_dashboard_text(position)
-                keyboard = self._build_dashboard_keyboard(position)
-                if self._dashboard_message_id:
-                    await self.edit_message(
-                        self._dashboard_message_id,
-                        text,
-                        reply_markup=keyboard
-                    )
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error(f"Dashboard refresh error: {e}")
-                await asyncio.sleep(5)
-    def _build_dashboard_text(self, position: dict) -> str:
-        """Build the live dashboard message text."""
-        symbol = position.get('symbol', 'UNKNOWN')
-        side = position.get('side', 'SHORT')
-        entry = position.get('entry_price', 0)
-        qty = position.get('quantity', 0)
-        current = position.get('current_price', entry)
-        pnl = position.get('unrealised_pnl', 0)
-        sl = position.get('stop_loss', 0)
-        target = position.get('target', 0)
-        sl_state = position.get('sl_state', 'INITIAL')
-        orderflow = position.get('orderflow_bias', 'NEUTRAL')
-        # Direction arrow
-        if side == 'SHORT':
-            direction = "⬇️" if current < entry else "⬆️"
-        else:
-            direction = "⬆️" if current > entry else "⬇️"
-        # P&L formatting
-        pnl_pct = (pnl / (entry * qty)) * 100 if entry and qty else 0
-        roi_pct = pnl_pct * 5  # 5× leverage
-        pnl_str = f"+₹{pnl:.2f}" if pnl >= 0 else f"-₹{abs(pnl):.2f}"
-        pnl_pct_str = f"+{pnl_pct:.2f}%" if pnl_pct >= 0 else f"{pnl_pct:.2f}%"
-        # SL state badge
-        sl_badges = {
-            'INITIAL': '',
-            'BREAKEVEN': '(BREAKEVEN 🔒)',
-            'TRAILING': '(TRAILING 📍)',
-            'TIGHTENING': '(TIGHT 🎯)'
-        }
-        sl_badge = sl_badges.get(sl_state, '')
-        # Orderflow emoji
-        of_map = {
-            'BEARISH': '🟢 BEARISH CONFIRMED',
-            'BULLISH': '🔴 BULLISH (CAUTION)',
-            'NEUTRAL': '⚪ NEUTRAL'
-        }
-        of_str = of_map.get(orderflow, orderflow)
-        return (
-            f"⚡ <b>ACTIVE TRADE</b>\n\n"
-            f"<b>{_he(symbol)}</b> {_he(side)}\n"
-            f"Entry: ₹{entry:.2f} | Qty: {qty}\n\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"Current: ₹{current:.2f} {direction}\n"
-            f"P&L: {pnl_str} ({pnl_pct_str})\n"
-            f"ROI: {'+' if roi_pct >= 0 else ''}{roi_pct:.2f}% (5× leverage)\n\n"
-            f"Stop:   ₹{sl:.2f} {sl_badge}\n"
-            f"Target: ₹{target:.2f}\n\n"
-            f"Orderflow: {of_str}\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"<i>Updated: {datetime.now().strftime('%H:%M:%S')}</i>"
-        )
-    def _build_dashboard_keyboard(self, position: dict) -> InlineKeyboardMarkup:
-        """Build dashboard inline buttons."""
-        symbol = position.get('symbol', 'UNKNOWN')
-        order_id = position.get('order_id', '')
-        return InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton(
-                    "🔄 Refresh",
-                    callback_data=f"refresh:{symbol}"
-                ),
-                InlineKeyboardButton(
-                    "❌ Close Now",
-                    callback_data=f"close:{symbol}:{order_id}"
-                )
-            ]
-        ])
+        """Dashboard disabled in Minimalist Mode."""
+        pass
+
     async def stop_live_dashboard(self, position: dict, exit_reason: str):
-        """
-        Stop dashboard when position closes. Show final P&L.
-        Phase 44.4: Enhanced with duration, session P&L, streak.
-        """
-        if self._dashboard_task:
-            self._dashboard_task.cancel()
+        """Send final closed-trade summary."""
         symbol = position.get('symbol')
         side = position.get('side')
         entry = position.get('entry_price', 0)
@@ -553,75 +389,25 @@ class ShortCircuitBot:
         roi = pnl_pct * 5
         result_emoji = "✅" if pnl > 0 else "❌"
         pnl_str = f"+₹{pnl:.2f}" if pnl >= 0 else f"-₹{abs(pnl):.2f}"
+        
         exit_reason_map = {
             'SL_HIT': '🛑 Stop Loss Hit',
-            'TP1_HIT': '🎯 TP1 Hit (50% secured)',
-            'TP2_HIT': '🎯 TP2 Hit (75% secured)',
-            'TP3_HIT': '🏆 Full Target Hit',
+            'TP_HIT': '🏆 Target Hit',
             'MANUAL_EXIT': '👤 Manual Exit',
-            'SOFT_STOP': '🧠 Discretionary Exit (Soft Stop)',
-            'EOD_SQUAREOFF': '🕒 EOD Square-off (3:10 PM)',
+            'EOD_SQUAREOFF': '🕒 EOD Square-off',
             'EMERGENCY': '🚨 Emergency Exit'
         }
         reason_str = exit_reason_map.get(exit_reason, exit_reason)
-        # Phase 44.4: Trade duration
-        entry_time = position.get('entry_time')
-        duration_str = ""
-        if entry_time:
-            try:
-                if isinstance(entry_time, str):
-                    entry_time = datetime.strptime(entry_time, '%Y-%m-%d %H:%M:%S')
-                delta = datetime.now() - entry_time
-                minutes = int(delta.total_seconds() / 60)
-                if minutes >= 60:
-                    duration_str = f"\nDuration: {minutes // 60}h {minutes % 60}m"
-                else:
-                    duration_str = f"\nDuration: {minutes}m"
-            except Exception:
-                pass
-        # Phase 44.4: Track session trades and streaks
-        self._session_trades.append({
-            'symbol': symbol,
-            'pnl': pnl,
-            'side': side,
-            'exit_reason': exit_reason,
-            'time': datetime.now(),
-        })
-        if pnl > 0:
-            self._win_streak += 1
-            self._loss_streak = 0
-        elif pnl < 0:
-            self._loss_streak += 1
-            self._win_streak = 0
-        streak_str = ""
-        if self._win_streak >= 2:
-            streak_str = f"\n🔥 Win streak: {self._win_streak}"
-        elif self._loss_streak >= 2:
-            streak_str = f"\n❄️ Loss streak: {self._loss_streak}"
-        # Session P&L
-        session_pnl = sum(t.get('pnl', 0) for t in self._session_trades)
-        session_pnl_str = f"+₹{session_pnl:.2f}" if session_pnl >= 0 else f"-₹{abs(session_pnl):.2f}"
-        trades_count = len(self._session_trades)
+
         text = (
-            f"{result_emoji} <b>TRADE CLOSED</b>\n\n"
-            f"<b>{_he(symbol)}</b> {_he(side)}\n"
-            f"Entry:  ₹{entry:.2f}\n"
-            f"Exit:   ₹{exit_price:.2f}\n"
-            f"Qty:    {qty}{duration_str}\n\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"P&L:    {pnl_str} ({'+' if pnl_pct >= 0 else ''}{pnl_pct:.2f}%)\n"
-            f"ROI:    {'+' if roi >= 0 else ''}{roi:.2f}% (5× leverage)\n\n"
+            f"{result_emoji} <b>TRADE CLOSED: {_he(symbol)}</b>\n\n"
+            f"Entry: ₹{entry:.2f} | Exit: ₹{exit_price:.2f}\n"
+            f"P&L:   <b>{pnl_str} ({'+' if pnl_pct >= 0 else ''}{pnl_pct:.2f}%)</b>\n"
+            f"ROI:   <b>{'+' if roi >= 0 else ''}{roi:.2f}%</b> (5x)\n\n"
             f"Reason: {reason_str}\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"Session: {session_pnl_str} ({trades_count} trades){streak_str}\n"
-            f"<i>Closed at {datetime.now().strftime('%H:%M:%S')}</i>"
+            f"<i>Time: {datetime.now().strftime('%H:%M:%S')}</i>"
         )
-        # Edit final state of dashboard message
-        if self._dashboard_message_id:
-            await self.edit_message(self._dashboard_message_id, text, reply_markup=None)
-        else:
-            await self.send_message(text)
-        self._dashboard_message_id = None
+        await self.send_message(text)
     # ════════════════════════════════════════════════════════════
     # COMMAND HANDLERS
     # ════════════════════════════════════════════════════════════
@@ -844,289 +630,19 @@ class ShortCircuitBot:
             f"\n<i>As of {datetime.now().strftime('%H:%M:%S')}</i>"
         )
         await update.message.reply_text(text, parse_mode='HTML')
-    async def _cmd_positions(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """/positions — List all open positions as trade cards."""
-        if not self._is_authorized(update):
-            return
-        
-        # Check order_manager active positions
-        positions = {}
-        if self.order_manager and hasattr(self.order_manager, 'active_positions'):
-            positions = self.order_manager.active_positions
-            
-        if not positions:
-            # Show last closed trade if available
-            last_trade = ""
-            if self._session_trades:
-                lt = self._session_trades[-1]
-                pnl = lt.get('pnl', 0)
-                pnl_str = f"+₹{pnl:.2f}" if pnl >= 0 else f"-₹{abs(pnl):.2f}"
-                last_trade = f"\nLast trade: {lt.get('symbol', '?')} {pnl_str}"
-            
-            await update.message.reply_text(
-                f"📭 <b>No active positions.</b>{last_trade}",
-                parse_mode='HTML'
-            )
-            return
-
-        for sym, pos in positions.items():
-            text = self._build_dashboard_text(pos)
-            keyboard = self._build_dashboard_keyboard(pos)
-            await update.message.reply_text(text, parse_mode='HTML', reply_markup=keyboard)
-    async def _cmd_pnl(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """/pnl — Today's P&L breakdown (Live Sync)."""
-        if not self._is_authorized(update):
-            return
-
-        trades = []
-        if self.order_manager:
-            try:
-                get_trades = getattr(self.order_manager, 'get_today_trades', None)
-                if get_trades is None:
-                    await update.message.reply_text("❌ PnL unavailable.")
-                    return
-                trades = await get_trades()
-            except Exception as e:
-                await update.message.reply_text(f"❌ Error fetching trades: {e}")
-                return
-
-        # Signal stats
-        signals_fired = 0
-        signals_rejected = 0
-        if self.signal_manager:
-            st = self.signal_manager.get_status()
-            signals_fired = st.get('signals_sent', 0)
-            stats = st.get('stats', {})
-            signals_rejected = stats.get('blocked_daily_limit', 0) + stats.get('blocked_cooldown', 0) + stats.get('blocked_paused', 0)
-
-        if not trades:
-            await update.message.reply_text(
-                f"📭 <b>No trades today.</b>\n\n"
-                f"Signals fired:    {signals_fired}\n"
-                f"Signals rejected: {signals_rejected}\n"
-                f"\n<i>As of {datetime.now().strftime('%H:%M:%S')}</i>",
-                parse_mode='HTML'
-            )
-            return
-
-        closed_trades = [t for t in trades if t.get('qty', 0) == 0]
-        total_pnl = sum(t.get('realised_pnl', 0) for t in trades)
-        unrealised = sum(t.get('unrealised_pnl', 0) for t in trades)
-        wins = [t for t in closed_trades if t.get('realised_pnl', 0) > 0]
-        losses = [t for t in closed_trades if t.get('realised_pnl', 0) < 0]
-
-        total_str = f"+₹{total_pnl:.2f}" if total_pnl >= 0 else f"-₹{abs(total_pnl):.2f}"
-        unr_str = f"+₹{unrealised:.2f}" if unrealised >= 0 else f"-₹{abs(unrealised):.2f}"
-        win_rate = (len(wins) / len(closed_trades) * 100) if closed_trades else 0
-
-        text = f"💰 <b>Today's P&L (Live)</b>\n\n"
-        for i, t in enumerate(trades, 1):
-            pnl = t.get('realised_pnl', 0)
-            pnl_str = f"+₹{pnl:.2f}" if pnl >= 0 else f"-₹{abs(pnl):.2f}"
-            emoji = "✅" if pnl > 0 else "❌" if pnl < 0 else "⚪"
-            cur_qty = t.get('qty', 0)
-            qty_str = f" ({cur_qty} open)" if cur_qty != 0 else ""
-            text += f"{emoji} <code>{t['symbol']:<15}</code> {pnl_str}{qty_str}\n"
-
-        text += (
-            f"\n━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"Gross Realised: <b>{total_str}</b>\n"
-            f"Unrealised:     <b>{unr_str}</b>\n"
-            f"Wins: {len(wins)} | Losses: {len(losses)} | WR: {win_rate:.0f}%\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"Signals: {signals_fired} fired, {signals_rejected} rejected\n"
-            f"\n<i>As of {datetime.now().strftime('%H:%M:%S')}</i>"
-        )
-        await update.message.reply_text(text, parse_mode='HTML')
-    async def _cmd_why(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """/why SYMBOL [HH:MM] — Diagnostic replay."""
-        if not self._is_authorized(update):
-            return
-        args = context.args
-        if not args:
-            await update.message.reply_text(
-                "Usage: `/why SYMBOL` or `/why SYMBOL HH:MM`\n"
-                "Example: `/why RELIANCE` or `/why INDOTECH 09:49`",
-                parse_mode='Markdown'
-            )
-            return
-        symbol = args[0].upper()
-        if not symbol.startswith('NSE:'):
-            symbol = f"NSE:{symbol}-EQ"
-        # Phase 44.4: Try ML parquet lookup first
-        time_filter = args[1] if len(args) > 1 else None
-        parquet_result = await self._why_from_parquet(symbol, time_filter)
-        if parquet_result:
-            await update.message.reply_text(parquet_result, parse_mode='Markdown')
-            return
-        # Fallback: live diagnostic analysis
-        await update.message.reply_text(
-            f"🔍 Analyzing {symbol}... (checking all 12 gates)",
-        )
-        try:
-            from diagnostic_analyzer import DiagnosticAnalyzer
-            fyers = None
-            if self.focus_engine and hasattr(self.focus_engine, 'fyers'):
-                fyers = self.focus_engine.fyers
-            elif self.order_manager and hasattr(self.order_manager, 'broker'):
-                fyers = getattr(self.order_manager.broker, 'rest_client', None)
-            if not fyers:
-                await update.message.reply_text("❌ Diagnostic failed: Fyers client not accessible.")
-                return
-            analyzer = DiagnosticAnalyzer(fyers)
-            import datetime as dt_module
-            now_str = dt_module.datetime.now().strftime("%H:%M")
-            if time_filter:
-                now_str = time_filter
-            result_dict = await asyncio.get_running_loop().run_in_executor(
-                None,
-                analyzer.analyze_missed_opportunity,
-                symbol,
-                now_str
-            )
-            if isinstance(result_dict, dict):
-                if 'error' in result_dict:
-                    result_msg = f"❌ {result_dict['error']}"
-                else:
-                    ts_str = result_dict['timestamp'].strftime('%H:%M') if hasattr(result_dict.get('timestamp'), 'strftime') else str(result_dict.get('timestamp'))
-                    result_msg = f"🔍 *Diagnostic: {symbol} @ {ts_str}*\n\n"
-                    if 'gates' in result_dict:
-                        for g in result_dict['gates']:
-                            icon = "✅" if g.get('status') == 'PASSED' else "❌" if g.get('status') == 'FAILED' else "⚠️"
-                            result_msg += f"{icon} {g.get('name')}: {g.get('reason', 'OK')}\n"
-                    if result_dict.get('passed_all_gates'):
-                        result_msg += "\n✅ *PASSED ALL GATES* — should have been signaled."
-                    else:
-                        fail_gate = result_dict.get('first_failure_gate')
-                        result_msg += f"\n⛔ *BLOCKED AT GATE {fail_gate}*"
-            else:
-                result_msg = str(result_dict)
-            await update.message.reply_text(result_msg, parse_mode='Markdown')
-        except TypeError as e:
-            logger.error(f"DiagnosticAnalyzer init failed: {e}")
-            await update.message.reply_text(f"❌ Diagnostic init error: {e}")
-        except Exception as e:
-            logger.error(f"Diagnostic failed: {e}")
-            await update.message.reply_text(f"❌ Diagnostic failed: {e}")
-    async def _why_from_parquet(self, symbol: str, time_filter: str = None) -> Optional[str]:
-        """
-        Phase 44.4: Look up signal observation from ML parquet logs.
-        Returns formatted gate breakdown or None if not found.
-        """
-        try:
-            import pandas as pd
-            import os
-            import glob
-            today_str = datetime.now().strftime('%Y-%m-%d')
-            parquet_dir = 'data/ml/'
-            if not os.path.exists(parquet_dir):
-                return None
-            # Find today's parquet files
-            pattern = os.path.join(parquet_dir, f"*{today_str}*")
-            files = glob.glob(pattern)
-            if not files:
-                # Try reading all recent files
-                files = glob.glob(os.path.join(parquet_dir, "*.parquet"))
-            if not files:
-                return None
-            # Load and filter
-            for f in sorted(files, reverse=True):  # Most recent first
-                try:
-                    df = pd.read_parquet(f)
-                    # Filter by symbol
-                    sym_clean = symbol.replace('NSE:', '').replace('-EQ', '')
-                    mask = df['symbol'].str.contains(sym_clean, case=False, na=False) if 'symbol' in df.columns else pd.Series([False] * len(df))
-                    matches = df[mask]
-                    if matches.empty:
-                        continue
-                    # Filter by time if provided
-                    if time_filter and 'timestamp' in matches.columns:
-                        # Find nearest to specified time
-                        target_time = datetime.strptime(f"{today_str} {time_filter}", '%Y-%m-%d %H:%M')
-                        matches['time_diff'] = abs((pd.to_datetime(matches['timestamp']) - target_time).dt.total_seconds())
-                        row = matches.loc[matches['time_diff'].idxmin()]
-                    else:
-                        # Most recent
-                        row = matches.iloc[-1]
-                    # Format output
-                    ts = row.get('timestamp', 'N/A')
-                    price = row.get('ltp', row.get('price', 'N/A'))
-                    gain = row.get('gain_pct', row.get('change', 'N/A'))
-                    text = f"🔍 *ANALYSIS: {symbol} @ {ts}*\n\n"
-                    text += f"Price: ₹{price}" if isinstance(price, (int, float)) else f"Price: {price}"
-                    text += f" | Gain: {gain:.1f}%\n\n" if isinstance(gain, (int, float)) else f" | Gain: {gain}\n\n"
-                    # Look for gate result columns
-                    gate_cols = [c for c in row.index if 'gate' in c.lower() or 'passed' in c.lower() or 'rejected' in c.lower()]
-                    if gate_cols:
-                        for gc in gate_cols:
-                            val = row[gc]
-                            icon = "✅" if val in (True, 1, 'PASSED') else "❌"
-                            text += f"{icon} {gc}: {val}\n"
-                    rejection = row.get('rejection_reason', row.get('blocked_reason', None))
-                    if rejection and rejection != 'nan' and str(rejection) != 'nan':
-                        text += f"\n⛔ *Rejection:* {rejection}\n"
-                    return text
-                except Exception as e:
-                    logger.debug(f"Parquet read error for {f}: {e}")
-                    continue
-            return None
-        except ImportError:
-            return None
-        except Exception as e:
-            logger.error(f"Parquet lookup failed: {e}")
-            return None
-    async def _cmd_pause(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """/pause — Suspend signal scanning."""
-        if not self._is_authorized(update):
-            return
-        self._scanning_paused = True
-        logger.warning("⏸️ Scanning PAUSED via Telegram")
-        # Active positions still managed
-        open_count = len(self.order_manager.active_positions) if self.order_manager and hasattr(self.order_manager, 'active_positions') else 0
-        await update.message.reply_text(
-            f"⏸️ <b>Scanning PAUSED</b>\n\n"
-            f"New signal detection is halted.\n"
-            f"Active positions: {open_count} (still managed)\n"
-            f"{self._get_signal_block()}"
-            f"\nSend /resume to reactivate.",
-            parse_mode='HTML'
-        )
-    async def _cmd_resume(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """/resume — Reactivate scanning."""
-        if not self._is_authorized(update):
-            return
-        self._scanning_paused = False
-        logger.warning("▶️ Scanning RESUMED via Telegram")
-        scan_count = self._scan_metadata.get('candidate_count', 0)
-        await update.message.reply_text(
-            f"▶️ <b>Scanning RESUMED</b>\n\n"
-            f"{self._get_session_block()}"
-            f"Last scan: {scan_count} candidates\n"
-            f"{self._get_signal_block()}"
-            f"\nSignal detection is active.",
-            parse_mode='HTML'
-        )
     async def _cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """/help"""
         if not self._is_authorized(update):
             return
         await update.message.reply_text(
             "⚡ <b>ShortCircuit Commands</b>\n\n"
-            "<b>/auto</b> <code>on|off</code>\n"
+            "<b>/auto o|off</b>\n"
             "↳ Arm auto-trading or set to alert-only.\n\n"
             "<b>/status</b>\n"
-            "↳ Full system health & live P&L sync.\n\n"
-            "<b>/positions</b>\n"
-            "↳ View/manage open trade cards.\n\n"
-            "<b>/pnl</b>\n"
-            "↳ Today's realized/unrealized breakdown.\n\n"
-            "<b>/why</b> <code>SYMBOL [HH:MM]</code>\n"
-            "↳ Replay gate results for any symbol.\n\n"
-            "<b>/pause</b> | <b>/resume</b>\n"
-            "↳ Suspend or resume scanning universe.\n\n"
+            "↳ System health & capital snapshot.\n\n"
             "<b>/stop</b>\n"
             "↳ Emergency bot shutdown (requires confirmation).\n\n"
-            "<i>Use the menu button below for quick access.</i>",
+            "<i>Your bot is now in Minimalist Mode.</i>",
             parse_mode='HTML'
         )
 
@@ -1162,153 +678,32 @@ class ShortCircuitBot:
         data = query.data
         parts = data.split(':')
         action = parts[0]
-        if action == 'go':
-            await self._handle_go(query, parts[1])
-        elif action == 'skip':
-            await self._handle_skip(query, parts[1])
-        elif action == 'details':
-            await self._handle_details(query, parts[1])
-        elif action == 'refresh':
-            await self._handle_refresh(query, parts[1])
-        elif action == 'close':
-            symbol = parts[1]
-            order_id = parts[2] if len(parts) > 2 else None
-            await self._handle_close(query, symbol, order_id)
-        elif action == 'system_stop':
+        if action == 'system_stop':
             sub_action = parts[1]
             if sub_action == 'confirm':
                 await self._handle_stop_confirm(query)
             else:
-                await self._handle_stop_cancel(query)
-
-    async def _handle_stop_confirm(self, query):
-        """Final execution of shutdown from Telegram."""
-        if not self._shutdown_event:
-            await query.edit_message_text("❌ Error: Shutdown event not linked. Use Ctrl+C.")
-            return
-
-        logger.critical("🚨 [SHUTDOWN] Terminating bot via Telegram /stop command (User Confirmed)")
-        await query.edit_message_text("🛑 *Bot is shutting down...* Check logs for cleanup status.", parse_mode='Markdown')
-        self._shutdown_event.set()
-
-    async def _handle_stop_cancel(self, query):
-        """Abort shutdown."""
-        await query.edit_message_text("✅ *Shutdown cancelled.* Bot continues monitoring.", parse_mode='Markdown')
-    async def _handle_go(self, query, signal_id: str):
-        signal = self._pending_signals.get(signal_id)
-        if not signal:
-            await query.edit_message_text("⚠️ Signal expired.")
-            return
-        self._pending_signals.pop(signal_id, None)
-        symbol = signal.get('symbol')
-        await query.edit_message_text(f"⏳ Executing {symbol}...")
-        try:
-            order_id = await self.order_manager.enter_position(signal)
-            if order_id:
-                await query.edit_message_text(f"✅ Order Placed: {order_id}")
-            else:
-                await query.edit_message_text("❌ Order Failed.")
-        except Exception as e:
-            await query.edit_message_text(f"❌ Error: {e}")
-    async def _handle_skip(self, query, signal_id: str):
-        signal = self._pending_signals.pop(signal_id, {})
-        symbol = signal.get('symbol', 'Unknown')
-        await query.edit_message_text(f"⏭️ {symbol} skipped.")
-    async def _handle_details(self, query, signal_id: str):
-        signal = self._pending_signals.get(signal_id, {})
-        confluence = signal.get('confluence_notes', 'N/A')
-        await query.answer(f"Details: {confluence}"[:200], show_alert=True)
-    async def _handle_refresh(self, query, symbol: str):
-        # Refresh is handled by auto-loop, but we can force one if needed
-        await query.answer("Refreshing...")
-    async def _handle_close(self, query, symbol: str, order_id: str):
-        await query.edit_message_text(f"⏳ Closing {symbol}...")
-        try:
-            await self.order_manager.exit_position(symbol, reason='MANUAL_EXIT')
-            await query.edit_message_text(f"✅ Close signal sent.")
-        except Exception as e:
-            await query.edit_message_text(f"❌ Close failed: {e}")
+                await query.edit_message_text("✅ *Shutdown cancelled.* Bot continues monitoring.", parse_mode='Markdown')
     # ════════════════════════════════════════════════════════════
     # EOD SUMMARY — Phase 44.4 Section 3
     # ════════════════════════════════════════════════════════════
     async def send_eod_summary(self):
-        """
-        End-of-Day summary card. Auto-triggered at session close.
-        Shows executed/skipped/failed breakdown with N/A fallback for 
-        unavailable post-signal outcome data.
-        """
-        text = "📊 *END OF DAY SUMMARY*\n\n"
-        db_unavailable = False
-        executed = []
-        db_manager = None
-        order_manager_obj = getattr(self.order_manager, '_target', self.order_manager)
-        if order_manager_obj is not None:
-            db_manager = getattr(order_manager_obj, 'db', None)
-        if db_manager and hasattr(db_manager, 'get_today_trades'):
-            try:
-                db_trades = await db_manager.get_today_trades()
-                for trade in db_trades:
-                    executed.append({
-                        'symbol': trade.get('symbol', '?'),
-                        'pnl': float(trade.get('pnl', 0.0) or 0.0),
-                        'exit_reason': trade.get('exit_reason', 'N/A'),
-                    })
-            except Exception as e:
-                db_unavailable = True
-                logger.warning(f"[EOD] DB unavailable for summary: {e}")
-        else:
-            db_unavailable = True
-        if db_unavailable:
-            text += "[DB UNAVAILABLE - SHOWING SESSION DATA ONLY]\n\n"
-            executed = list(self._session_trades)
-        wins = [t for t in executed if t.get('pnl', 0) > 0]
-        losses = [t for t in executed if t.get('pnl', 0) < 0]
-        total_pnl = sum(t.get('pnl', 0) for t in executed)
-        total_str = f"+₹{total_pnl:.2f}" if total_pnl >= 0 else f"-₹{abs(total_pnl):.2f}"
-        text += f"━━━ EXECUTED ({len(executed)}) ━━━\n"
-        if executed:
-            for t in executed:
-                pnl = t.get('pnl', 0)
-                pnl_str = f"+₹{pnl:.2f}" if pnl >= 0 else f"-₹{abs(pnl):.2f}"
-                emoji = "✅" if pnl > 0 else "❌" if pnl < 0 else "⚪"
-                reason = t.get('exit_reason', 'N/A')
-                text += f"{emoji} {t.get('symbol', '?')}: {pnl_str} ({reason})\n"
-        else:
-            text += "No trades executed today.\n"
-        text += f"\nGross P&L: {total_str}\n"
-        if executed:
-            win_rate = (len(wins) / len(executed) * 100)
-            text += f"Win Rate: {win_rate:.0f}% ({len(wins)}W / {len(losses)}L)\n"
-        # Skipped signals from signal_manager
-        skipped_section = ""
-        if self.signal_manager:
-            try:
-                status = self.signal_manager.get_status()
-                stats = status.get('stats', {})
-                blocked_limit = stats.get('blocked_daily_limit', 0)
-                blocked_cooldown = stats.get('blocked_cooldown', 0)
-                blocked_paused = stats.get('blocked_paused', 0)
-                total_blocked = blocked_limit + blocked_cooldown + blocked_paused
-                if total_blocked > 0:
-                    skipped_section += f"\n━━━ SKIPPED ({total_blocked}) ━━━\n"
-                    if blocked_limit:
-                        skipped_section += f"Daily limit: {blocked_limit}\n"
-                    if blocked_cooldown:
-                        skipped_section += f"Cooldown: {blocked_cooldown}\n"
-                    if blocked_paused:
-                        skipped_section += f"Circuit breaker: {blocked_paused}\n"
-                    # "What You Missed" — attempt post-signal outcome lookup
-                    skipped_section += "\n_What You Missed:_\n"
-                    skipped_section += "_Outcome: N/A (data unavailable)_\n"
-            except Exception:
-                pass
-        text += skipped_section
-        # Capital summary
-        text += f"\n━━━ CAPITAL ━━━\n"
-        text += self._get_capital_block()
-        text += f"\n_Session ended at {datetime.now().strftime('%H:%M:%S')}_"
-        await self.send_message(text)
-        logger.info("[EOD] Summary sent to Telegram")
+        """End-of-Session snapshot."""
+        if not self.app: return
+        try:
+            total_pnl = 0.0
+            if self.capital_manager:
+                total_pnl = getattr(self.signal_manager, 'daily_pnl', 0.0)
+            
+            text = (
+                f"📊 <b>END OF SESSION SUMMARY</b>\n\n"
+                f"Gross Daily P&L: <b>₹{total_pnl:.2f}</b>\n"
+                f"{self._get_capital_block()}\n"
+                f"<i>Shutdown initiated. System idle.</i>"
+            )
+            await self.send_message(text)
+        except Exception as e:
+            logger.error(f"EOD Summary failed: {e}")
     # ════════════════════════════════════════════════════════════
     # EMERGENCY ALERTS
     # ════════════════════════════════════════════════════════════
@@ -1411,13 +806,7 @@ class ShortCircuitBot:
     def _register_handlers(self):
         self.app.add_handler(CommandHandler("start", self._cmd_start))
         self.app.add_handler(CommandHandler("auto", self._cmd_auto))
-        self.app.add_handler(CommandHandler("editable", self._cmd_editable))
         self.app.add_handler(CommandHandler("status", self._cmd_status))
-        self.app.add_handler(CommandHandler("positions", self._cmd_positions))
-        self.app.add_handler(CommandHandler("pnl", self._cmd_pnl))
-        self.app.add_handler(CommandHandler("why", self._cmd_why))
-        self.app.add_handler(CommandHandler("pause", self._cmd_pause))
-        self.app.add_handler(CommandHandler("resume", self._cmd_resume))
         self.app.add_handler(CommandHandler("help", self._cmd_help))
         self.app.add_handler(CommandHandler("stop", self._cmd_stop))
         self.app.add_handler(CallbackQueryHandler(self._handle_callback))
@@ -1581,15 +970,10 @@ class ShortCircuitBot:
         # Phase 81: Telegram Command Menu
         if getattr(config, 'P81_TELEGRAM_MENU_ENABLED', True):
             commands = [
-                BotCommand("help", "Show all commands and explanation"),
-                BotCommand("auto", "Toggle Auto-Trade Toggle (on/off)"),
-                BotCommand("status", "Live Dashboard Snapshot"),
-                BotCommand("positions", "Current Open Positions list"),
-                BotCommand("pnl", "Today's Unrealised/Realised PnL"),
-                BotCommand("why", "Why did the last scan reject?"),
-                BotCommand("pause", "Pause Strategy Execution"),
-                BotCommand("resume", "Resume Strategy Execution"),
-                BotCommand("stop", "🛑 TERMINATE BOT (Requires Confirmation)"),
+                BotCommand("help", "Show all commands"),
+                BotCommand("auto", "Toggle Trading (on/off)"),
+                BotCommand("status", "System Health Check"),
+                BotCommand("stop", "🛑 TERMINATE BOT"),
             ]
             try:
                 await self.app.bot.set_my_commands(commands, scope=BotCommandScopeDefault())
