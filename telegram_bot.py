@@ -67,6 +67,13 @@ class ShortCircuitBot:
         self._shutdown_event: Optional[asyncio.Event] = None
         self._alert_queue = asyncio.Queue()
         self._throttler_task: Optional[asyncio.Task] = None
+        self._cleanup_task: Optional[asyncio.Task] = None
+        
+        # ── State ─────────────────────────────────────────────
+        self._scanning_paused: bool = False
+        self._editable_signal_flow_override: Optional[bool] = None
+        self._signal_msg_index: dict = {}
+        
         logger.info(f"🤖 Telegram Bot initialized | Auto Mode: OFF")
     # ════════════════════════════════════════════════════════════
     # PUBLIC API — used by other modules
