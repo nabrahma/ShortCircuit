@@ -574,6 +574,16 @@ class ReconciliationEngine:
                     self.order_manager.active_positions.pop(sym, None)
                     self.order_manager.hard_stops.pop(sym, None)
                     self.order_manager.exit_in_progress.pop(sym, None)
+                    
+                # Phase 89.9: Hard-close the ghost position in the database to break the loop
+                try:
+                    await self.db.execute(
+                        "UPDATE positions SET state = 'CLOSED', closed_at = NOW() WHERE symbol = $1 AND state = 'OPEN'", 
+                        sym
+                    )
+                    logger.info(f"[GHOST] Hard-closed phantom position {sym} in database.")
+                except Exception as e:
+                    logger.error(f"[GHOST] Failed to hard-close phantom {sym} in DB: {e}")
 
             # Step 1.5: Phase 89.9 Cleanup orphaned orders for this symbol
             if hasattr(self.order_manager, 'trade_manager'):
