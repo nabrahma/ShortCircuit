@@ -197,6 +197,16 @@ async def _initialize_runtime() -> RuntimeContext:
     db_manager = DatabaseManager()
     await db_manager.initialize()
 
+    # PRD-008: Enable periodic gate result flush — set DSN once after DB pool is ready
+    from gate_result_logger import get_gate_result_logger
+    from database import DB_CONFIG as _db_cfg
+    import os as _os
+    _db_dsn = (
+        f"postgresql://{_os.getenv('DB_USER', _db_cfg['user'])}"
+        f":{_os.getenv('DB_PASS', _os.getenv('DB_PASSWORD', _db_cfg['password']))}"
+        f"@{_os.getenv('DB_HOST', _db_cfg['host'])}"
+        f":{_db_cfg['port']}/{_db_cfg['database']}"
+    )
     get_gate_result_logger().set_dsn(_db_dsn)
 
     broker = FyersBrokerInterface(
