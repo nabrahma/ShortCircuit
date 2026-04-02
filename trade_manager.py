@@ -599,6 +599,9 @@ class TradeManager:
 
             logger.warning(f"[SCALPER] No pending SL order found for {symbol}")
             return {"status": "NOT_FOUND"}
+        except Exception as e:
+            logger.error(f"[SCALPER] SL update exception for {symbol}: {e}")
+            return {"status": "FAILED", "error": str(e)}
 
     # ==================================================================
     # PHASE 89.9: ZERO-GHOST ORDER SAFETY
