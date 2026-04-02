@@ -73,6 +73,7 @@ class ShortCircuitBot:
         self._scanning_paused: bool = False
         self._editable_signal_flow_override: Optional[bool] = None
         self._signal_msg_index: dict = {}
+        self._signal_msg_index_lock = asyncio.Lock()
         
         logger.info(f"🤖 Telegram Bot initialized | Auto Mode: OFF")
     # ════════════════════════════════════════════════════════════
@@ -248,7 +249,7 @@ class ShortCircuitBot:
         details: dict | None = None
     ) -> None:
         message_id = None
-        with self._signal_msg_index_lock:
+        async with self._signal_msg_index_lock:
             state = self._signal_msg_index.get(correlation_id)
             if state:
                 message_id = state.message_id
@@ -270,15 +271,15 @@ class ShortCircuitBot:
             except Exception:
                 pass
         finally:
-            with self._signal_msg_index_lock:
+            async with self._signal_msg_index_lock:
                 self._signal_msg_index.pop(correlation_id, None)
-    def _cleanup_stale_signal_entries(self, now: float | None = None) -> int:
+    async def _cleanup_stale_signal_entries(self, now: float | None = None) -> int:
         """
         Single-pass stale entry cleanup. Returns number of entries removed.
         """
         now_ts = now if now is not None else time.time()
         removed = 0
-        with self._signal_msg_index_lock:
+        async with self._signal_msg_index_lock:
             stale_keys = [
                 key for key, state in self._signal_msg_index.items()
                 if now_ts - state.created_at > 300
@@ -290,7 +291,7 @@ class ShortCircuitBot:
     async def _cleanup_stale_signal_entries_loop(self):
         while True:
             try:
-                removed = self._cleanup_stale_signal_entries()
+                removed = await self._cleanup_stale_signal_entries()
                 if removed:
                     logger.info(f"[EDITABLE] Cleaned {removed} stale signal message entries")
                 await asyncio.sleep(600)
