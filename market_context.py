@@ -233,6 +233,7 @@ class MarketContext:
         Updated for Phase 65: Climax Window (09:30-09:45)
         Returns: (allowed, reason)
         """
+        import config
         now_ist = datetime.now(IST).time()
         
         # 1. TIME GATE: Phase 65 AMT & Climax Window

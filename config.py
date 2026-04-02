@@ -134,13 +134,16 @@ P65_G7_VOLUME_Z_SCORE_THRESHOLD = 2.0
 P65_G1_NET_GAIN_THRESHOLD = 7.5
 P65_G1_NORMAL_THRESHOLD = 9.0    
 P65_G1_AMT_REQUIRED_BELOW_9 = True
-P65_G1_TIME_SINCE_HIGH_CANDLES = 45
+P65_G1_TIME_SINCE_HIGH_CANDLES = 25
 
 # Phase 86: Adaptive Momentum Decay — No longer uses 120s timer
 # Murphy: Momentum divergence IS the confirmation.
 P66_ADAPTIVE_G1_ENABLED: bool = True
 P66_G1_ROTATION_THRESHOLD_PCT: float = 0.030 
 # P66_G4_DECAY_CONFIRMATION_SEC: int = 120 (Deprecated in Phase 86)
+
+# Phase 90.7: Adaptive Volume Fade (Absorption Threshold)
+P90_G5_DECAY_VOL_RELAXATION = 0.85
 
 # ============================================================================
 # PHASE 79: LEVERAGE GUARD (G14)

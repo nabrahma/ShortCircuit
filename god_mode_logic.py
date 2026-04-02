@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 import logging
+import config
 # from scipy.stats import linregress
 
 # Logging
@@ -123,7 +124,7 @@ class GodModeAnalyst:
             last_idx = df.index[-1]
             candles_since_high = last_idx - high_idx
             
-            max_candles = getattr(config, 'P51_G1_TIME_SINCE_HIGH_CANDLES', 20)
+            max_candles = getattr(config, 'P65_G1_TIME_SINCE_HIGH_CANDLES', 25)
             if candles_since_high > max_candles:
                 return False, f"G1 Time Gate: {candles_since_high} candles since day high (limit {max_candles})"
 
@@ -263,8 +264,10 @@ class GodModeAnalyst:
         profile,          # ProfileAnalyzer result (dict)
         gain_pct: float,  # current % gain vs prev close
         atr: float = 0,   # Phase 51: Added ATR for VAH clearance check
-        vwap_sd: float = 0 # Phase 57: vwap_sd for Absorption/Z-Process
+        vwap_sd: float = 0, # Phase 57: vwap_sd for Absorption/Z-Process
+        is_decaying: bool = False # Phase 90.6: Adaptive High Tolerance
     ) -> dict:
+        import config
         """
         Phase 44.8 — Core edge detector.
         Phase 51: Hardened with all-day high, ATR clearance, and late-session rule.
@@ -304,12 +307,19 @@ class GodModeAnalyst:
             return result
 
         # ── Gate B: ALL-DAY intraday high (Peak Detection) ──────────
-        # Uses a 'Murphy-Guo Hybrid' tolerance: max of fixed noise-floor or volatility-scaled ATR.
+        # Phase 90.4 Upgrade: Look back 3 candles to avoid single-tick "not at high" noise.
         if config.P51_G5_GATE_B_USE_ALLDAY_HIGH:
             day_high = max(c['high'] for c in candles)
-            curr_high = candles[-1]['high']
+            # Use max(last 3) instead of just candles[-1]
+            curr_high = max(c['high'] for c in candles[-3:])
             
             fixed_tol = getattr(config, 'P51_G5_GATE_B_FIXED_TOLERANCE', 0.005) # 0.5% floor
+            
+            # Phase 90.6: Soften High-Check Tolerance if already decaying
+            if is_decaying:
+                fixed_tol = max(fixed_tol, 0.030) # 3.0% floor for confirmed turn
+                logger.info(f"🛡️ [ADAPTIVE GATE B] Price can be up to 3.0% below high since trend is decaying.")
+            
             atr_mult  = getattr(config, 'P51_G5_GATE_B_ATR_MULT', 0.2)
             
             # Compute dynamic tolerance
@@ -326,6 +336,7 @@ class GodModeAnalyst:
                 return result
 
         # ── Gate C: Volume fading on the new high ───────────────────
+        # Phase 90.4 Upgrade: Use 2-minute average to confirm "Fade" and filter single-minute spikes.
         _vol_lookback = getattr(config, 'P55_G5_VOL_FADE_LOOKBACK', 15)
         prior_vols = [c['volume'] for c in candles[-(_vol_lookback + 1):-1]]
         avg_prior_vol = sum(prior_vols) / len(prior_vols) if prior_vols else 0
@@ -333,7 +344,9 @@ class GodModeAnalyst:
             result["reject_reason"] = "zero_prior_volume"
             return result
 
-        vol_fade_ratio = round(candles[-1]['volume'] / avg_prior_vol, 3)
+        # Use mean of last 2 candles instead of just candles[-1]
+        current_vol_avg = sum(c['volume'] for c in candles[-2:]) / 2
+        vol_fade_ratio = round(current_vol_avg / avg_prior_vol, 3)
         result["vol_fade_ratio"] = vol_fade_ratio
 
         # ── PHASE 60: SPEAR OF EXHAUSTION (Volume Climax) [G5.4] ──────
@@ -366,6 +379,12 @@ class GodModeAnalyst:
                 max_fade = getattr(config, 'P57_G5_Z_FADE_RELAXATION', 0.95)
         else:
             max_fade = 0.65
+
+        # Phase 90.7: Soften Volume-Fade Tolerance if already decaying (Absorption Threshold)
+        if is_decaying:
+            decay_relax = getattr(config, 'P90_G5_DECAY_VOL_RELAXATION', 0.85)
+            max_fade = max(max_fade, decay_relax)
+            logger.info(f"📊 [ADAPTIVE GATE C] Volume Fade relaxed to {max_fade} (Absorption Threshold) due to decay.")
 
         if vol_fade_ratio > max_fade:
             result["reject_reason"] = f"volume_not_faded:{vol_fade_ratio:.2f} (max:{max_fade})"
@@ -437,6 +456,15 @@ class GodModeAnalyst:
             conf_tier = 4 # MAX_CONVICTION
             
         tiers = {1: "MEDIUM", 2: "HIGH", 3: "EXTREME", 4: "MAX_CONVICTION"}
+        
+        # Phase 90.8: Institutional Extreme Promotion
+        # Upgrade HIGH (Tier 2) to EXTREME (Tier 3) if G4-Decay + G9-Allowed + High-Stretch.
+        if conf_tier == 2 and is_decaying and vwap_sd > 2.0:
+            # We don't have direct access to g9_allowed here as it's checked after G5 in analyzer.py
+            # But we can check for other G9-like traits or rely on analyzer for final promotion.
+            # RETHINK: Direct analyzer.py promotion is cleaner since it has g9_allowed.
+            pass
+
         result["confidence"] = tiers.get(min(conf_tier, 4), "MEDIUM")
 
         # ── Gate E: Late-session EXTREME-only rule [G5.3] ────────────

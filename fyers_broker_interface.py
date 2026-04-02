@@ -1607,6 +1607,7 @@ class FyersBrokerInterface:
         Phase 88.1: Synchronous leverage fetch for Scanner thread.
         Leverage = Price / Margin_Required.
         """
+        import config
         if not symbol:
             return 1.0
 

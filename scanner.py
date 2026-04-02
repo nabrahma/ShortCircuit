@@ -310,9 +310,11 @@ class FyersScanner:
                 for i in range(0, len(stale_symbols), batch_size):
                     batch = stale_symbols[i:i + batch_size]
                     try:
+                        logger.debug(f"[Tier 2] Fetching REST quotes for batch of {len(batch)} symbols...")
                         data = {"symbols": ",".join(batch)}
                         response = self.fyers.quotes(data=data)
                         if "d" in response:
+                            logger.debug(f"[Tier 2] Received {len(response['d'])} quotes from REST.")
                             for stock in response["d"]:
                                 quote_data = stock.get('v')
                                 if not isinstance(quote_data, dict):
@@ -481,10 +483,12 @@ class FyersScanner:
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {executor.submit(fetch_quality, c['symbol']): c['symbol'] for c in pre_candidates}
+            logger.debug(f"Submitted {len(futures)} quality check tasks to ThreadPool.")
 
             for future in as_completed(futures):
                 symbol = futures[future]
                 try:
+                    logger.debug(f"Waiting for quality check result: {symbol}...")
                     is_good, df, df_15m = future.result(timeout=10)
                     if is_good:
                         c = candidates_map[symbol]

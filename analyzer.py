@@ -87,9 +87,8 @@ class FyersAnalyzer:
             n_bars = max(100, getattr(config, 'RVOL_MIN_CANDLES', 15) + 5)
             local_candles = self.broker.get_local_candles(symbol, n=n_bars)
             
-            # Use local cache only if we have a substantial buffer (e.g. at least RVOL_MIN_CANDLES)
-            # This ensures we don't return partial data for cold symbols
-            min_required = getattr(config, 'RVOL_MIN_CANDLES', 15)
+            # Use local cache only if we have enough buffer for G5 (Need 17, so require 18)
+            min_required = getattr(config, 'RVOL_MIN_CANDLES', 15) + 3
             if local_candles and len(local_candles) >= min_required:
                 data = []
                 for c in local_candles:
@@ -128,10 +127,7 @@ class FyersAnalyzer:
     def check_setup(self, symbol: str, ltp: float, oi: float = 0, pre_fetched_df: Optional[pd.DataFrame] = None,
                     df_15m: Optional[pd.DataFrame] = None, # Phase 51
                     scan_id: int = 0, data_tier: str = "UNKNOWN") -> Optional[Dict[str, Any]]:
-        """
-        Validates a trading candidate using the God Mode strategy.
-        Optimized to use pre-fetched History DF and Shared Depth Data.
-        """
+        import config
         grl = get_gate_result_logger()
         gr = GateResult(symbol=symbol, scan_id=scan_id, data_tier=data_tier)
         signal_meta = {}
@@ -187,17 +183,22 @@ class FyersAnalyzer:
         atr = self.gm_analyst.calculate_atr(df)
         vwap_sd = self.gm_analyst.calculate_vwap_bands(prev_df)
         is_extended = vwap_sd > 2.0
-        slope_now, _  = self.gm_analyst.calculate_vwap_slope(df.iloc[-30:])
-        slope_prev, _ = self.gm_analyst.calculate_vwap_slope(df.iloc[-31:-1])
-
-        # Phase 66 → Phase 86: Momentum Decay Detection (Immediate)
-        # Murphy: "Momentum divergence IS the confirmation — one bar is enough."
-        # Leung & Li: "Optimal mean-reversion entry is when reversion force is active."
-        # No timer needed — slope declining + price extended = confirmed decay.
+        # Phase 90.5: Dual-Window Momentum (Murphy-Leung Inflection)
+        # Slow Slope (30m) = Institutional Trend
+        # Fast Slope (5m) = Immediate Momentum
+        slope_30m, _ = self.gm_analyst.calculate_vwap_slope(df.iloc[-30:], window=30)
+        slope_5m, _  = self.gm_analyst.calculate_vwap_slope(df.iloc[-5:], window=5)
+        
+        # Decay Trigger: Fast Slope drops below Slow Slope (with 10% buffer)
         is_decaying = False
         if getattr(config, 'P66_ADAPTIVE_G1_ENABLED', False):
-            if slope_now < slope_prev and vwap_sd > config.P66_G4_DECAY_SD_THRESHOLD:
+            if slope_5m < (slope_30m * 0.90) and vwap_sd > config.P66_G4_DECAY_SD_THRESHOLD:
                 is_decaying = True
+                logger.info(f"⚡ [INFLECTION] {symbol} Decaying: Fast({slope_5m:.2f}) < Slow({slope_30m:.2f})")
+
+        # Mantain compatibility for downstream gates
+        slope_now = slope_5m
+        slope_prev = slope_30m
 
         # Standardize Gain Calculation
         pc = 0
@@ -312,10 +313,8 @@ class FyersAnalyzer:
             return None
 
         # ── G4: Momentum safeguard ──────────────────────────────────
-        slope_now, _  = self.gm_analyst.calculate_vwap_slope(df.iloc[-30:])
-        slope_prev, _ = self.gm_analyst.calculate_vwap_slope(df.iloc[-31:-1])
-        
-        momentum_blocked = self._is_momentum_too_strong(df, slope_now, slope_prev, vwap_sd, symbol, gain_pct)
+        # Re-using the same slope_5m/slope_30m calculated above
+        momentum_blocked = self._is_momentum_too_strong(df, slope_5m, slope_30m, vwap_sd, symbol, gain_pct)
         gr.g4_pass = not momentum_blocked
         gr.g4_value = round(slope_now, 3)
         get_dashboard_bridge().broadcast("GATE_UPDATE", {"gate": "G4", "status": "PASS" if not momentum_blocked else "FAIL"})
@@ -340,7 +339,8 @@ class FyersAnalyzer:
             profile=profile,
             gain_pct=gain_pct,
             atr=atr,
-            vwap_sd=vwap_sd
+            vwap_sd=vwap_sd,
+            is_decaying=is_decaying
         )
         gr.g5_pass = exhaustion["fired"]
         gr.g5_value = round(exhaustion.get("stretch_score", 0), 3)
@@ -386,21 +386,6 @@ class FyersAnalyzer:
             grl.record(gr)
             return None
 
-        # ── G8: Signal Manager gate ───────────────────────────────
-        sm = self.signal_manager
-        confidence = signal_meta.get('confidence', '')
-        can_signal, sm_reason = sm.can_signal(symbol, confidence=confidence) if hasattr(sm, 'can_signal') else (True, "")
-
-        gr.g8_pass = can_signal
-        gr.g8_value = None
-        get_dashboard_bridge().broadcast("GATE_UPDATE", {"gate": "G8", "status": "PASS" if can_signal else "FAIL"})
-        if not can_signal:
-            gr.verdict = "REJECTED"
-            gr.first_fail_gate = "G8_SIGNAL_MANAGER"
-            gr.rejection_reason = sm_reason
-            grl.record(gr)
-            return None
-
         # ── G9: HTF Confluence ────────────────────────────────────
         import concurrent.futures
         try:
@@ -413,10 +398,32 @@ class FyersAnalyzer:
         gr.g9_pass  = htf_ok
         gr.g9_value = htf_msg
         get_dashboard_bridge().broadcast("GATE_UPDATE", {"gate": "G9", "status": "PASS" if htf_ok else "FAIL"})
+        
+        # ── Phase 90.8: Institutional Promotion (G4 Decay + G9 HTF Stall) ─────────
+        if htf_ok and is_decaying and signal_meta.get('confidence') == 'HIGH' and vwap_sd > 2.0:
+            signal_meta['confidence'] = 'EXTREME'
+            signal_meta['pattern_bonus'] = f"{signal_meta.get('pattern_bonus', 'None')} + PROMOTED"
+            logger.info(f"⭐ [PROMOTION] {symbol} upgraded to EXTREME (Decay + G9 Stall confirmed)")
+
         if not htf_ok:
             gr.verdict = "REJECTED"
             gr.first_fail_gate = "G9_HTF_CONFLUENCE"
             gr.rejection_reason = f"HTF blocked: {htf_msg}"
+            grl.record(gr)
+            return None
+
+        # ── G8: Signal Manager gate ───────────────────────────────
+        sm = self.signal_manager
+        confidence = signal_meta.get('confidence', '')
+        can_signal, sm_reason = sm.can_signal(symbol, confidence=confidence) if hasattr(sm, 'can_signal') else (True, "")
+
+        gr.g8_pass = can_signal
+        gr.g8_value = None
+        get_dashboard_bridge().broadcast("GATE_UPDATE", {"gate": "G8", "status": "PASS" if can_signal else "FAIL"})
+        if not can_signal:
+            gr.verdict = "REJECTED"
+            gr.first_fail_gate = "G8_SIGNAL_MANAGER"
+            gr.rejection_reason = sm_reason
             grl.record(gr)
             return None
 
@@ -490,8 +497,9 @@ class FyersAnalyzer:
             
         return False
 
-    def _is_momentum_too_strong(self, df: pd.DataFrame, slope_now: float, slope_prev: float, vwap_sd: float, symbol: str, gain_pct: float = 0.0) -> bool:
-        """Checks if momentum is too strong to short."""
+    def _is_momentum_too_strong(self, df: pd.DataFrame, slope_fast: float, slope_slow: float, vwap_sd: float, symbol: str, gain_pct: float = 0.0) -> bool:
+        """Checks if momentum is too strong to short (Dual-Window)."""
+        import config
         try:
             recent_vols = df['volume'].iloc[-20:-1]
             avg_v  = recent_vols.mean()
@@ -506,20 +514,19 @@ class FyersAnalyzer:
                 logger.warning(f"  MOMENTUM BLOCK {symbol} RVOL {rvol_now:.1f}x (> {rvol_thresh}x threshold)")
                 return True
             
-            if slope_now > slope_thresh:
-                # Phase 57: Slope Decay Check (Murphy Divergence)
-                # If momentum is slowing down (slope_now < slope_prev) and price is extended, allow.
+            # For the main 'Speed Limit', we always use the Slow (30m) trend to be safe.
+            if slope_slow > slope_thresh:
+                # Phase 90.5: Fast-Inflection Check
                 if getattr(config, 'P57_G4_SLOPE_DECAY_ENABLED', False):
                     div_thresh = getattr(config, 'P57_G4_DIVERGENCE_SD', 1.5)
-                    
-                    # Phase 60: Structural Extension Fallback (Gain > 10%)
                     is_structurally_extended = gain_pct > getattr(config, 'P60_G4_STRUCTURAL_FALLBACK_GAIN', 10.0)
                     
-                    if slope_now < slope_prev and (vwap_sd > div_thresh or is_structurally_extended):
-                        logger.info(f"✅ [MOMENTUM DECAY] {symbol} allowed via Structural Fallback (Gain={gain_pct:.1f}%)")
+                    # If Fast Slope (5m) is dropping below Slow Slope (30m), allow the trade!
+                    if slope_fast < (slope_slow * 0.90) and (vwap_sd > div_thresh or is_structurally_extended):
+                        logger.info(f"✅ [MOMENTUM DECAY] {symbol} allowed via Inflection (Fast:{slope_fast:.2f} < Slow:{slope_slow:.2f})")
                         return False
 
-                logger.warning(f"  MOMENTUM BLOCK {symbol} Slope {slope_now:.1f} (> {slope_thresh} threshold)")
+                logger.warning(f"  MOMENTUM BLOCK {symbol} Slow Slope {slope_slow:.1f} (> {slope_thresh} threshold)")
                 return True
 
         except Exception:
@@ -538,6 +545,7 @@ class FyersAnalyzer:
 
     def _check_pro_confluence(self, symbol, df, prev_df, slope, is_extended, vwap_sd, pattern_desc, depth_data=None, ltp=0, oi=0, signal_meta=None) -> Tuple[bool, list]:
         """Verifies secondary confirmation signals."""
+        import config
         if signal_meta is None: signal_meta = {}
         pro_conf = []
         
@@ -582,7 +590,8 @@ class FyersAnalyzer:
         try:
             if len(df) > 20:
                 avg_vol = df['volume'].iloc[-20:-2].mean()
-                setup_vol = df.iloc[-2]['volume']
+                # Phase 90.4: Use 2-minute average for setup volume
+                setup_vol = df['volume'].iloc[-3:-1].mean() 
                 rvol = setup_vol / avg_vol if avg_vol > 0 else 0
                 
                 if rvol > 2.0:

@@ -400,6 +400,7 @@ async def _trading_loop(shutdown_event: asyncio.Event, ctx: RuntimeContext):
     scan_interval = 60
     consecutive_errors = 0
     max_errors = 5
+    loop_count = 0
 
     while not shutdown_event.is_set():
         try:
@@ -411,7 +412,12 @@ async def _trading_loop(shutdown_event: asyncio.Event, ctx: RuntimeContext):
                 if last_sync.tzinfo is None:
                     last_sync = last_sync.replace(tzinfo=UTC)
                 if (now_utc - last_sync).total_seconds() > 300:
-                    await ctx.capital_manager.sync(ctx.broker)
+                    try:
+                        await asyncio.wait_for(ctx.capital_manager.sync(ctx.broker), timeout=30.0)
+                    except asyncio.TimeoutError:
+                        logger.error("[RESILIENCE] Capital sync timed out after 30s. Skipping.")
+                    except Exception as e:
+                        logger.error(f"[RESILIENCE] Capital sync failed: {e}")
             if not ctx.market_session.should_trade_now():
                 current_state = ctx.market_session.get_current_state()
                 if current_state in ("POST_MARKET", "EOD_WINDOW"):
@@ -431,8 +437,19 @@ async def _trading_loop(shutdown_event: asyncio.Event, ctx: RuntimeContext):
                 ctx._trading_disabled_logged = False  # Reset for future pauses
 
             start_ts = time.monotonic()
-            logger.info("[SCAN] Scanning market...")
-            candidates = await asyncio.to_thread(ctx.scanner.scan_market)
+            loop_count += 1
+            logger.info(f"[HEARTBEAT] Loop #{loop_count} active | Scanning market...")
+            try:
+                candidates = await asyncio.wait_for(
+                    asyncio.to_thread(ctx.scanner.scan_market),
+                    timeout=45.0
+                )
+            except asyncio.TimeoutError:
+                logger.error("[RESILIENCE] Scanning timed out after 45s. Skipping iteration.")
+                candidates = []
+            except Exception as e:
+                logger.error(f"[RESILIENCE] Scanning error: {e}")
+                candidates = []
 
             # PRD-008: Pull scan_id and data_tier from scanner for gate audit correlation
             _scan_id   = getattr(ctx.scanner, '_scan_counter', 0)
@@ -513,7 +530,7 @@ async def _trading_loop(shutdown_event: asyncio.Event, ctx: RuntimeContext):
             raise
         except Exception as exc:
             consecutive_errors += 1
-            logger.error(
+            logger.exception(
                 "[TRADING] Loop error: %s (attempt %s/%s)",
                 exc,
                 consecutive_errors,
