@@ -158,16 +158,14 @@ class SignalManager:
 
     def add_pending_signal(self, symbol: str):
         """
-        Phase 51 [G8.3]: Set cooldown immediately when signal is added to FocusEngine.
-        Prevents other scanners from picking up the same symbol.
+        Phase 91: Reduced cooldown for Pending signals.
+        We no longer block the scanner if a signal is added but not yet executed.
+        This allows 'Trailing' the signal until validation is passed.
         """
-        import config
         with self._lock:
-            self._reset_if_new_day()
-            now = datetime.now()
-            cooldown = config.P51_G8_COOLDOWN_ON_SIGNAL_ADD if config.PHASE_51_ENABLED else 30
-            self.last_signal_time[symbol] = now + timedelta(minutes=cooldown)
-            logger.info(f"G8.3 Cooldown set for {symbol}: {cooldown} minutes (Pending Signal added)")
+            # We no longer set self.last_signal_time[symbol] here.
+            # Cooldown is only for successful executions (record_signal).
+            logger.info(f"G8.3 Pending Signal tracking: {symbol} (No cooldown set)")
 
     def record_execution_failure(
         self,
