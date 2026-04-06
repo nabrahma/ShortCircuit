@@ -1660,13 +1660,16 @@ class FyersBrokerInterface:
             # Phase 89.7: "Execution-First" strategy. Assume 5x if Fyers fails so we don't miss trades.
             logger.warning(
                 f"[BROKER] API Error detecting leverage for {symbol} (Status: {resp.status_code}). "
-                f"Assuming 5.0x to avoid missing trade entry."
+                f"Assuming 5.0x and caching fallback to prevent further API spam."
             )
+            with self._leverage_cache_lock:
+                self._leverage_cache[symbol] = 5.0
             return 5.0
-            return fallback_lev
             
         except Exception as e:
-            logger.error(f"[BROKER] Leverage detection failed for {symbol}: {e}. Emergency defaulting to 5.0x")
+            logger.error(f"[BROKER] Leverage detection failed for {symbol}: {e}. Emergency defaulting and caching 5.0x")
+            with self._leverage_cache_lock:
+                self._leverage_cache[symbol] = 5.0
             return 5.0
 
     async def get_all_positions(self) -> List[Dict]:

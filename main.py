@@ -377,6 +377,7 @@ async def _initialize_runtime() -> RuntimeContext:
 
 
 async def _trading_loop(shutdown_event: asyncio.Event, ctx: RuntimeContext):
+    import config
     if getattr(ctx.bot, '_auto_on_queued', False):
         ctx.bot._auto_mode = True
         ctx.bot._auto_on_queued = False
@@ -689,6 +690,7 @@ async def _run_startup_validation(ctx: RuntimeContext) -> None:
 
 
 async def main() -> int:
+    import config
     _configure_logging()
 
     # Phase 72: AEGIS HUD (V1)
