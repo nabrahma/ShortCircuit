@@ -514,20 +514,24 @@ class FyersAnalyzer:
                 logger.warning(f"  MOMENTUM BLOCK {symbol} RVOL {rvol_now:.1f}x (> {rvol_thresh}x threshold)")
                 return True
             
-            # For the main 'Speed Limit', we always use the Slow (30m) trend to be safe.
-            if slope_slow > slope_thresh:
-                # Phase 90.5: Fast-Inflection Check
-                if getattr(config, 'P57_G4_SLOPE_DECAY_ENABLED', False):
-                    div_thresh = getattr(config, 'P57_G4_DIVERGENCE_SD', 1.5)
-                    is_structurally_extended = gain_pct > getattr(config, 'P60_G4_STRUCTURAL_FALLBACK_GAIN', 10.0)
-                    
-                    # If Fast Slope (5m) is dropping below Slow Slope (30m), allow the trade!
-                    if slope_fast < (slope_slow * 0.90) and (vwap_sd > div_thresh or is_structurally_extended):
-                        logger.info(f"✅ [MOMENTUM DECAY] {symbol} allowed via Inflection (Fast:{slope_fast:.2f} < Slow:{slope_slow:.2f})")
-                        return False
-
-                logger.warning(f"  MOMENTUM BLOCK {symbol} Slow Slope {slope_slow:.1f} (> {slope_thresh} threshold)")
-                return True
+            # Phase 90.8: Removed hard 3.0 Slow Slope cap.
+            # We now rely entirely on the 'Inflection' (Fast < Slow) logic below.
+            
+            # Phase 90.5: Fast-Inflection Check
+            if getattr(config, 'P57_G4_SLOPE_DECAY_ENABLED', False):
+                div_thresh = getattr(config, 'P57_G4_DIVERGENCE_SD', 1.5)
+                is_structurally_extended = gain_pct > getattr(config, 'P60_G4_STRUCTURAL_FALLBACK_GAIN', 10.0)
+                
+                # If Fast Slope (5m) is dropping below Slow Slope (30m), allow the trade!
+                # We use a 10% decay (0.90) to confirm the turn.
+                if slope_fast < (slope_slow * 0.90) and (vwap_sd > div_thresh or is_structurally_extended):
+                    logger.info(f"✅ [MOMENTUM DECAY] {symbol} allowed via Inflection (Fast:{slope_fast:.2f} < Slow:{slope_slow:.2f})")
+                    return False
+                
+                # If slope is very high (>3.0) but NOT inflected yet, we block it.
+                if slope_slow > slope_thresh:
+                    logger.warning(f"  MOMENTUM BLOCK {symbol} Slow Slope {slope_slow:.1f} (> {slope_thresh} threshold) - NOT INFLECTED")
+                    return True
 
         except Exception:
             pass
