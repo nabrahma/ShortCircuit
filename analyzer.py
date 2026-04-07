@@ -393,9 +393,9 @@ class FyersAnalyzer:
                 signal_meta['confidence'] = 'HIGH'
                 signal_meta['pattern_bonus'] = 'VERSION_A'
                 pattern_desc = 'A_EXHAUSTION_SCALP'
-                logger.info(f"✅ [VERSION A] {symbol} — gain {gain_pct:.1f}%, SD {vwap_sd:.2f}, decay confirmed. Routing to G9.")
+                logger.info(f"✅ [VERSION A] {symbol} — gain {gain_pct:.1f}%, SD {vwap_sd:.2f}, decay confirmed. Firing signal.")
 
-            # Version A/A+: Bypass G5 + G6, go straight to G9
+            # Version A/A+: Bypass G5 + G6
             gr.g5_pass = True
             gr.g5_value = 1.0
             gr.g6_pass = True
@@ -403,31 +403,35 @@ class FyersAnalyzer:
             get_dashboard_bridge().broadcast("GATE_UPDATE", {"gate": "G5", "status": "BYPASS"})
             get_dashboard_bridge().broadcast("GATE_UPDATE", {"gate": "G6", "status": "BYPASS"})
 
-            # Jump to G9 directly
-            import concurrent.futures as _cf
-            try:
-                with _cf.ThreadPoolExecutor(max_workers=1) as _htf_exec:
-                    _htf_future = _htf_exec.submit(self.htf_confluence.check_trend_exhaustion, symbol, df_15m=df_15m, vwap_sd=vwap_sd)
-                    htf_ok, htf_msg = _htf_future.result(timeout=1.5)
-            except Exception as e:
-                htf_ok, htf_msg = True, f"HTF_BYPASS:{e}"
+            if is_post_target:
+                # Version A+: G9 HTF required — extra confluence before bonus trade
+                import concurrent.futures as _cf
+                try:
+                    with _cf.ThreadPoolExecutor(max_workers=1) as _htf_exec:
+                        _htf_future = _htf_exec.submit(self.htf_confluence.check_trend_exhaustion, symbol, df_15m=df_15m, vwap_sd=vwap_sd)
+                        htf_ok, htf_msg = _htf_future.result(timeout=1.5)
+                except Exception as e:
+                    htf_ok, htf_msg = True, f"HTF_BYPASS:{e}"
 
-            gr.g9_pass  = htf_ok
-            gr.g9_value = htf_msg
-            get_dashboard_bridge().broadcast("GATE_UPDATE", {"gate": "G9", "status": "PASS" if htf_ok else "FAIL", "value": htf_msg})
+                gr.g9_pass  = htf_ok
+                gr.g9_value = htf_msg
+                get_dashboard_bridge().broadcast("GATE_UPDATE", {"gate": "G9", "status": "PASS" if htf_ok else "FAIL", "value": htf_msg})
 
-            # Auto-promote A+ to EXTREME on G9 stall confirmation
-            if htf_ok and is_post_target:
-                logger.info(f"⭐ [PROMOTED A+] {symbol} — G9 HTF stall confirmed on post-target EXTREME setup")
+                if htf_ok:
+                    logger.info(f"⭐ [PROMOTED A+] {symbol} — G9 HTF stall confirmed. EXTREME trade cleared.")
+                else:
+                    gr.verdict = "REJECTED"
+                    gr.first_fail_gate = "G9_HTF_CONFLUENCE"
+                    gr.rejection_reason = f"[A+] HTF blocked: {htf_msg}"
+                    grl.record(gr)
+                    return None
+            else:
+                # Version A: G9 skipped — decay on 5m/30m is sufficient for 1% scalp
+                gr.g9_pass  = True
+                gr.g9_value = "G9_SKIPPED_VERSION_A"
+                get_dashboard_bridge().broadcast("GATE_UPDATE", {"gate": "G9", "status": "BYPASS"})
 
-            if not htf_ok:
-                gr.verdict = "REJECTED"
-                gr.first_fail_gate = "G9_HTF_CONFLUENCE"
-                gr.rejection_reason = f"HTF blocked: {htf_msg}"
-                grl.record(gr)
-                return None
-
-            # Skip the rest of the standard G5→G9 block — go to G8
+            # G8: Signal Manager cooldown + daily target gate
             can_signal_v, sm_reason_v = self.signal_manager.can_signal(symbol, confidence=signal_meta.get('confidence', ''))
             gr.g8_pass = can_signal_v
             if not can_signal_v:
@@ -447,6 +451,7 @@ class FyersAnalyzer:
             grl.record(gr)
             return base_signal
         # ── End Phase 92 Fast Path ─────────────────────────────────────
+
 
         # ── G5: Gate 5 — Exhaustion at Stretch ──────────────────────
 
