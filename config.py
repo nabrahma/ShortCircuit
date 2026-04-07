@@ -128,7 +128,7 @@ P66_G4_DECAY_SD_THRESHOLD = 2.0
 P65_AMT_ENABLED = True
 P65_G7_CLIMAX_WINDOW_START = "09:30"
 P65_G7_SAFE_TRADE_START = "10:00"
-P65_G7_CLIMAX_SD_THRESHOLD = 3.0
+P65_G7_CLIMAX_SD_THRESHOLD = 2.5   # Phase 92: Lowered 3.0 → 2.5 to catch KOPRAN-type decaying setups in climax window
 P65_G7_VOLUME_Z_SCORE_THRESHOLD = 2.0
 
 P65_G1_NET_GAIN_THRESHOLD = 7.5
@@ -144,6 +144,22 @@ P66_G1_ROTATION_THRESHOLD_PCT: float = 0.030
 
 # Phase 90.7: Adaptive Volume Fade (Absorption Threshold)
 P90_G5_DECAY_VOL_RELAXATION = 0.85
+
+# ============================================================================
+# PHASE 92: TWO-TIER EXHAUSTION SCALPER
+# ============================================================================
+# Version A: Normal trading mode (pre-5% daily goal)
+# Simpler 6-condition gate — catches KOPRAN/FIRSTCRY type exhaustion scalps
+P92_VERSION_A_ENABLED = True
+P92_VA_MIN_GAIN = 10.0            # Raise from 7.5/9.0 → 10.0% (genuine extreme only)
+P92_VA_MIN_SD = 2.5               # Raise from 2.0 → 2.5 (statistically extended)
+P92_VA_BYPASS_G5_G6 = True        # Skip exhaustion composite + confluence scoring for 1% scalps
+
+# Version A+: Post-5% goal (EXTREME confidence only, higher conviction required)
+P92_VA_PLUS_MIN_GAIN = 13.0       # Only extreme runners (99th percentile intraday)
+P92_VA_PLUS_MIN_SD = 3.5          # Leung & Li: maximum OU reversion pull
+P92_VA_PLUS_REQUIRE_NARROWING_HIGHS = True   # Last 3 candles each lower high = distribution
+P92_VA_PLUS_RVOL_FADE_RATIO = 0.5            # Current RVOL < 50% of session peak = buyers gone
 
 # ============================================================================
 # PHASE 79: LEVERAGE GUARD (G14)

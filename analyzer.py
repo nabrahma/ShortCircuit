@@ -75,6 +75,7 @@ class FyersAnalyzer:
         self.tape_reader = TapeReader()
         self.profile_analyzer = ProfileAnalyzer()
         self.oi_history = {} # Symbol -> deque of (timestamp, oi, price) use deque(maxlen=20)
+        self._session_peak_rvol: dict = {}  # Phase 92: symbol → peak RVOL seen this session
 
     def get_history(self, symbol: str, interval: str = "1") -> Optional[pd.DataFrame]:
         """
@@ -325,7 +326,130 @@ class FyersAnalyzer:
             grl.record(gr)
             return None
 
+        # ── Phase 92: Version A / A+ Fast Path ────────────────────────
+        # Bypasses G5 exhaustion composite + G6 confluence scoring.
+        # For 1% exhaustion scalps, the Decay (G4) + SD + Gain ARE the signal.
+        if getattr(config, 'P92_VERSION_A_ENABLED', False) and is_decaying:
+            is_post_target = self._is_post_daily_target()
+
+            if is_post_target:
+                # ── Version A+: Post-5% goal. Stricter. EXTREME only. ──
+                va_plus_gain = getattr(config, 'P92_VA_PLUS_MIN_GAIN', 13.0)
+                va_plus_sd   = getattr(config, 'P92_VA_PLUS_MIN_SD', 3.5)
+
+                if gain_pct < va_plus_gain:
+                    gr.verdict = "REJECTED"
+                    gr.first_fail_gate = "G1_GAIN_CONSTRAINTS"
+                    gr.rejection_reason = f"[A+] Gain {gain_pct:.1f}% < {va_plus_gain}% required post-target"
+                    grl.record(gr)
+                    return None
+
+                if vwap_sd < va_plus_sd:
+                    gr.verdict = "REJECTED"
+                    gr.first_fail_gate = "G2_SD_INSUFFICIENT"
+                    gr.rejection_reason = f"[A+] SD {vwap_sd:.2f} < {va_plus_sd} required post-target"
+                    grl.record(gr)
+                    return None
+
+                if getattr(config, 'P92_VA_PLUS_REQUIRE_NARROWING_HIGHS', True):
+                    if not self._check_narrowing_highs(df):
+                        gr.verdict = "REJECTED"
+                        gr.first_fail_gate = "G5_NARROWING_HIGHS"
+                        gr.rejection_reason = "[A+] Distribution pattern not confirmed (no narrowing highs)"
+                        grl.record(gr)
+                        return None
+
+                if not self._check_rvol_fade(symbol, df):
+                    gr.verdict = "REJECTED"
+                    gr.first_fail_gate = "G5_RVOL_FADE"
+                    gr.rejection_reason = "[A+] RVOL not fading from session peak (buyers still active)"
+                    grl.record(gr)
+                    return None
+
+                signal_meta['confidence'] = 'EXTREME'
+                signal_meta['pattern_bonus'] = 'VERSION_A_PLUS'
+                pattern_desc = 'A+_EXHAUSTION_SCALP'
+                logger.info(f"⭐ [VERSION A+] {symbol} — post-target, all checks passed. EXTREME.")
+
+            else:
+                # ── Version A: Normal trading mode. Clean 6-condition path. ──
+                va_gain = getattr(config, 'P92_VA_MIN_GAIN', 10.0)
+                va_sd   = getattr(config, 'P92_VA_MIN_SD', 2.5)
+
+                if gain_pct < va_gain:
+                    gr.verdict = "REJECTED"
+                    gr.first_fail_gate = "G1_GAIN_CONSTRAINTS"
+                    gr.rejection_reason = f"[A] Gain {gain_pct:.1f}% < {va_gain}% required"
+                    grl.record(gr)
+                    return None
+
+                if vwap_sd < va_sd:
+                    gr.verdict = "REJECTED"
+                    gr.first_fail_gate = "G2_SD_INSUFFICIENT"
+                    gr.rejection_reason = f"[A] SD {vwap_sd:.2f} < {va_sd} required"
+                    grl.record(gr)
+                    return None
+
+                signal_meta['confidence'] = 'HIGH'
+                signal_meta['pattern_bonus'] = 'VERSION_A'
+                pattern_desc = 'A_EXHAUSTION_SCALP'
+                logger.info(f"✅ [VERSION A] {symbol} — gain {gain_pct:.1f}%, SD {vwap_sd:.2f}, decay confirmed. Routing to G9.")
+
+            # Version A/A+: Bypass G5 + G6, go straight to G9
+            gr.g5_pass = True
+            gr.g5_value = 1.0
+            gr.g6_pass = True
+            gr.g6_value = "+A_BYPASS"
+            get_dashboard_bridge().broadcast("GATE_UPDATE", {"gate": "G5", "status": "BYPASS"})
+            get_dashboard_bridge().broadcast("GATE_UPDATE", {"gate": "G6", "status": "BYPASS"})
+
+            # Jump to G9 directly
+            import concurrent.futures as _cf
+            try:
+                with _cf.ThreadPoolExecutor(max_workers=1) as _htf_exec:
+                    _htf_future = _htf_exec.submit(self.htf_confluence.check_trend_exhaustion, symbol, df_15m=df_15m, vwap_sd=vwap_sd)
+                    htf_ok, htf_msg = _htf_future.result(timeout=1.5)
+            except Exception as e:
+                htf_ok, htf_msg = True, f"HTF_BYPASS:{e}"
+
+            gr.g9_pass  = htf_ok
+            gr.g9_value = htf_msg
+            get_dashboard_bridge().broadcast("GATE_UPDATE", {"gate": "G9", "status": "PASS" if htf_ok else "FAIL", "value": htf_msg})
+
+            # Auto-promote A+ to EXTREME on G9 stall confirmation
+            if htf_ok and is_post_target:
+                logger.info(f"⭐ [PROMOTED A+] {symbol} — G9 HTF stall confirmed on post-target EXTREME setup")
+
+            if not htf_ok:
+                gr.verdict = "REJECTED"
+                gr.first_fail_gate = "G9_HTF_CONFLUENCE"
+                gr.rejection_reason = f"HTF blocked: {htf_msg}"
+                grl.record(gr)
+                return None
+
+            # Skip the rest of the standard G5→G9 block — go to G8
+            can_signal_v, sm_reason_v = self.signal_manager.can_signal(symbol, confidence=signal_meta.get('confidence', ''))
+            gr.g8_pass = can_signal_v
+            if not can_signal_v:
+                gr.verdict = "REJECTED"
+                gr.first_fail_gate = "G8_SIGNAL_MANAGER"
+                gr.rejection_reason = sm_reason_v
+                grl.record(gr)
+                return None
+
+            gr.verdict = "ANALYZER_PASS"
+            base_signal = self._finalize_signal(symbol, ltp, df, pattern_desc, slope_now, "", signal_meta)
+            if base_signal is None:
+                gr.verdict = "DATA_ERROR"
+                grl.record(gr)
+                return None
+            base_signal['_gate_result'] = gr
+            grl.record(gr)
+            return base_signal
+        # ── End Phase 92 Fast Path ─────────────────────────────────────
+
         # ── G5: Gate 5 — Exhaustion at Stretch ──────────────────────
+
         if profile is None:
             gr.g5_pass = False
             gr.verdict = "REJECTED"
@@ -511,8 +635,17 @@ class FyersAnalyzer:
             slope_thresh = config.P51_G4_SLOPE_MIN if config.PHASE_51_ENABLED else 3.0
             
             if rvol_now > rvol_thresh:
-                logger.warning(f"  MOMENTUM BLOCK {symbol} RVOL {rvol_now:.1f}x (> {rvol_thresh}x threshold)")
-                return True
+                # Phase 92: High RVOL = CLIMAX signal. Track the peak.
+                # Version A treats this as confirmation, not a blocker.
+                if rvol_now > self._session_peak_rvol.get(symbol, 0):
+                    self._session_peak_rvol[symbol] = rvol_now
+                    logger.info(f"📈 [CLIMAX] {symbol} New session RVOL peak: {rvol_now:.1f}x — tracking for fade detection")
+
+                if not getattr(config, 'P92_VERSION_A_ENABLED', False):
+                    # Legacy mode: block high RVOL (old behavior)
+                    logger.warning(f"  MOMENTUM BLOCK {symbol} RVOL {rvol_now:.1f}x (> {rvol_thresh}x threshold)")
+                    return True
+                # Version A: allow through — RVOL peak is tracked, fade checked later
             
             # Phase 90.8: Removed hard 3.0 Slow Slope cap.
             # We now rely entirely on the 'Inflection' (Fast < Slow) logic below.
@@ -546,6 +679,52 @@ class FyersAnalyzer:
         prev_close = df.iloc[-2]['close']
         range_pos = (prev_close - micro_low) / denom
         return range_pos > 0.70
+
+    def _check_narrowing_highs(self, df: pd.DataFrame) -> bool:
+        """
+        Phase 92 [Version A+]: Detects distribution pattern.
+        Last 3 completed candles each have a lower high than the previous.
+        Murphy: This is the 'staircase down' that precedes institutional selling.
+        """
+        if len(df) < 4:
+            return False
+        h1 = df['high'].iloc[-2]   # most recent complete candle
+        h2 = df['high'].iloc[-3]
+        h3 = df['high'].iloc[-4]
+        return h1 < h2 < h3
+
+    def _check_rvol_fade(self, symbol: str, df: pd.DataFrame) -> bool:
+        """
+        Phase 92 [Version A+]: Buyers are gone.
+        Current RVOL must be < 50% of the session peak RVOL for this symbol.
+        Leung & Li: No supply absorption = maximum reversion pull.
+        """
+        peak = self._session_peak_rvol.get(symbol, 0)
+        if peak == 0:
+            return True  # No peak tracked yet — don't block
+        try:
+            avg_vol = df['volume'].iloc[-20:-1].mean()
+            curr_rvol = df['volume'].iloc[-1] / avg_vol if avg_vol > 0 else 0
+            fade_ratio = getattr(__import__('config'), 'P92_VA_PLUS_RVOL_FADE_RATIO', 0.5)
+            return curr_rvol < (peak * fade_ratio)
+        except Exception:
+            return True  # Fail open — don't block on data errors
+
+    def _is_post_daily_target(self) -> bool:
+        """
+        Phase 92: Returns True if the daily P&L target has been reached.
+        Triggers Version A+ mode (stricter thresholds, EXTREME confidence only).
+        """
+        try:
+            import config
+            daily_target = getattr(config, 'DAILY_TARGET_INR', 0)
+            if daily_target == -1:
+                daily_target = self.signal_manager.daily_target_inr
+            return daily_target > 0 and self.signal_manager.daily_pnl >= daily_target
+        except Exception:
+            return False
+
+
 
     def _check_pro_confluence(self, symbol, df, prev_df, slope, is_extended, vwap_sd, pattern_desc, depth_data=None, ltp=0, oi=0, signal_meta=None) -> Tuple[bool, list]:
         """Verifies secondary confirmation signals."""
