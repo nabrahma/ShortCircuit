@@ -24,6 +24,13 @@ class HTFConfluence:
         """
         today = datetime.date.today().strftime("%Y-%m-%d")
         
+        now = _time.time()
+        if not hasattr(self, '_last_range_fetch_time'):
+            self._last_range_fetch_time = 0.0
+        if now - self._last_range_fetch_time < 600:  # Phase 91: Increased TTL to 600s to prevent 429 rate limits
+            return None
+        self._last_range_fetch_time = now
+        
         data = {
             "symbol": symbol,
             "resolution": interval,
@@ -38,6 +45,10 @@ class HTFConfluence:
             if response.get('s') == 'ok' and response.get('candles'):
                 candles = response['candles']
                 df = pd.DataFrame(candles, columns=['t', 'o', 'h', 'l', 'c', 'v'])
+                # Phase 91: Guard against malformed responses
+                if 'c' not in df.columns or len(df) < 3:
+                    logger.warning(f"G9: HTF data malformed for {symbol} — skipping")
+                    return None
                 df['t'] = pd.to_datetime(df['t'], unit='s')
                 return df
         except Exception as e:

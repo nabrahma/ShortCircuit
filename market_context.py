@@ -139,7 +139,7 @@ class MarketContext:
         now = _time.time()
         if not hasattr(self, '_last_range_fetch_time'):
             self._last_range_fetch_time = 0.0
-        if now - self._last_range_fetch_time < 300:
+        if now - self._last_range_fetch_time < 600:  # Phase 91: Increased from 300s → 600s to prevent Fyers 429 rate limits
             return
         self._last_range_fetch_time = now
 

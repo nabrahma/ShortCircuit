@@ -470,6 +470,7 @@ async def _trading_loop(shutdown_event: asyncio.Event, ctx: RuntimeContext):
 
             # Phase 89.6: Parallelized Analysis
             async def run_analysis(cand):
+                import config  # Phase 91: Thread-safe local import
                 signal = await asyncio.to_thread(
                     ctx.analyzer.check_setup,
                     cand["symbol"],
