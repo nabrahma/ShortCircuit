@@ -133,25 +133,12 @@ class FyersAnalyzer:
         gr = GateResult(symbol=symbol, scan_id=scan_id, data_tier=data_tier)
         signal_meta = {}
 
-        # ── G1+G2: Data Fetching & Enrichment (Phase 65 Order) ───────
-        # Phase 89.6 Override: Leverage check moved from Scanner to Analyzer for speed
-        if self.broker:
-            leverage = self.broker.get_symbol_leverage_sync(symbol, ltp)
-            if leverage < getattr(config, 'MIN_LEVERAGE', 5.0):
-                gr.g2_pass = False
-                gr.g2_value = leverage
-                gr.verdict = "REJECTED"
-                gr.first_fail_gate = "G2_LEVERAGE"
-                gr.rejection_reason = f"Low Leverage: {leverage}x (Min: {getattr(config, 'MIN_LEVERAGE', 5.0)}x)"
-                logger.warning(f"SKIP {symbol} — {gr.rejection_reason}")
-                
-                # Phase 89.7: Session-long block ONLY if leverage is confirmed (not an error)
-                if leverage > 0.0 and hasattr(self.broker, '_low_leverage_blacklist'):
-                    self.broker._low_leverage_blacklist.add(symbol)
-                    logger.info(f"🚫 [BLACKLIST] {symbol} (Permanent for session)")
-                    
-                grl.record(gr)
-                return None
+
+        # Phase 91.2: Leverage check removed — intraday stocks get auto-leverage from Fyers.
+        # If Fyers rejects at order time, the exception is handled in order_manager.
+        # Pre-filtering here added API latency and blocked valid exhaustion candidates.
+
+
 
         if pre_fetched_df is not None:
              df = pre_fetched_df
@@ -1192,8 +1179,10 @@ class FyersAnalyzer:
         return base_signal
     def _finalize_signal(self, symbol, ltp, df, pattern_desc, slope, wall_msg, signal_meta: dict = None):
         """Calculates SL, builds signal dict, logs to signal log and ML. Pure — no gate checks."""
+        import config  # Phase 91.2: Thread-safe local import — prevents NameError in asyncio.to_thread
         if signal_meta is None: signal_meta = {}
         level_msg = "" # Legacy hook
+
 
         # Calculate Stop Loss (ATR)
         atr = self.gm_analyst.calculate_atr(df)

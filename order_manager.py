@@ -468,25 +468,12 @@ class OrderManager:
                 self._set_exec_cooldown(symbol, reason='LTP_ZERO', seconds=300)
                 return None
 
-            # ── PHASE 79: G14 Leverage Guard ──────────────────────────────
-            if getattr(config, 'P79_G14_LEVERAGE_GUARD_ENABLED', True):
-                leverage = await self.broker.get_symbol_leverage(symbol, ltp)
-                min_lev = getattr(config, 'P79_G14_MIN_LEVERAGE', 4.5)
-                
-                if leverage < min_lev:
-                    logger.info(f"[G14_REJECT] {symbol} — Leverage {leverage}x < {min_lev}x requirement")
-                    if self.telegram:
-                        await self.telegram.send_alert(
-                            f"🚫 **REJECTED (G14)**\n\n"
-                            f"Symbol: `{symbol}`\n"
-                            f"Reason:  **Low Leverage Guard**\n"
-                            f"Lev:     {leverage}x\n"
-                            f"MinReq:  {min_lev}x\n\n"
-                            f"Stock requires too much margin (CNC/Reduced Leverage). Skipping."
-                        )
-                    self._set_exec_cooldown(symbol, reason='G14_LOW_LEVERAGE', seconds=43200) # 12-hour session blacklist
-                    return None
-                logger.info(f"✅ [G14_PASS] {symbol} leverage {leverage}x verified.")
+
+            # Phase 91.2: G14 Leverage Guard removed.
+            # For intraday (MIS) orders, Fyers assigns leverage automatically.
+            # If a stock doesn't qualify, Fyers throws an API error caught below.
+
+
 
             if self.capital:
                 qty, required_capital, margin_req = self.capital.compute_qty(symbol, ltp)
