@@ -205,7 +205,7 @@ class FocusEngine:
                         self.add_pending_signal(meta['data'])
                     else:
                         logger.info(f"DROPPED {symbol} from pending — gain {gain:.2f}% < threshold")
-                    
+                        
                 del self.cooldown_signals[symbol]
 
     def start_pending_monitor(self):

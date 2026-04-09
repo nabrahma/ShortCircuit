@@ -414,9 +414,9 @@ async def _trading_loop(shutdown_event: asyncio.Event, ctx: RuntimeContext):
                     last_sync = last_sync.replace(tzinfo=UTC)
                 if (now_utc - last_sync).total_seconds() > 300:
                     try:
-                        await asyncio.wait_for(ctx.capital_manager.sync(ctx.broker), timeout=30.0)
+                        await asyncio.wait_for(ctx.capital_manager.sync(ctx.broker), timeout=60.0) # Phase 91.3: Increased from 30s
                     except asyncio.TimeoutError:
-                        logger.error("[RESILIENCE] Capital sync timed out after 30s. Skipping.")
+                        logger.error("[RESILIENCE] Capital sync timed out after 60s. Skipping.")
                     except Exception as e:
                         logger.error(f"[RESILIENCE] Capital sync failed: {e}")
             if not ctx.market_session.should_trade_now():
@@ -443,10 +443,10 @@ async def _trading_loop(shutdown_event: asyncio.Event, ctx: RuntimeContext):
             try:
                 candidates = await asyncio.wait_for(
                     asyncio.to_thread(ctx.scanner.scan_market),
-                    timeout=45.0
+                    timeout=90.0
                 )
             except asyncio.TimeoutError:
-                logger.error("[RESILIENCE] Scanning timed out after 45s. Skipping iteration.")
+                logger.error("[RESILIENCE] Scanning timed out after 90s. Skipping iteration.")
                 candidates = []
             except Exception as e:
                 logger.error(f"[RESILIENCE] Scanning error: {e}")
@@ -691,7 +691,6 @@ async def _run_startup_validation(ctx: RuntimeContext) -> None:
 
 
 async def main() -> int:
-    import config
     _configure_logging()
 
     # Phase 72: AEGIS HUD (V1)

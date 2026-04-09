@@ -7,6 +7,7 @@ import logging
 import threading
 from datetime import datetime, timedelta
 from collections import defaultdict
+import config
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +27,6 @@ class SignalManager:
         self.last_signal_time = {}  # symbol -> datetime
         
         # PnL tracking for auto-pause (Phase 69)
-        import config
         self.daily_pnl = 0.0
         self.max_session_loss = getattr(config, 'MAX_SESSION_LOSS_INR', 500.0)
         self.is_paused = False
@@ -95,7 +95,6 @@ class SignalManager:
             # ── Daily Target Gate ─────────────────────────────────────────────
             # Once daily profit ≥ target, only EXTREME / MAX_CONVICTION allowed.
             # Favor dynamic_target_inr if config is set to -1.
-            
             daily_target = getattr(config, 'DAILY_TARGET_INR', 0)
             if daily_target == -1:
                 daily_target = self.daily_target_inr
@@ -130,7 +129,6 @@ class SignalManager:
             stop_loss: Stop loss price
             pattern: Pattern name
         """
-        import config
         with self._lock:
             self._reset_if_new_day()
             now = datetime.now()

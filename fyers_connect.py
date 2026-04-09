@@ -157,7 +157,13 @@ class FyersConnect:
         if response.get('s') == 'ok':
             return response['access_token']
         else:
-            raise ConnectionError(f"Fyers token generation failed: {response}")
+            # Phase 91.3: If token generation fails, clear the bad token file and env var
+            logger.error(f"Fyers token generation failed: {response}")
+            if TOKEN_FILE.exists():
+                TOKEN_FILE.unlink()
+            if "FYERS_ACCESS_TOKEN" in os.environ:
+                del os.environ["FYERS_ACCESS_TOKEN"]
+            raise ConnectionError(f"Fyers token generation failed: {response}. Bad token cleared, please try again.")
 
     def _build_fyers_client(self, access_token: str):
         """Build and return authenticated Fyers client."""

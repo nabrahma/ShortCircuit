@@ -2,6 +2,7 @@ import pandas as pd
 import logging
 from fyers_connect import FyersConnect
 import time
+import config
 
 logger = logging.getLogger(__name__)
 
@@ -101,7 +102,7 @@ class FyersScanner:
         - PASSES if insufficient data (don't reject liquid stocks due to API lag).
         """
         try:
-            import config
+            # No local import needed anymore
             import datetime as _dt
             
             # --- Phase 82: Local Candle Engine ---
@@ -145,7 +146,7 @@ class FyersScanner:
                 self._candle_debug_done = True
             
             # Check Time: If < 10:00 AM, we won't have many candles (Market opens 09:15)
-            import config
+            # No local import needed anymore
             now_dt = _dt.datetime.now()
             is_early_morning = now_dt.hour < 10
             
@@ -178,12 +179,37 @@ class FyersScanner:
                         
                 zero_vol_ratio = zero_vol / total
                 
-                # Threshold: If > 50% have zero volume, it's illiquid/choppy
+                # Threshold 1: If > 50% have zero volume, it's illiquid/choppy
                 if zero_vol_ratio > 0.5:
                     reject_pct = int(zero_vol_ratio*100)
-                    logger.warning(f"[SKIP] Quality Reject: {symbol} | Zero Volume: {reject_pct}%")
+                    logger.warning(f"[SKIP] Quality Reject (Liquid): {symbol} | Zero Volume: {reject_pct}%")
                     self.quality_reject_counts[symbol] = self.quality_reject_counts.get(symbol, 0) + 1
                     return False, None, None
+                
+                # Threshold 2 (Phase 91.3): Candle Body Ratio (Filters choppy/wick-heavy charts)
+                # Calculates avg(body/range) over the last 10 candles to ensure 'clean' movement.
+                try:
+                    recent_candles = candles[-10:]
+                    ratios = []
+                    for c in recent_candles:
+                        o, h, l, cl = c[1], c[2], c[3], c[4]
+                        candle_range = h - l
+                        body = abs(cl - o)
+                        if candle_range > 0:
+                            ratios.append(body / candle_range)
+                        else:
+                            ratios.append(0)
+                    
+                    avg_body_ratio = sum(ratios) / len(ratios) if ratios else 0
+                    min_ratio = getattr(config, 'CANDLE_BODY_RATIO_MIN', 0.25)
+                    
+                    if avg_body_ratio < min_ratio:
+                        logger.warning(f"[SKIP] Quality Reject (Dirty): {symbol} | Avg Body Ratio: {avg_body_ratio:.2f} < {min_ratio}")
+                        self.quality_reject_counts[symbol] = self.quality_reject_counts.get(symbol, 0) + 1
+                        return False, None, None
+                        
+                except Exception as e:
+                    logger.warning(f"Error calculating body ratio for {symbol} (non-fatal): {e}")
                     
                 # Return Success AND the Dataframe (Reuse Strategy)
                 cols = ["epoch", "open", "high", "low", "close", "volume"]
@@ -242,7 +268,7 @@ class FyersScanner:
                 self.broker.reset_degraded_scan_count()
 
         from concurrent.futures import ThreadPoolExecutor, as_completed
-        import config
+        # No local import needed anymore
 
         if not self.symbols:
             self.symbols = self.fetch_nse_symbols()

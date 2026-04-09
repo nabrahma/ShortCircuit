@@ -490,7 +490,7 @@ class ShortCircuitBot:
     # ════════════════════════════════════════════════════════════
     async def _cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """/start — Welcome message."""
-        import config
+        # Removed local import config
         if not self._is_authorized(update):
             return
         mode_str = "🟢 AUTO" if self._auto_mode else "🔴 ALERT ONLY"
@@ -536,7 +536,7 @@ class ShortCircuitBot:
         )
     async def _cmd_auto_off(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """/auto off — Disable auto trading."""
-        import config
+        # Removed local import config
         if not self._is_authorized(update):
             await update.message.reply_text("⛔ Unauthorized.")
             return
@@ -565,7 +565,7 @@ class ShortCircuitBot:
         await update.message.reply_text(text, parse_mode='HTML')
     async def _cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """/status — Full system health snapshot (Live Sync)."""
-        import config
+        # Removed local import config
         if not self._is_authorized(update):
             return
 
@@ -643,7 +643,7 @@ class ShortCircuitBot:
         await update.message.reply_text(text, parse_mode='HTML')
     async def _cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """/help"""
-        import config
+        # Removed local import config
         if not self._is_authorized(update):
             return
         await update.message.reply_text(
@@ -660,7 +660,7 @@ class ShortCircuitBot:
 
     async def _cmd_stop(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """/stop — Request bot termination with confirmation."""
-        import config
+        # Removed local import config
         if not self._is_authorized(update):
             return
         

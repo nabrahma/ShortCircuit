@@ -128,7 +128,7 @@ class FyersAnalyzer:
     def check_setup(self, symbol: str, ltp: float, oi: float = 0, pre_fetched_df: Optional[pd.DataFrame] = None,
                     df_15m: Optional[pd.DataFrame] = None, # Phase 51
                     scan_id: int = 0, data_tier: str = "UNKNOWN") -> Optional[Dict[str, Any]]:
-        import config
+        # Removed local import config
         grl = get_gate_result_logger()
         gr = GateResult(symbol=symbol, scan_id=scan_id, data_tier=data_tier)
         signal_meta = {}
@@ -615,7 +615,7 @@ class FyersAnalyzer:
 
     def _is_momentum_too_strong(self, df: pd.DataFrame, slope_fast: float, slope_slow: float, vwap_sd: float, symbol: str, gain_pct: float = 0.0) -> bool:
         """Checks if momentum is too strong to short (Dual-Window)."""
-        import config
+        # Removed local import config
         try:
             recent_vols = df['volume'].iloc[-20:-1]
             avg_v  = recent_vols.mean()
@@ -708,7 +708,7 @@ class FyersAnalyzer:
         Triggers Version A+ mode (stricter thresholds, EXTREME confidence only).
         """
         try:
-            import config
+            # Removed local import config
             daily_target = getattr(config, 'DAILY_TARGET_INR', 0)
             if daily_target == -1:
                 daily_target = self.signal_manager.daily_target_inr
@@ -720,7 +720,7 @@ class FyersAnalyzer:
 
     def _check_pro_confluence(self, symbol, df, prev_df, slope, is_extended, vwap_sd, pattern_desc, depth_data=None, ltp=0, oi=0, signal_meta=None) -> Tuple[bool, list]:
         """Verifies secondary confirmation signals."""
-        import config
+        # Removed local import config
         if signal_meta is None: signal_meta = {}
         pro_conf = []
         
@@ -1179,7 +1179,7 @@ class FyersAnalyzer:
         return base_signal
     def _finalize_signal(self, symbol, ltp, df, pattern_desc, slope, wall_msg, signal_meta: dict = None):
         """Calculates SL, builds signal dict, logs to signal log and ML. Pure — no gate checks."""
-        import config  # Phase 91.2: Thread-safe local import — prevents NameError in asyncio.to_thread
+        # Removed local import config
         if signal_meta is None: signal_meta = {}
         level_msg = "" # Legacy hook
 

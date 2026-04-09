@@ -42,8 +42,9 @@ VALIDATION_TIMEOUT_MINUTES = 15
 # Gain Floors & Limits
 SCANNER_GAIN_MIN_PCT: float = 7.5  # Phase 65: Synchronized with P65_G1 floor
 SCANNER_GAIN_MAX_PCT: float = 18.0 # Protection against upper-circuit runners
-SCANNER_MIN_VOLUME:   int   = 100000 # Minimum liquidity floor
+SCANNER_MIN_VOLUME:   int   = 333333 # Phase 91.3: Adjusted to 333K as requested
 SCANNER_MIN_LTP:      float = 40.0   # Filter sub-₹40 manipulation vehicles
+CANDLE_BODY_RATIO_MIN: float = 0.3    # Phase 91.3: Reject if avg (body/range) < 0.3
 
 # G5 Stretch Thresholds
 G5_STRETCH_LOW_PCT:  float = 7.5   # Synchronized with Scanner Min
@@ -51,7 +52,7 @@ G5_STRETCH_HIGH_PCT: float = 14.5
 DAY_GAIN_PCT_THRESHOLD = 7.5       # Duplicate alias used in legacy paths
 
 # Operations
-SCANNER_PARALLEL_WORKERS = 3
+SCANNER_PARALLEL_WORKERS = 10 # Phase 91.3: Increased from 3 to 10 for faster history fetching
 WS_TICK_FRESHNESS_TTL_SECONDS = 180.0
 
 # ============================================================================
