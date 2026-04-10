@@ -162,6 +162,10 @@ P92_VA_PLUS_MIN_SD = 3.5          # Leung & Li: maximum OU reversion pull
 P92_VA_PLUS_REQUIRE_NARROWING_HIGHS = True   # Last 3 candles each lower high = distribution
 P92_VA_PLUS_RVOL_FADE_RATIO = 0.5            # Current RVOL < 50% of session peak = buyers gone
 
+# Phase 93: Unspecified Move Audit (RVOL Trends)
+P93_RVOL_SURGE_PEAK_MULT = 3.0       # Peak volume must be 3x over average (The Surge)
+P93_RVOL_SURGE_FADE_RATIO = 0.6      # Current volume must be 60% of peak (The Fade)
+
 # ============================================================================
 # PHASE 79: LEVERAGE GUARD (G14)
 # ============================================================================

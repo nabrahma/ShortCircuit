@@ -346,10 +346,13 @@ class FyersAnalyzer:
                         grl.record(gr)
                         return None
 
-                if not self._check_rvol_fade(symbol, df):
+                # ── Phase 93: Unspecified Move Audit (RVOL Trends) ──
+                # Rejects steady trend, requires Surge-and-Fade logic.
+                audit_ok, audit_msg = self._check_unspecified_move_audit(df)
+                if not audit_ok:
                     gr.verdict = "REJECTED"
-                    gr.first_fail_gate = "G5_RVOL_FADE"
-                    gr.rejection_reason = "[A+] RVOL not fading from session peak (buyers still active)"
+                    gr.first_fail_gate = "G15_UNSPECIFIED_AUDIT"
+                    gr.rejection_reason = f"[A+] Audit failed: {audit_msg}"
                     grl.record(gr)
                     return None
 
@@ -374,6 +377,15 @@ class FyersAnalyzer:
                     gr.verdict = "REJECTED"
                     gr.first_fail_gate = "G2_SD_INSUFFICIENT"
                     gr.rejection_reason = f"[A] SD {vwap_sd:.2f} < {va_sd} required"
+                    grl.record(gr)
+                    return None
+
+                # ── Phase 93: Unspecified Move Audit (RVOL Trends) ──
+                audit_ok, audit_msg = self._check_unspecified_move_audit(df)
+                if not audit_ok:
+                    gr.verdict = "REJECTED"
+                    gr.first_fail_gate = "G15_UNSPECIFIED_AUDIT"
+                    gr.rejection_reason = f"[A] Audit failed: {audit_msg}"
                     grl.record(gr)
                     return None
 
@@ -685,22 +697,49 @@ class FyersAnalyzer:
         h3 = df['high'].iloc[-4]
         return h1 < h2 < h3
 
-    def _check_rvol_fade(self, symbol: str, df: pd.DataFrame) -> bool:
+    def _check_unspecified_move_audit(self, df: pd.DataFrame) -> Tuple[bool, str]:
         """
-        Phase 92 [Version A+]: Buyers are gone.
-        Current RVOL must be < 50% of the session peak RVOL for this symbol.
-        Leung & Li: No supply absorption = maximum reversion pull.
+        Phase 93: "Unspecified Move Audit" (RVOL Trends)
+        Logic based on Vwap3.md (Overreaction occurs when news is unspecified).
+        
+        Requirement:
+        1. SURGE (Spike): Volume in last 3 candles must hit 3x the baseline average.
+        2. FADE (Decline): Current volume must be significantly lower (<60%) than that spike.
+        
+        This rejects "Steady Trend" institutional accumulations.
         """
-        peak = self._session_peak_rvol.get(symbol, 0)
-        if peak == 0:
-            return True  # No peak tracked yet — don't block
+        if len(df) < 18:
+            return True, "INSUFFICIENT_DATA" # Skip gate if history too short
+
         try:
-            avg_vol = df['volume'].iloc[-20:-1].mean()
-            curr_rvol = df['volume'].iloc[-1] / avg_vol if avg_vol > 0 else 0
-            fade_ratio = getattr(__import__('config'), 'P92_VA_PLUS_RVOL_FADE_RATIO', 0.5)
-            return curr_rvol < (peak * fade_ratio)
-        except Exception:
-            return True  # Fail open — don't block on data errors
+            # 1. Baseline: Average volume of the previous 15 candles (excluding the last 3)
+            baseline_vol = df['volume'].iloc[-18:-3].mean()
+            if baseline_vol == 0: return True, "ZERO_BASELINE"
+
+            # 2. Peak Search: Highest volume in the last 3 candles
+            recent_vols = df['volume'].iloc[-3:]
+            max_recent_vol = recent_vols.max()
+            current_vol = recent_vols.iloc[-1]
+            
+            surge_mult = getattr(config, 'P93_RVOL_SURGE_PEAK_MULT', 3.0)
+            fade_ratio = getattr(config, 'P93_RVOL_SURGE_FADE_RATIO', 0.6)
+
+            # Check for SURGE
+            surge_hit = max_recent_vol > (baseline_vol * surge_mult)
+            if not surge_hit:
+                return False, f"Steady Trend: Peak RVOL {max_recent_vol/baseline_vol:.1f}x < {surge_mult}x required"
+
+            # Check for FADE
+            fade_hit = current_vol < (max_recent_vol * fade_ratio)
+            if not fade_hit:
+                return False, f"No Fade: Curr Vol {current_vol:.0f} > {fade_ratio*100}% of spike {max_recent_vol:.0f}"
+
+            logger.info(f"⚡ [UNSPECIFIED_AUDIT] PASS: Surge({max_recent_vol/baseline_vol:.1f}x) -> Fade({current_vol/max_recent_vol:.1f}x)")
+            return True, "PASS"
+
+        except Exception as e:
+            logger.error(f"Audit Error: {e}")
+            return True, f"ERROR:{e}" # Fail open
 
     def _is_post_daily_target(self) -> bool:
         """
