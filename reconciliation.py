@@ -7,6 +7,7 @@ from database import DatabaseManager
 from fyers_broker_interface import FyersBrokerInterface
 
 logger = logging.getLogger(__name__)
+FORCE_REST_SYNC_INTERVAL = 300  # 5 minutes
 
 
 class ReconciliationEngine:
@@ -39,6 +40,7 @@ class ReconciliationEngine:
         self._db_dirty:          bool = True
         self._has_open_positions: bool = False
         self._shutdown_event:    asyncio.Event = None
+        self._last_rest_sync:    float = 0.0
         # ─────────────────────────────────────────────────────────────
 
     # ── Called by TradeManager when trade opens or closes ─────────────
@@ -113,11 +115,21 @@ class ReconciliationEngine:
 
         # ── STEP 1: Read broker cache directly (0 cost) ───────────────
         broker_open = self._read_broker_cache()
+        
+        # ── STEP 1.5: Periodic Force REST Sync ────────────────────────
+        # Guarantee recovery even if WS cache/DB flags fail
+        loop = asyncio.get_event_loop()
+        now = loop.time()
+        force_live = (now - self._last_rest_sync) > FORCE_REST_SYNC_INTERVAL
 
         # ── FAST PATH: Both sides flat ─────────────────────────────────
-        if not broker_open and not self._has_open_positions and not self._db_dirty:
+        if not force_live and not broker_open and not self._has_open_positions and not self._db_dirty:
             # Nothing on broker, nothing tracked locally, no recent updates → definitively flat
             return
+
+        if force_live:
+            logger.info("📡 [REC] Periodic Force REST Sync triggered (5-min safety).")
+            self._last_rest_sync = now
 
         # ── LIVE PATH ─────────────────────────────────────────────────
         # Broker has positions OR we think DB has positions

@@ -27,6 +27,14 @@ class DashboardBridge:
         """Must be called by main.py at startup."""
         self._loop = loop
 
+    def _safe_put_nowait(self, payload: Dict[str, Any]):
+        """Helper to safely put into queue inside the event loop."""
+        try:
+            self.queue.put_nowait(payload)
+        except (asyncio.QueueFull, Exception):
+            # Drop message if queue is full or other loop-level error occurs
+            pass
+
     def broadcast(self, message_type: str, data: Dict[str, Any]):
         """Non-blocking broadcast to all dashboard clients."""
         payload = {
@@ -40,12 +48,10 @@ class DashboardBridge:
 
         try:
             if self._loop.is_running():
-                # Correct way for sync -> async bridge with error safety
-                self._loop.call_soon_threadsafe(
-                    lambda: self.queue.put_nowait(payload)
-                )
-        except (asyncio.QueueFull, Exception):
-            # Drop older messages if UI can't keep up
+                # Scheduled via helper to catch exceptions inside the loop context
+                self._loop.call_soon_threadsafe(self._safe_put_nowait, payload)
+        except Exception:
+            # Catch errors in call_soon_threadsafe call itself
             pass
 
     def broadcast_log(self, message: str, level: str = "INFO"):

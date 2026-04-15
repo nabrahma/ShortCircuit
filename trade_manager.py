@@ -578,7 +578,16 @@ class TradeManager:
 
             for order in orders["orderBook"]:
                 if order["symbol"] == symbol and order["status"] == 6:  # Pending
-                    tick_size = 0.05
+                    # Phase 93: Derive tick from existing order's stopPrice to avoid hardcode mismatch
+                    existing_stop = order.get('stopPrice', 0)
+                    if existing_stop > 0:
+                        # Infer tick: if stopPrice is a multiple of 0.10 but not 0.05, tick is 0.10
+                        tick_size = 0.10 if (round(existing_stop * 100) % 10 == 0 and round(existing_stop * 100) % 5 == 0 and round(existing_stop * 20) % 2 != 0) else 0.05
+                        # More robust: just check if 0.05 remainder exists
+                        remainder_05 = round(existing_stop % 0.10, 4)
+                        tick_size = 0.05 if abs(remainder_05 - 0.05) < 0.001 else 0.10
+                    else:
+                        tick_size = 0.05
                     sl_trigger = self.tick_round(float(new_stop), tick_size)
                     sl_limit = self.tick_round(sl_trigger * 1.005, tick_size)
 

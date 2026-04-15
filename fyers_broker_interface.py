@@ -26,7 +26,7 @@ import json
 from pathlib import Path
 from collections import deque, defaultdict
 from dataclasses import dataclass
-from datetime import datetime, UTC
+from datetime import datetime, timedelta, UTC
 from enum import Enum
 from typing import Optional, Dict, List, Any, Callable, Set
 import time
@@ -1584,14 +1584,30 @@ class FyersBrokerInterface:
         """
         Fetch available margin from Fyers /funds endpoint.
         Called by CapitalManager.sync() at startup, post-fill, post-close.
+        Phase 93: Rate-limit aware — backs off 180s after a -429 response.
         """
+        # Rate-limit cooldown check
+        if hasattr(self, '_funds_rate_limited_until'):
+            now = datetime.now(UTC)
+            if now < self._funds_rate_limited_until:
+                remaining = (self._funds_rate_limited_until - now).total_seconds()
+                raise ValueError(f"Fyers funds API rate-limited, retry in {remaining:.0f}s")
+
         try:
             loop = asyncio.get_event_loop()
             response = await loop.run_in_executor(None, self.rest_client.funds)
             if response and response.get('s') == 'ok':
                 return response
+            # Check for rate limit response
+            if response and response.get('code') == -429:
+                self._funds_rate_limited_until = datetime.now(UTC) + timedelta(seconds=180)
+                logger.warning(f"[RATE-LIMIT] Fyers funds API returned -429. Backing off for 180s.")
             raise ValueError(f"Fyers funds API error: {response}")
         except Exception as e:
+            # Also detect rate limit in the error message
+            if '-429' in str(e) or 'Request limit' in str(e):
+                self._funds_rate_limited_until = datetime.now(UTC) + timedelta(seconds=180)
+                logger.warning(f"[RATE-LIMIT] Fyers funds API rate-limited. Backing off for 180s.")
             logger.error(f"get_funds failed: {e}")
             raise
 
@@ -1691,13 +1707,13 @@ class FyersBrokerInterface:
                 loop = asyncio.get_event_loop()
                 response = await loop.run_in_executor(None, self.rest_client.positions)
                 if response['s'] == 'ok':
-                    for pos in response['netPositions']:
-                        if pos['netQty'] != 0:
+                    for pos in response.get('netPositions', []):
+                        if pos.get('netQty', 0) != 0:
                             positions.append({
-                                'symbol': pos['symbol'],
-                                'qty': pos['netQty'],
-                                'avg_price': pos['avgPrice'],
-                                'unrealized_pnl': pos.get('unrealized_profit', 0)
+                                'symbol': pos.get('symbol', ''),
+                                'qty': pos.get('netQty', 0),
+                                'avg_price': pos.get('avgPrice', pos.get('buyAvg', pos.get('sellAvg', 0))),
+                                'unrealized_pnl': pos.get('unrealized_profit', pos.get('pl', 0))
                             })
                             # Update cache? The cache object expects WS format.
                             # We might need to map REST format to WS format if we want to cache it.

@@ -377,7 +377,6 @@ async def _initialize_runtime() -> RuntimeContext:
 
 
 async def _trading_loop(shutdown_event: asyncio.Event, ctx: RuntimeContext):
-    import config
     if getattr(ctx.bot, '_auto_on_queued', False):
         ctx.bot._auto_mode = True
         ctx.bot._auto_on_queued = False
@@ -470,7 +469,6 @@ async def _trading_loop(shutdown_event: asyncio.Event, ctx: RuntimeContext):
 
             # Phase 89.6: Parallelized Analysis
             async def run_analysis(cand):
-                import config  # Phase 91: Thread-safe local import
                 signal = await asyncio.to_thread(
                     ctx.analyzer.check_setup,
                     cand["symbol"],
@@ -481,6 +479,10 @@ async def _trading_loop(shutdown_event: asyncio.Event, ctx: RuntimeContext):
                     _scan_id,
                     _data_tier,
                 )
+                # Phase 93: Inject the scanner's tick_size into the signal
+                # The symbol master has the correct exchange tick (0.01/0.05/0.10).
+                if signal and "tick_size" in cand:
+                    signal["tick_size"] = cand["tick_size"]
                 return signal
 
             analysis_tasks = [run_analysis(cand) for cand in (candidates or [])]

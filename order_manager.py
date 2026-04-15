@@ -104,7 +104,8 @@ class OrderManager:
         Round SL trigger price to nearest valid Fyers tick boundary.
 
         Fyers rejects SL-M orders where trigger_price % tick_size != 0.
-        NSE equities: tick_size = 0.05 for all stocks above ₹1.
+        NSE equities: tick_size varies per stock (0.01, 0.05, 0.10).
+        Always use the tick_size from the symbol master, never hardcode.
 
         Rounding direction (away from entry = more buffer, never tighter):
           SHORT (SELL entry) → SL is above entry → round UP (ceiling)
@@ -587,8 +588,9 @@ class OrderManager:
                 stop_price = self.compute_stop_loss(ltp, signal)
                 sl_side    = 'BUY' if side == 'SELL' else 'SELL'
 
+                tick = signal.get('tick_size', 0.05)
                 logger.info(
-                    f"[SL-CALC] {symbol} ATR-based stop_price=₹{stop_price:.2f} (tick=0.05)"
+                    f"[SL-CALC] {symbol} ATR-based stop_price=₹{stop_price:.2f} (tick={tick})"
                 )
 
                 try:
@@ -677,7 +679,8 @@ class OrderManager:
                             'symbol':    symbol,
                             'direction': side,   # Use 'SELL'/'BUY' from line 490, not 'SHORT'
                             'qty':       qty,
-                            'entry_price': ltp
+                            'entry_price': ltp,
+                            'entry_id':  entry_id   # Phase 93: Pass order ID for dedup
                         })
                     except Exception as db_err:
                         # Non-fatal to execution, but important

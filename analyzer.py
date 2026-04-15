@@ -1239,7 +1239,7 @@ class FyersAnalyzer:
         
         meta_str = f"Slope:{slope:.1f}, {wall_msg}, ATR:{atr:.2f}, {level_msg}"
         log_signal(symbol, ltp, pattern_desc, sl_price, meta_str,
-                   setup_high=setup_high, tick_size=0.05, atr=atr,
+                   setup_high=setup_high, tick_size=signal_meta.get('tick_size', 0.05), atr=atr,
                    stretch_score=signal_meta.get('stretch_score', 0.0),
                    vol_fade_ratio=signal_meta.get('vol_fade_ratio', 0.0),
                    confidence=signal_meta.get('confidence', ''),
@@ -1310,7 +1310,7 @@ class FyersAnalyzer:
             'signal_low': df.iloc[-2]['low'], # CRITICAL: Validation Level
             'setup_high': setup_high,         # Phase 41.2: For scalper SL calc
             'signal_high': setup_high,        # Phase 51: Consistent naming
-            'tick_size': 0.05,                # Phase 41.2: Default NSE tick
+            'tick_size': signal_meta.get('tick_size', 0.05),  # Phase 93: Use actual tick from symbol master
             'atr': atr,                       # Phase 41.2: For legacy simulation
             'meta': meta_str,
             'obs_id': obs_id if 'obs_id' in locals() else None  # Phase 71: ML Link

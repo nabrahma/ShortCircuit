@@ -154,24 +154,29 @@ class DatabaseManager:
         """
         Log new trade entry to 'positions' and 'orders'.
         Uses transaction to ensure consistency.
+        Phase 93: ON CONFLICT DO NOTHING for orders to prevent duplicate key errors
+        when WS fill recovery re-triggers entry logging.
         """
         pool = await self.get_pool()
         async with pool.acquire() as conn:
             async with conn.transaction():
-                # 1. Log Order
+                # 1. Log Order (upsert-safe)
                 await conn.execute("""
                     INSERT INTO orders (
                         symbol, side, order_type, qty, price, state, 
                         session_date, created_by, exchange_order_id
                     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                    ON CONFLICT (exchange_order_id) DO NOTHING
                 """, data.get('symbol'), data.get('direction', 'BUY'), 'MARKET', data.get('qty'), 
-                     data.get('entry_price'), 'FILLED', datetime.date.today(), 'BOT', 'N/A')
+                     data.get('entry_price'), 'FILLED', datetime.date.today(), 'BOT',
+                     data.get('exchange_order_id', data.get('entry_id', 'N/A')))
                 
                 # 2. Log Position
                 await conn.execute("""
                     INSERT INTO positions (
                         symbol, qty, entry_price, state, session_date, source, opened_at
                     ) VALUES ($1, $2, $3, $4, $5, $6, NOW())
+                    ON CONFLICT DO NOTHING
                 """, data.get('symbol'), data.get('qty'), data.get('entry_price'), 
                      'OPEN', datetime.date.today(), 'SIGNAL')
 
