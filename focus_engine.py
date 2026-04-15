@@ -51,11 +51,11 @@ class FocusEngine:
         t = self.active_trade
         return {
             'symbol': t['symbol'],
-            'side': 'SHORT', # Hardcoded for now as SC is Short-only
+            'side': t.get('direction', config.TRADE_DIRECTION),  # Phase 94: Use actual direction
             'entry_price': t['entry'],
             'quantity': t['qty'],
             'current_price': t.get('last_price', t['entry']),
-            'unrealised_pnl': (t['entry'] - t.get('last_price', t['entry'])) * t['qty'],
+            'unrealised_pnl': (t['entry'] - t.get('last_price', t['entry'])) * t['qty'] if t.get('direction', 'SHORT') == 'SHORT' else (t.get('last_price', t['entry']) - t['entry']) * t['qty'],
             'stop_loss': t.get('sl', 0),
             'target': t.get('current_target', 0),
             'sl_state': 'TRAILING' if t.get('target_extended') else 'INITIAL',
@@ -670,13 +670,22 @@ class FocusEngine:
 
     def start_focus(self, symbol, position_data, message_id=None, trade_id=None, qty=1):
         """
-        Latch onto a trade.
+        Latch onto a trade. Phase 94: Direction-aware.
         """
         # Adapt to OrderManager state or Legacy
         entry_price = position_data.get('entry_price', position_data.get('entry', 0))
         sl_price = position_data.get('hard_stop_price', position_data.get('sl', 0))
-        soft_sl = entry_price * (1 + config.DISCRETIONARY_CONFIG['soft_stop_pct'])
         actual_qty = position_data.get('qty', qty)
+
+        # Phase 94: Read direction from config
+        direction = config.TRADE_DIRECTION  # 'SHORT' or 'LONG'
+        is_long = direction == 'LONG'
+
+        # Soft SL: opposite side from entry
+        if is_long:
+            soft_sl = entry_price * (1 - config.DISCRETIONARY_CONFIG['soft_stop_pct'])
+        else:
+            soft_sl = entry_price * (1 + config.DISCRETIONARY_CONFIG['soft_stop_pct'])
 
         # Phase 52: Compute TP levels from OrderManager
         tps = {}
@@ -686,12 +695,15 @@ class FocusEngine:
             except Exception as e:
                 logger.warning(f"[P52] compute_take_profits failed for {symbol}: {e}")
 
+        # TP default: 1.5% in the correct direction
+        tp_default = entry_price * 1.015 if is_long else entry_price * 0.985
+
         self.active_trade = {
             'symbol':          symbol,
             'entry':           entry_price,
             'sl':              sl_price,
             'soft_sl':         soft_sl,
-            'tp':              tps.get('tp', entry_price * 0.985),
+            'tp':              tps.get('tp', tp_default),
             'status':          'OPEN',
             'highest_profit':  -999,
             'message_id':      message_id,
@@ -704,11 +716,13 @@ class FocusEngine:
             'qty':             actual_qty,
             'remaining_qty':   actual_qty,
             'start_time':      time.time(),
+            'direction':       direction,  # Phase 94: Store direction for TP/BE/PnL logic
             
             # Phase 89.9: Precalculated True Breakeven (3.5% profit @ 5x)
-            # Trigger = 0.7% drop for Short. New SL = 0.25% drop for Short (covers fees).
-            'be_trigger':      entry_price * 0.993,
-            'be_sl':           entry_price * 0.9975,
+            # SHORT: Trigger = 0.7% drop, BE SL = 0.25% drop
+            # LONG:  Trigger = 0.7% rise, BE SL = 0.25% rise
+            'be_trigger':      entry_price * 1.007 if is_long else entry_price * 0.993,
+            'be_sl':           entry_price * 1.0025 if is_long else entry_price * 0.9975,
             'be_activated':    False
         }
         
@@ -809,13 +823,17 @@ class FocusEngine:
                             f"👻 [FOCUS] Broker shows FLAT for {symbol} — manual close detected! "
                             f"Releasing slot and stopping focus."
                         )
-                        # Compute PnL from entry and last known price
+                        # Compute PnL from entry and last known price (direction-aware)
                         entry_p = t.get('entry', 0)
                         exit_p = ltp
                         qty = t.get('qty', 0)
-                        pnl = (entry_p - exit_p) * qty if entry_p > 0 else 0
+                        _dir = t.get('direction', 'SHORT')
+                        if _dir == 'LONG':
+                            pnl = (exit_p - entry_p) * qty if entry_p > 0 else 0
+                        else:
+                            pnl = (entry_p - exit_p) * qty if entry_p > 0 else 0
                         logger.info(
-                            f"💰 [MANUAL EXIT] {symbol} | Entry ₹{entry_p:.2f} → Exit ~₹{exit_p:.2f} | "
+                            f"💰 [MANUAL EXIT] {symbol} {_dir} | Entry ₹{entry_p:.2f} → Exit ~₹{exit_p:.2f} | "
                             f"PnL ≈ ₹{pnl:.2f}"
                         )
 
@@ -863,7 +881,10 @@ class FocusEngine:
                         return
 
                 # ── Phase 89.9: TRUE BREAKEVEN (3.5% Trigger) ──────────────
-                if not t.get('be_activated', False) and ltp <= t['be_trigger']:
+                # Phase 94: Direction-aware comparison
+                _trade_dir = t.get('direction', 'SHORT')
+                _be_hit = (ltp >= t['be_trigger']) if _trade_dir == 'LONG' else (ltp <= t['be_trigger'])
+                if not t.get('be_activated', False) and _be_hit:
                     new_sl = t['be_sl']
                     old_sl = t['sl']
                     t['sl'] = new_sl
@@ -885,7 +906,9 @@ class FocusEngine:
                         )
                 
                 # ── PHASE 78: SINGLE TP ENGINE ────────────────────────────
-                if ltp <= t['tp']:
+                # Phase 94: Direction-aware TP comparison
+                _tp_hit = (ltp >= t['tp']) if _trade_dir == 'LONG' else (ltp <= t['tp'])
+                if _tp_hit:
                     logger.info(f"🎯 [TP] {symbol} hit ₹{t['tp']:.2f} — closing 100% ({t['remaining_qty']} shares)")
                     if self.order_manager and self._event_loop:
                         asyncio.run_coroutine_threadsafe(
@@ -899,7 +922,9 @@ class FocusEngine:
                 partial_enabled = False  # Phase 93: Partial exit not currently active
                 if not partial_enabled and self.discretionary_engine and self.order_manager:
                     soft_sl = t['soft_sl']
-                    if ltp >= soft_sl:
+                    # Phase 94: Direction-aware soft stop
+                    _soft_hit = (ltp <= soft_sl) if _trade_dir == 'LONG' else (ltp >= soft_sl)
+                    if _soft_hit:
                         decision = self.discretionary_engine.evaluate_soft_stop(symbol, t)
                         if decision == 'EXIT':
                             if self._event_loop:

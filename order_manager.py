@@ -124,30 +124,42 @@ class OrderManager:
         return round(rounded, 2)
 
     def compute_stop_loss(self, ltp: float, signal: dict) -> float:
-        """Phase 51: ATR-based SL calculation."""
+        """Phase 51: ATR-based SL calculation. Phase 94: Direction-aware."""
         atr    = signal.get('atr', 0)
         tick   = signal.get('tick_size', 0.05)
         # PRD: max(atr * 0.5, 3 * tick_size) — using config constants
         buffer = max(atr * getattr(config, 'P51_SL_ATR_MULTIPLIER', 0.5),
                      tick * getattr(config, 'P51_SL_MIN_TICK_BUFFER', 3))
         
-        # For SHORT trades, SL is above entry/high
-        signal_high = signal.get('signal_high', ltp * 1.01)
-        sl_price = signal_high + buffer
-        return self._round_sl_to_tick(sl_price, 'SELL', tick)
+        direction = config.TRADE_DIRECTION
+        if direction == 'LONG':
+            # For LONG trades, SL is below entry/low
+            signal_low = signal.get('signal_low', ltp * 0.99)
+            sl_price = signal_low - buffer
+            return self._round_sl_to_tick(sl_price, 'BUY', tick)
+        else:
+            # For SHORT trades, SL is above entry/high
+            signal_high = signal.get('signal_high', ltp * 1.01)
+            sl_price = signal_high + buffer
+            return self._round_sl_to_tick(sl_price, 'SELL', tick)
 
     def compute_take_profits(self, entry: float, signal: dict) -> dict:
-        """Phase 78: Single 100% Take Profit Target."""
+        """Phase 78: Single 100% Take Profit Target. Phase 94: Direction-aware."""
         atr = signal.get('atr', 0)
+        direction = config.TRADE_DIRECTION
         if atr == 0:
-            return {'tp': entry * 0.985} # Default 1.5%
+            # Default 1.5% TP in the correct direction
+            return {'tp': entry * 1.015 if direction == 'LONG' else entry * 0.985}
 
         # Use signal override or default
         tp_mult = signal.get('tp_atr_mult_override') or \
                   signal.get('tp1_atr_mult_override') or \
                   getattr(config, 'P78_SINGLE_TP_ATR_MULT_DEFAULT', 1.0)
 
-        tp = entry - atr * tp_mult
+        if direction == 'LONG':
+            tp = entry + atr * tp_mult
+        else:
+            tp = entry - atr * tp_mult
         return {'tp': tp}
 
     async def _verify_fill_via_rest(self, order_id: str) -> Optional[float]:
@@ -513,7 +525,8 @@ class OrderManager:
                 self._set_exec_cooldown(symbol, reason='ZERO_QTY', seconds=300)
                 return None
 
-            signal_type = signal.get('signal_type', 'SHORT')
+            # Phase 94: Read direction from config runtime switch
+            signal_type = config.TRADE_DIRECTION
             side = 'SELL' if signal_type == 'SHORT' else 'BUY'
 
             logger.info(

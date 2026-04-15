@@ -557,8 +557,13 @@ class ReconciliationEngine:
                             entry_price = pos.get('entry_price', 0.0)
                             qty = pos.get('qty', 0)
                             if entry_price > 0 and qty > 0:
-                                # Short-only bot: PnL = (Entry - Exit) * Qty
-                                pnl = (entry_price - exit_price) * qty
+                                # Phase 94: Direction-aware PnL
+                                import config as _cfg
+                                _dir = pos.get('side', _cfg.TRADE_DIRECTION)
+                                if _dir == 'LONG':
+                                    pnl = (exit_price - entry_price) * qty
+                                else:
+                                    pnl = (entry_price - exit_price) * qty
                     except Exception as e:
                         logger.warning(f"[GHOST] Could not fetch exit price for {sym}: {e}")
 

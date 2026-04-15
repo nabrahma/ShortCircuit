@@ -315,7 +315,7 @@ class ShortCircuitBot:
         Auto ON  → Info only (order already placed by this point)
         """
         symbol = signal.get('symbol', 'UNKNOWN')
-        side = signal.get('side', 'SHORT')
+        side = signal.get('side', config.TRADE_DIRECTION)  # Phase 94: Direction-aware
         entry = signal.get('entry_price', 0)
         sl = signal.get('stop_loss', 0)
         target = signal.get('target', 0)
@@ -323,7 +323,7 @@ class ShortCircuitBot:
         score = signal.get('score', 0)
         pattern = signal.get('pattern', 'Unknown')
         signal_id = signal.get('id', f"{symbol}_{datetime.now().strftime('%H%M%S')}")
-        side_emoji = "🔴" if side == "SHORT" else "🟢"
+        side_emoji = "🟢" if side == "LONG" else "🔴"
         mode_tag = "🤖 AUTO" if self._auto_mode else "👁️ ALERT"
         # Phase 44.8 — confidence + volume fade in alert
         conf     = signal.get("confidence", "")
@@ -534,6 +534,45 @@ class ShortCircuitBot:
             "✅ *Auto Mode ON* — scanning for live signals",
             parse_mode="Markdown"
         )
+
+    async def _cmd_mode(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """/mode buy|sell — Switch trade direction at runtime."""
+        if not self._is_authorized(update):
+            await update.message.reply_text("⛔ Unauthorized.")
+            return
+        args = context.args
+        if not args:
+            current = config.TRADE_DIRECTION
+            emoji = "🟢 LONG (BUY)" if current == 'LONG' else "🔴 SHORT (SELL)"
+            await update.message.reply_text(
+                f"Current mode: *{emoji}*\n\n"
+                f"Usage: `/mode buy` or `/mode sell`",
+                parse_mode='Markdown'
+            )
+            return
+        action = args[0].lower().strip()
+        if action in ('buy', 'long'):
+            config.TRADE_DIRECTION = 'LONG'
+            logger.critical("🟢 [MODE] Trade direction switched to LONG (BUY) via Telegram")
+            await update.message.reply_text(
+                "🟢 *Mode: LONG (BUY)*\n\n"
+                "Bot will now enter BUY positions.\n"
+                "TP below → TP above entry\n"
+                "SL above → SL below entry\n\n"
+                "_All other logic unchanged._",
+                parse_mode='Markdown'
+            )
+        elif action in ('sell', 'short'):
+            config.TRADE_DIRECTION = 'SHORT'
+            logger.critical("🔴 [MODE] Trade direction switched to SHORT (SELL) via Telegram")
+            await update.message.reply_text(
+                "🔴 *Mode: SHORT (SELL)*\n\n"
+                "Bot will now enter SELL positions (default).\n\n"
+                "_All other logic unchanged._",
+                parse_mode='Markdown'
+            )
+        else:
+            await update.message.reply_text("Usage: `/mode buy` or `/mode sell`", parse_mode='Markdown')
     async def _cmd_auto_off(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """/auto off — Disable auto trading."""
         # Removed local import config
@@ -619,6 +658,7 @@ class ShortCircuitBot:
         mode_str = "🟢 AUTO" if self._auto_mode else "🔴 ALERT ONLY"
         if self._scanning_paused:
             mode_str += " (⏸️ PAUSED)"
+        dir_str = "🟢 LONG (BUY)" if config.TRADE_DIRECTION == 'LONG' else "🔴 SHORT (SELL)"
         
         pnl_str = f"+₹{today_pnl:.2f}" if today_pnl >= 0 else f"-₹{abs(today_pnl):.2f}"
         unr_str = f"+₹{unrealised:.2f}" if unrealised >= 0 else f"-₹{abs(unrealised):.2f}"
@@ -628,6 +668,7 @@ class ShortCircuitBot:
         text = (
             f"📊 <b>ShortCircuit Status</b> ({sync_indicator})\n\n"
             f"Mode:      {mode_str}\n"
+            f"Direction: {dir_str}\n"
             f"{self._get_session_block()}"
             f"\n━━━━━ CAPITAL ━━━━━\n"
             f"{self._get_capital_block()}"
@@ -648,8 +689,10 @@ class ShortCircuitBot:
             return
         await update.message.reply_text(
             "⚡ <b>ShortCircuit Commands</b>\n\n"
-            "<b>/auto o|off</b>\n"
+            "<b>/auto on|off</b>\n"
             "↳ Arm auto-trading or set to alert-only.\n\n"
+            "<b>/mode buy|sell</b>\n"
+            "↳ Switch between LONG (buy) and SHORT (sell) mode.\n\n"
             "<b>/status</b>\n"
             "↳ System health & capital snapshot.\n\n"
             "<b>/stop</b>\n"
@@ -765,6 +808,8 @@ class ShortCircuitBot:
         else:
             auto_str = "OFF ❌"
 
+        dir_str = "🟢 LONG" if config.TRADE_DIRECTION == 'LONG' else "🔴 SHORT"
+
         # Daily quote
         quote_text = self._get_daily_quote()
 
@@ -780,7 +825,8 @@ class ShortCircuitBot:
             f"   WS Cache  : {fresh}/{total} live ({fresh_pct}%)\n"
             f"   Candle API: {'✅ Verified' if startup_validation_passed else '❌ Failed'}\n"
             f"   DB Pool   : ✅ Connected\n"
-            f"   Auto Mode : {auto_str}\n\n"
+            f"   Auto Mode : {auto_str}\n"
+            f"   Direction : {dir_str}\n\n"
             f"⏱ Ready at {now_str} — scanning for setups"
         )
 
@@ -819,6 +865,7 @@ class ShortCircuitBot:
     def _register_handlers(self):
         self.app.add_handler(CommandHandler("start", self._cmd_start))
         self.app.add_handler(CommandHandler("auto", self._cmd_auto))
+        self.app.add_handler(CommandHandler("mode", self._cmd_mode))  # Phase 94
         self.app.add_handler(CommandHandler("status", self._cmd_status))
         self.app.add_handler(CommandHandler("help", self._cmd_help))
         self.app.add_handler(CommandHandler("stop", self._cmd_stop))
@@ -985,6 +1032,7 @@ class ShortCircuitBot:
             commands = [
                 BotCommand("help", "Show all commands"),
                 BotCommand("auto", "Toggle Trading (on/off)"),
+                BotCommand("mode", "Switch BUY/SELL direction"),  # Phase 94
                 BotCommand("status", "System Health Check"),
                 BotCommand("stop", "🛑 TERMINATE BOT"),
             ]

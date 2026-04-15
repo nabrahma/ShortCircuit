@@ -32,6 +32,11 @@ INTRADAY_LEVERAGE = 5.0    # Fixed 5× leverage (NSE standard requirement)
 MIN_LEVERAGE = 3.0         # Minimum leverage allowed for a stock to pass the scanner
 CAPITAL_PER_TRADE = 9000   # OFFLINE FALLBACK ONLY (Buying power for 1800 margin)
 
+# Phase 94: Trade Direction Switch
+# Controls whether bot enters SHORT (SELL) or LONG (BUY) positions.
+# Default: SHORT. Toggle via Telegram /mode buy | /mode sell at runtime.
+TRADE_DIRECTION = 'SHORT'  # 'SHORT' or 'LONG'
+
 # Timing (IST)
 SQUARE_OFF_TIME = "15:10" 
 VALIDATION_TIMEOUT_MINUTES = 15 
