@@ -788,63 +788,135 @@ class FocusEngine:
                         quote = response['d'][0]
                         qt = quote.get('v', quote)
                         ltp = qt.get('lp')
-                    
-                    self.active_trade['last_price'] = ltp
-                    t = self.active_trade
 
-                    # ── Phase 89.9: TRUE BREAKEVEN (3.5% Trigger) ──────────────
-                    if not t.get('be_activated', False) and ltp <= t['be_trigger']:
-                        new_sl = t['be_sl']
-                        old_sl = t['sl']
-                        t['sl'] = new_sl
-                        t['be_activated'] = True
-                        
-                        logger.info(f"🛡️ [PROTECTION] {symbol} up 3.5% (leveraged)! SL → ₹{new_sl:.2f} (Fee-Protected BE)")
-                        
-                        if self.telegram_bot and self._event_loop:
-                            msg = (
-                                f"🛡️ **Fee-Protected BE Activated**\n"
-                                f"Symbol: `{symbol}`\n"
-                                f"Target: +3.5% hit (0.7% move)\n"
-                                f"New SL: ₹{new_sl:.2f} (+0.25% profit zone)\n"
-                                f"_Your fees are now covered._"
-                            )
-                            asyncio.run_coroutine_threadsafe(
-                                self.telegram_bot.send_alert(msg),
-                                self._event_loop
-                            )
-                    
-                    # ── PHASE 78: SINGLE TP ENGINE ────────────────────────────
-                    if ltp <= t['tp']:
-                        logger.info(f"🎯 [TP] {symbol} hit ₹{t['tp']:.2f} — closing 100% ({t['remaining_qty']} shares)")
+                # Skip cycle if no price available
+                if not ltp:
+                    time.sleep(1)
+                    continue
+
+                self.active_trade['last_price'] = ltp
+                t = self.active_trade
+
+                # ── Phase 93: MANUAL CLOSE DETECTION (Broker-side) ──────────
+                # Every ~5 seconds, check if the broker still has this position.
+                # If not, the user closed it manually via the app.
+                _last_broker_check = getattr(self, '_last_broker_pos_check', 0)
+                if time.time() - _last_broker_check > 5:
+                    self._last_broker_pos_check = time.time()
+                    broker_pos = self._check_broker_position(symbol)
+                    if broker_pos is None or broker_pos.get('netQty', 0) == 0:
+                        logger.warning(
+                            f"👻 [FOCUS] Broker shows FLAT for {symbol} — manual close detected! "
+                            f"Releasing slot and stopping focus."
+                        )
+                        # Compute PnL from entry and last known price
+                        entry_p = t.get('entry', 0)
+                        exit_p = ltp
+                        qty = t.get('qty', 0)
+                        pnl = (entry_p - exit_p) * qty if entry_p > 0 else 0
+                        logger.info(
+                            f"💰 [MANUAL EXIT] {symbol} | Entry ₹{entry_p:.2f} → Exit ~₹{exit_p:.2f} | "
+                            f"PnL ≈ ₹{pnl:.2f}"
+                        )
+
+                        # Sync internal state: mark closed
+                        if self.order_manager and symbol in self.order_manager.active_positions:
+                            self.order_manager.active_positions[symbol]['status'] = 'CLOSED'
+
                         if self.order_manager and self._event_loop:
-                            asyncio.run_coroutine_threadsafe(
-                                self.order_manager.safe_exit(symbol, "TP_HIT"),
-                                self._event_loop
-                            )
-                        self.stop_focus("TP_HIT")
-                        return
-
-                    # ── SOFT STOP (existing logic — keep for non-partial-exit fallback) ──
-                    elif not partial_enabled and self.discretionary_engine and self.order_manager:
-                        soft_sl = t['soft_sl']
-                        if ltp >= soft_sl:
-                            decision = self.discretionary_engine.evaluate_soft_stop(symbol, t)
-                            if decision == 'EXIT':
-                                if self._event_loop:
+                            try:
+                                future = asyncio.run_coroutine_threadsafe(
+                                    self.order_manager._finalize_closed_position(
+                                        symbol=symbol,
+                                        reason='MANUAL_CLOSE_DETECTED',
+                                        exit_price=exit_p,
+                                        pnl=pnl,
+                                        send_alert=True
+                                    ),
+                                    self._event_loop
+                                )
+                                future.result(timeout=10)
+                            except Exception as e:
+                                logger.error(f"[FOCUS] _finalize_closed_position failed: {e}")
+                                # Fallback: release capital directly
+                                if self.order_manager.capital:
                                     asyncio.run_coroutine_threadsafe(
-                                        self.order_manager.safe_exit(symbol, "SOFT_STOP"),
+                                        self.order_manager.capital.release_slot(broker=self.order_manager.broker),
                                         self._event_loop
                                     )
-                                return
 
-                    # ── FALLBACK / LEGACY LOGIC ──────────────────────
-                    # Keep simplistic trailing if Discretionary Engine not active?
-                    # Or just rely on Hard SL (monitored by order_manager)
+                        if self.telegram_bot and self._event_loop:
+                            asyncio.run_coroutine_threadsafe(
+                                self.telegram_bot.send_alert(
+                                    f"👻 **MANUAL CLOSE DETECTED**\n\n"
+                                    f"Symbol: `{symbol}`\n"
+                                    f"Entry: ₹{entry_p:.2f}\n"
+                                    f"Exit: ~₹{exit_p:.2f}\n"
+                                    f"PnL: ₹{pnl:.2f}\n\n"
+                                    f"✅ Capital slot released.\n"
+                                    f"✅ Bot state synced."
+                                ),
+                                self._event_loop
+                            )
+
+                        self.stop_focus("MANUAL_CLOSE")
+                        return
+
+                # ── Phase 89.9: TRUE BREAKEVEN (3.5% Trigger) ──────────────
+                if not t.get('be_activated', False) and ltp <= t['be_trigger']:
+                    new_sl = t['be_sl']
+                    old_sl = t['sl']
+                    t['sl'] = new_sl
+                    t['be_activated'] = True
+                    
+                    logger.info(f"🛡️ [PROTECTION] {symbol} up 3.5% (leveraged)! SL → ₹{new_sl:.2f} (Fee-Protected BE)")
+                    
+                    if self.telegram_bot and self._event_loop:
+                        msg = (
+                            f"🛡️ **Fee-Protected BE Activated**\n"
+                            f"Symbol: `{symbol}`\n"
+                            f"Target: +3.5% hit (0.7% move)\n"
+                            f"New SL: ₹{new_sl:.2f} (+0.25% profit zone)\n"
+                            f"_Your fees are now covered._"
+                        )
+                        asyncio.run_coroutine_threadsafe(
+                            self.telegram_bot.send_alert(msg),
+                            self._event_loop
+                        )
+                
+                # ── PHASE 78: SINGLE TP ENGINE ────────────────────────────
+                if ltp <= t['tp']:
+                    logger.info(f"🎯 [TP] {symbol} hit ₹{t['tp']:.2f} — closing 100% ({t['remaining_qty']} shares)")
+                    if self.order_manager and self._event_loop:
+                        asyncio.run_coroutine_threadsafe(
+                            self.order_manager.safe_exit(symbol, "TP_HIT"),
+                            self._event_loop
+                        )
+                    self.stop_focus("TP_HIT")
+                    return
+
+                # ── SOFT STOP (existing logic — keep for non-partial-exit fallback) ──
+                partial_enabled = False  # Phase 93: Partial exit not currently active
+                if not partial_enabled and self.discretionary_engine and self.order_manager:
+                    soft_sl = t['soft_sl']
+                    if ltp >= soft_sl:
+                        decision = self.discretionary_engine.evaluate_soft_stop(symbol, t)
+                        if decision == 'EXIT':
+                            if self._event_loop:
+                                asyncio.run_coroutine_threadsafe(
+                                    self.order_manager.safe_exit(symbol, "SOFT_STOP"),
+                                    self._event_loop
+                                )
+                            return
+
+                # ── FALLBACK / LEGACY LOGIC ──────────────────────
+                # Keep simplistic trailing if Discretionary Engine not active?
+                # Or just rely on Hard SL (monitored by order_manager)
                     
                     
                 # Phase 89.9: High-frequency heartbeat for 200ms latency execution
                 time.sleep(0.2)
+
                 
             except Exception as e:
                 logger.error(f"Focus Loop Error: {e}")
