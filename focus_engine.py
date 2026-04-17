@@ -737,22 +737,28 @@ class FocusEngine:
         self.thread.start()
 
     def _check_broker_position(self, symbol: str) -> dict:
-        """Phase 42: Query broker for current position."""
+        """
+        Phase 42/95: Query broker for current position.
+        Returns:
+          - Position dict if found
+          - None if API succeeded but position not found (genuinely flat)
+          - {'_api_failed': True} if API call failed (DO NOT treat as flat)
+        """
         try:
             positions = self.fyers.positions()
-            if positions.get('s') != 'ok' and 'netPositions' not in positions:
-                logger.error("[SAFETY] Could not fetch positions")
-                return None
+            if positions.get('s') != 'ok' or 'netPositions' not in positions:
+                logger.error("[SAFETY] Could not fetch positions (API error, not flat)")
+                return {'_api_failed': True}
 
             for pos in positions.get('netPositions', []):
                 if pos['symbol'] == symbol:
                     return pos
 
-            return None  # Position not found = closed
+            return None  # API succeeded, position genuinely not found = closed
 
         except Exception as e:
             logger.error(f"[SAFETY] Broker position check failed: {e}")
-            return None
+            return {'_api_failed': True}
 
     def focus_loop(self):
         while self.is_running and self.active_trade:
@@ -811,74 +817,94 @@ class FocusEngine:
                 self.active_trade['last_price'] = ltp
                 t = self.active_trade
 
-                # ── Phase 93: MANUAL CLOSE DETECTION (Broker-side) ──────────
+                # ── Phase 95: MANUAL CLOSE DETECTION (Broker-side) ──────────
                 # Every ~5 seconds, check if the broker still has this position.
                 # If not, the user closed it manually via the app.
+                # SAFETY: Require 2 consecutive CONFIRMED flat reads to avoid
+                # false positives from transient API failures.
                 _last_broker_check = getattr(self, '_last_broker_pos_check', 0)
                 if time.time() - _last_broker_check > 5:
                     self._last_broker_pos_check = time.time()
                     broker_pos = self._check_broker_position(symbol)
-                    if broker_pos is None or broker_pos.get('netQty', 0) == 0:
-                        logger.warning(
-                            f"👻 [FOCUS] Broker shows FLAT for {symbol} — manual close detected! "
-                            f"Releasing slot and stopping focus."
-                        )
-                        # Compute PnL from entry and last known price (direction-aware)
-                        entry_p = t.get('entry', 0)
-                        exit_p = ltp
-                        qty = t.get('qty', 0)
-                        _dir = t.get('direction', 'SHORT')
-                        if _dir == 'LONG':
-                            pnl = (exit_p - entry_p) * qty if entry_p > 0 else 0
+
+                    # If API failed, skip — do NOT treat as flat
+                    if isinstance(broker_pos, dict) and broker_pos.get('_api_failed'):
+                        logger.debug(f"[FOCUS] Broker API failed for {symbol} — skipping manual close check")
+                        self._consecutive_flat_reads = 0
+                        pass  # Continue monitoring
+
+                    elif broker_pos is None or broker_pos.get('netQty', 0) == 0:
+                        # Confirmed flat — increment counter
+                        self._consecutive_flat_reads = getattr(self, '_consecutive_flat_reads', 0) + 1
+                        if self._consecutive_flat_reads < 2:
+                            logger.info(f"[FOCUS] Broker flat read #{self._consecutive_flat_reads} for {symbol} — waiting for confirmation")
                         else:
-                            pnl = (entry_p - exit_p) * qty if entry_p > 0 else 0
-                        logger.info(
-                            f"💰 [MANUAL EXIT] {symbol} {_dir} | Entry ₹{entry_p:.2f} → Exit ~₹{exit_p:.2f} | "
-                            f"PnL ≈ ₹{pnl:.2f}"
-                        )
+                            logger.warning(
+                                f"👻 [FOCUS] Broker CONFIRMED FLAT for {symbol} (2 reads) — manual close detected! "
+                                f"Releasing slot and stopping focus."
+                            )
 
-                        # Sync internal state: mark closed
-                        if self.order_manager and symbol in self.order_manager.active_positions:
-                            self.order_manager.active_positions[symbol]['status'] = 'CLOSED'
+                            # Compute PnL from entry and last known price (direction-aware)
+                            entry_p = t.get('entry', 0)
+                            exit_p = ltp
+                            qty = t.get('qty', 0)
+                            _dir = t.get('direction', 'SHORT')
+                            if _dir == 'LONG':
+                                pnl = (exit_p - entry_p) * qty if entry_p > 0 else 0
+                            else:
+                                pnl = (entry_p - exit_p) * qty if entry_p > 0 else 0
+                            logger.info(
+                                f"💰 [MANUAL EXIT] {symbol} {_dir} | Entry ₹{entry_p:.2f} → Exit ~₹{exit_p:.2f} | "
+                                f"PnL ≈ ₹{pnl:.2f}"
+                            )
 
-                        if self.order_manager and self._event_loop:
-                            try:
-                                future = asyncio.run_coroutine_threadsafe(
-                                    self.order_manager._finalize_closed_position(
-                                        symbol=symbol,
-                                        reason='MANUAL_CLOSE_DETECTED',
-                                        exit_price=exit_p,
-                                        pnl=pnl,
-                                        send_alert=True
+                            # Sync internal state: mark closed
+                            if self.order_manager and symbol in self.order_manager.active_positions:
+                                self.order_manager.active_positions[symbol]['status'] = 'CLOSED'
+
+                            if self.order_manager and self._event_loop:
+                                try:
+                                    future = asyncio.run_coroutine_threadsafe(
+                                        self.order_manager._finalize_closed_position(
+                                            symbol=symbol,
+                                            reason='MANUAL_CLOSE_DETECTED',
+                                            exit_price=exit_p,
+                                            pnl=pnl,
+                                            send_alert=True
+                                        ),
+                                        self._event_loop
+                                    )
+                                    future.result(timeout=10)
+                                except Exception as e:
+                                    logger.error(f"[FOCUS] _finalize_closed_position failed: {e}")
+                                    # Fallback: release capital directly
+                                    if self.order_manager.capital:
+                                        asyncio.run_coroutine_threadsafe(
+                                            self.order_manager.capital.release_slot(broker=self.order_manager.broker),
+                                            self._event_loop
+                                        )
+
+                            if self.telegram_bot and self._event_loop:
+                                asyncio.run_coroutine_threadsafe(
+                                    self.telegram_bot.send_alert(
+                                        f"👻 **MANUAL CLOSE DETECTED**\n\n"
+                                        f"Symbol: `{symbol}`\n"
+                                        f"Entry: ₹{entry_p:.2f}\n"
+                                        f"Exit: ~₹{exit_p:.2f}\n"
+                                        f"PnL: ₹{pnl:.2f}\n\n"
+                                        f"✅ Capital slot released.\n"
+                                        f"✅ Bot state synced."
                                     ),
                                     self._event_loop
                                 )
-                                future.result(timeout=10)
-                            except Exception as e:
-                                logger.error(f"[FOCUS] _finalize_closed_position failed: {e}")
-                                # Fallback: release capital directly
-                                if self.order_manager.capital:
-                                    asyncio.run_coroutine_threadsafe(
-                                        self.order_manager.capital.release_slot(broker=self.order_manager.broker),
-                                        self._event_loop
-                                    )
 
-                        if self.telegram_bot and self._event_loop:
-                            asyncio.run_coroutine_threadsafe(
-                                self.telegram_bot.send_alert(
-                                    f"👻 **MANUAL CLOSE DETECTED**\n\n"
-                                    f"Symbol: `{symbol}`\n"
-                                    f"Entry: ₹{entry_p:.2f}\n"
-                                    f"Exit: ~₹{exit_p:.2f}\n"
-                                    f"PnL: ₹{pnl:.2f}\n\n"
-                                    f"✅ Capital slot released.\n"
-                                    f"✅ Bot state synced."
-                                ),
-                                self._event_loop
-                            )
+                            self.stop_focus("MANUAL_CLOSE")
+                            return
 
-                        self.stop_focus("MANUAL_CLOSE")
-                        return
+                    else:
+                        # Position exists on broker — reset flat counter
+                        self._consecutive_flat_reads = 0
+
 
                 # ── Phase 89.9: TRUE BREAKEVEN (3.5% Trigger) ──────────────
                 # Phase 94: Direction-aware comparison

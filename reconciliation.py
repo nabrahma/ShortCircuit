@@ -161,13 +161,14 @@ class ReconciliationEngine:
 
         for symbol, b_pos in broker_positions.items():
             b_qty = b_pos.get('qty', 0)
+            b_qty_abs = abs(b_qty)  # Phase 95: Fyers uses negative qty for shorts
             if symbol not in db_positions:
                 orphans.append({'symbol': symbol, 'qty': b_qty})
-            elif db_positions[symbol] != b_qty:
+            elif db_positions[symbol] != b_qty_abs:
                 mismatched.append({
                     'symbol': symbol,
                     'db_qty': db_positions[symbol],
-                    'broker_qty': b_qty
+                    'broker_qty': b_qty_abs
                 })
 
         for symbol, db_qty in db_positions.items():
@@ -280,8 +281,27 @@ class ReconciliationEngine:
         side      = 'SHORT' if net_qty < 0 else 'LONG'
         avg_price = broker_pos.get('avg_price', 0.0)
 
+        # Phase 95: Fallback to LTP if avg_price is 0 (WS cache didn't have it)
+        if avg_price == 0 or avg_price is None:
+            try:
+                avg_price = await self.broker.get_ltp(symbol) or 0.0
+                logger.info(f"[ADOPT] avg_price was 0 for {symbol}, using LTP fallback: ₹{avg_price:.2f}")
+            except Exception as e:
+                logger.error(f"[ADOPT] LTP fallback failed for {symbol}: {e}")
+
         if not symbol or qty == 0:
             logger.error(f"[ADOPT] Cannot adopt — invalid broker_pos: {broker_pos}")
+            return
+
+        if avg_price <= 0:
+            logger.critical(f"[ADOPT] ❌ Cannot adopt {symbol} — avg_price is 0 and LTP fallback failed. POSITION IS NAKED.")
+            if self.telegram:
+                await self.telegram.send_alert(
+                    f"🚨 **ORPHAN ADOPTION FAILED**\n\n"
+                    f"Symbol: `{symbol}`\n"
+                    f"Reason: Cannot determine entry price (avg_price=0, LTP failed)\n"
+                    f"⚠️ **Close this position manually NOW.**"
+                )
             return
 
         # ── IDEMPOTENCY GUARD ─────────────────────────────────────────────────
@@ -296,6 +316,9 @@ class ReconciliationEngine:
             f"@ avg ₹{avg_price:.2f} — starting adoption."
         )
 
+        # Phase 95: Get tick_size from signal metadata or default
+        tick_size = broker_pos.get('tick_size', 0.05)
+
         try:
             # ── Step 1: Compute tick-safe SL price ───────────────────────────
             sl_pct  = 0.01   # emergency 1% SL for adopted orphan
@@ -305,9 +328,9 @@ class ReconciliationEngine:
             )
             # Round away from entry (same logic as OrderManager._round_sl_to_tick)
             if side == 'SHORT':
-                sl_price = round(math.ceil(raw_sl / 0.05) * 0.05, 2)
+                sl_price = round(math.ceil(raw_sl / tick_size) * tick_size, 2)
             else:
-                sl_price = round(math.floor(raw_sl / 0.05) * 0.05, 2)
+                sl_price = round(math.floor(raw_sl / tick_size) * tick_size, 2)
 
             sl_side = 'BUY' if side == 'SHORT' else 'SELL'
 

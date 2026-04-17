@@ -740,6 +740,22 @@ class ShortCircuitBot:
                 await self._handle_stop_confirm(query)
             else:
                 await query.edit_message_text("✅ *Shutdown cancelled.* Bot continues monitoring.", parse_mode='Markdown')
+
+    async def _handle_stop_confirm(self, query):
+        """Handle confirmed bot shutdown from /stop button."""
+        logger.critical("🛑 [SHUTDOWN] Bot termination CONFIRMED via Telegram /stop")
+        await query.edit_message_text(
+            "🛑 **Shutting down ShortCircuit...**\n\n"
+            "Cancelling pending orders and releasing resources.\n"
+            "_This may take a few seconds._",
+            parse_mode='Markdown'
+        )
+        # Fire the shutdown event if available
+        if self._shutdown_event:
+            self._shutdown_event.set()
+        else:
+            logger.error("[SHUTDOWN] No shutdown_event available — manual restart required")
+
     # ════════════════════════════════════════════════════════════
     # EOD SUMMARY — Phase 44.4 Section 3
     # ════════════════════════════════════════════════════════════
