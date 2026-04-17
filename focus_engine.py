@@ -723,7 +723,11 @@ class FocusEngine:
             # LONG:  Trigger = 0.7% rise, BE SL = 0.25% rise
             'be_trigger':      entry_price * 1.007 if is_long else entry_price * 0.993,
             'be_sl':           entry_price * 1.0025 if is_long else entry_price * 0.9975,
-            'be_activated':    False
+            'be_activated':    False,
+
+            # Phase 96: MFE/MAE tracking for ML trainer
+            'mfe_pct':         0.0,  # Max Favorable Excursion (% from entry)
+            'mae_pct':         0.0,  # Max Adverse Excursion (% from entry)
         }
         
         self.is_running = True
@@ -816,6 +820,26 @@ class FocusEngine:
 
                 self.active_trade['last_price'] = ltp
                 t = self.active_trade
+
+                # ── Phase 96: Track MFE/MAE on every tick ──────────────────
+                _entry = t['entry']
+                if _entry > 0:
+                    _tdir = t.get('direction', 'SHORT')
+                    if _tdir == 'LONG':
+                        # LONG: favorable = price going UP, adverse = price going DOWN
+                        fav_pct = ((ltp - _entry) / _entry) * 100
+                        adv_pct = ((_entry - ltp) / _entry) * 100
+                    else:
+                        # SHORT: favorable = price going DOWN, adverse = price going UP
+                        fav_pct = ((_entry - ltp) / _entry) * 100
+                        adv_pct = ((ltp - _entry) / _entry) * 100
+                    t['mfe_pct'] = max(t.get('mfe_pct', 0), fav_pct)
+                    t['mae_pct'] = max(t.get('mae_pct', 0), adv_pct)
+
+                    # Sync to order_manager for ML logging on close
+                    if self.order_manager and symbol in self.order_manager.active_positions:
+                        self.order_manager.active_positions[symbol]['mfe_pct'] = t['mfe_pct']
+                        self.order_manager.active_positions[symbol]['mae_pct'] = t['mae_pct']
 
                 # ── Phase 95: MANUAL CLOSE DETECTION (Broker-side) ──────────
                 # Every ~5 seconds, check if the broker still has this position.

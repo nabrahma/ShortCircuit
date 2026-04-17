@@ -224,14 +224,25 @@ class OrderManager:
                     elapsed = (datetime.now() - pos['entry_time']).total_seconds()
                     hold_time = int(elapsed / 60)
 
-                # ML Update
+                # Calculate real pnl_pct based on dollar PNL (works for LONG/SHORT)
+                pnl_pct = 0.0
+                entry_price = pos.get('entry_price', 0)
+                qty = pos.get('qty', 1)
+                if entry_price > 0 and qty > 0:
+                    pnl_pct = (pnl / (entry_price * qty)) * 100
+
+                # ML Update — Phase 96: Include MFE/MAE from focus_engine
                 get_ml_logger().update_outcome(
                     obs_id=pos['obs_id'],
                     outcome=outcome,
                     exit_price=exit_price,
-                    hold_time_mins=hold_time
+                    max_favorable=pos.get('mfe_pct', 0),
+                    max_adverse=pos.get('mae_pct', 0),
+                    hold_time_mins=hold_time,
+                    pnl_pct=pnl_pct
                 )
-                logger.info(f"   [ML] Outcome recorded for {symbol} (obs={pos['obs_id']})")
+                logger.info(f"   [ML] Outcome recorded for {symbol} (obs={pos['obs_id']}) "
+                            f"MFE={pos.get('mfe_pct', 0):.2f}% MAE={pos.get('mae_pct', 0):.2f}% PNL={pnl_pct:.2f}%")
                 
                 # Phase 72: Jarvis Broadcast
                 from dashboard_bridge import get_dashboard_bridge

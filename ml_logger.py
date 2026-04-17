@@ -258,7 +258,8 @@ class MLDataLogger:
         exit_price: float,
         max_favorable: float = 0,
         max_adverse: float = 0,
-        hold_time_mins: int = 0
+        hold_time_mins: int = 0,
+        pnl_pct: Optional[float] = None
     ):
         """
         Update the outcome for an observation (called at EOD or trade close).
@@ -267,7 +268,9 @@ class MLDataLogger:
             for obs in self._buffer:
                 if obs["obs_id"] == obs_id:
                     entry = obs["ltp"]
-                    pnl_pct = ((entry - exit_price) / entry) * 100 if entry > 0 else 0
+                    if pnl_pct is None:
+                        # Fallback for old calls without pnl_pct passed
+                        pnl_pct = ((entry - exit_price) / entry) * 100 if entry > 0 else 0
                     
                     obs["outcome"] = outcome
                     obs["exit_price"] = exit_price

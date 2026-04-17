@@ -181,36 +181,43 @@ class EODAnalyzer:
         outcome = "LOSS" # Default
         exit_reason = None
         
-        # Scalping is SHORT only
+        # Phase 96: Infer direction since ghost signals might be LONG or SHORT
+        is_short = sl_price > entry_price
+
         for _, row in df.iterrows():
             high = row['high']
             low = row['low']
             close = row['close']
             
-            # AE (MAE) - Price going AGAINST short (UP)
-            adv = ((high - entry_price) / entry_price) * 100
+            if is_short:
+                # SHORT: AE (Price going AGAINST = UP), FE (Price going WITH = DOWN)
+                adv = ((high - entry_price) / entry_price) * 100
+                fav = ((entry_price - low) / entry_price) * 100
+            else:
+                # LONG: AE (Price going AGAINST = DOWN), FE (Price going WITH = UP)
+                adv = ((entry_price - low) / entry_price) * 100
+                fav = ((high - entry_price) / entry_price) * 100
+
             max_adverse = max(max_adverse, adv)
-            
-            # FE (MFE) - Price going WITH short (DOWN)
-            fav = ((entry_price - low) / entry_price) * 100
             max_favorable = max(max_favorable, fav)
             
-            # Check Stop Loss (Price hit or exceeded SL)
-            if high >= current_sl:
+            # Check Stop Loss
+            sl_hit = (high >= current_sl) if is_short else (low <= current_sl)
+            if sl_hit:
                 state = "CLOSED"
                 exit_price = current_sl
                 exit_time = row['dt']
                 exit_reason = "SL_HIT"
-                # Determine outcome based on current TP state (if we moved SL to BE)
-                if current_sl <= entry_price:
-                    outcome = "BREAKEVEN" if abs(current_sl - entry_price) < 0.1 else "WIN"
+                if is_short:
+                    outcome = "BREAKEVEN" if abs(current_sl - entry_price) < 0.1 else ("LOSS" if current_sl > entry_price else "WIN")
                 else:
-                    outcome = "LOSS"
+                    outcome = "BREAKEVEN" if abs(current_sl - entry_price) < 0.1 else ("LOSS" if current_sl < entry_price else "WIN")
                 break
                 
             # Check Take Profits
             if state == "ACTIVE":
-                if low <= tp_price and tp_price > 0:
+                tp_hit = (low <= tp_price) if is_short else (high >= tp_price)
+                if tp_hit and tp_price > 0:
                     exit_price = tp_price
                     exit_reason = "TP_HIT"
                     state = "CLOSED"
@@ -223,10 +230,16 @@ class EODAnalyzer:
             exit_price = df.iloc[-1]['close']
             exit_time = df.iloc[-1]['dt']
             exit_reason = "EOD_SQUAREOFF"
-            outcome = "WIN" if exit_price < entry_price else "LOSS"
+            if is_short:
+                outcome = "WIN" if exit_price < entry_price else "LOSS"
+            else:
+                outcome = "WIN" if exit_price > entry_price else "LOSS"
 
         hold_time = (exit_time - start_time).total_seconds() / 60
-        pnl_pct = ((entry_price - exit_price) / entry_price) * 100
+        if is_short:
+            pnl_pct = ((entry_price - exit_price) / entry_price) * 100
+        else:
+            pnl_pct = ((exit_price - entry_price) / entry_price) * 100
         
         return {
             "exit_reason": exit_reason,
