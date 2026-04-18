@@ -83,6 +83,7 @@ FEATURE_COLUMNS = [
     "nifty_trend",      # UP/DOWN/RANGE
     "sector",           # Extracted from symbol if possible
     "time_bucket",      # OPEN/MID/CLOSE (market phase)
+    "direction",        # SHORT or LONG (Phase 96.5)
     
     # Risk Parameters (for EOD Simulation)
     "atr",
@@ -225,6 +226,7 @@ class MLDataLogger:
             "nifty_trend": features.get("nifty_trend", "UNKNOWN"),
             "sector": self._extract_sector(symbol),
             "time_bucket": time_bucket,
+            "direction": features.get("direction", "SHORT"),
             
             # Risk Parameters
             "atr": features.get("atr", 0),

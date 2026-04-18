@@ -1293,6 +1293,7 @@ class FyersAnalyzer:
                 "atr": atr,
                 "sl_price": sl_price,
                 "tp_price": ltp - (atr * signal_meta.get('tp_atr_mult_override', 1.0)),
+                "direction": getattr(config, 'TRADE_DIRECTION', 'SHORT'),
             }
             
             obs_id = ml_logger.log_observation(symbol, ltp, features)

@@ -218,7 +218,7 @@ P72_DASHBOARD_PORT = 8555
 P70_ML_DYNAMIC_OVERRIDE_ENABLED = False
 
 if P70_ML_DYNAMIC_OVERRIDE_ENABLED:
-    DYNAMIC_CONFIG_PATH = Path("data/ml/dynamic_config.json")
+    DYNAMIC_CONFIG_PATH = Path(f"data/ml/dynamic_config_{TRADE_DIRECTION}.json")
     if DYNAMIC_CONFIG_PATH.exists():
         try:
             with open(DYNAMIC_CONFIG_PATH, 'r') as f:
@@ -229,7 +229,7 @@ if P70_ML_DYNAMIC_OVERRIDE_ENABLED:
                 if hasattr(_mod, key):
                     setattr(_mod, key, val)
         except Exception as e:
-            print(f"❌ Failed to load dynamic_config.json: {e}")
+            print(f"❌ Failed to load {DYNAMIC_CONFIG_PATH.name}: {e}")
 
 # ============================================================================
 # 8. FEATURE TOGGLES & LEGACY (PHASE 41 - PHASE 44)

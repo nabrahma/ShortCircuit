@@ -21,7 +21,8 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
 logger = logging.getLogger("Trainer")
 
 # Where dynamic config will be exported
-DYNAMIC_CONFIG_PATH = Path("data/ml/dynamic_config.json")
+def get_dynamic_config_path(direction: str) -> Path:
+    return Path(f"data/ml/dynamic_config_{direction}.json")
 TRAINING_DATA_PATH = Path("data/ml")
 
 def load_historical_data() -> pd.DataFrame:
@@ -76,10 +77,13 @@ def generate_mock_data():
             df.at[i, 'max_favorable'] = np.random.uniform(2.0, 6.0)
             df.at[i, 'max_adverse'] = np.random.uniform(0.1, 0.4)
             df.at[i, 'outcome'] = "WIN" 
+            df.at[i, 'outcome'] = "WIN" 
         else:
             if np.random.rand() > 0.4:
                 df.at[i, 'outcome'] = "LOSS"
                 
+    # Phase 94 simulation additions
+    df["direction"] = np.random.choice(["SHORT", "LONG"], n_samples)
     return df
 
 def objective(trial, df):
@@ -97,13 +101,20 @@ def objective(trial, df):
     tp_mult = trial.suggest_float("P78_SINGLE_TP_ATR_MULT_DEFAULT", 0.8, 2.5)
     
     # 3. Simulate Logic
-    # Filter for trades that pass gates
-    mask = (
-        (df['gain_pct'] >= g1_min_gain) &
-        (df['vwap_slope'] <= g4_max_slope) &
-        (df['rvol'] >= g7_min_rvol)
-    )
-    sim_df = df[mask].copy()
+    # Apply direction-aware vwap filters (momentum checking)
+    sim_df = df.copy()
+    
+    # G1 and G7 apply generally
+    mask_g1_g7 = (sim_df['gain_pct'] >= g1_min_gain) & (sim_df['rvol'] >= g7_min_rvol)
+    
+    # G4 applies differently per direction
+    # SHORT: want slope <= vwap threshold (dropping or flat)
+    # LONG: want slope >= vwap threshold (rising or flat)
+    # For optuna let's assume we optimize an absolute slope threshold value.
+    sim_df['vwap_slope_abs'] = sim_df['vwap_slope'].abs()
+    mask_g4 = sim_df['vwap_slope_abs'] <= g4_max_slope
+    
+    sim_df = sim_df[mask_g1_g7 & mask_g4]
     
     if len(sim_df) < 10:
         return -2000.0  # Overfitting penalty
@@ -153,28 +164,37 @@ def run_optimizer():
         df = generate_mock_data()
         
     optuna.logging.set_verbosity(optuna.logging.WARNING)
-    study = optuna.create_study(direction="maximize")
     
-    logger.info("🧪 Staring Grid Search... Executing 1000 Simulated Realities...")
-    study.optimize(lambda t: objective(t, df), n_trials=1000, n_jobs=-1, show_progress_bar=True)
-    
-    best_params = study.best_params
-    best_value = study.best_value
-    
-    print("\n" + "="*50)
-    print("🏆 OPTIMIZATION COMPLETE 🏆")
-    print("="*50)
-    print(f"Best Simulated Total PnL: {best_value:.2f}%")
-    print(f"Optimal Configuration Discovered:")
-    for param, val in best_params.items():
-        print(f" -> {param}: {val:.3f}")
+    for direction in ["SHORT", "LONG"]:
+        direction_df = df[df.get("direction", "SHORT") == direction]
         
-    # Phase 70: Export back to bot!
-    logger.info(f"Writing {len(best_params)} dynamic thresholds to {DYNAMIC_CONFIG_PATH}...")
-    with open(DYNAMIC_CONFIG_PATH, "w") as f:
-        json.dump(best_params, f, indent=4)
+        if len(direction_df) < 10:
+            logger.warning(f"Not enough data to optimize for {direction} ({len(direction_df)} samples). Skipping.")
+            continue
+            
+        study = optuna.create_study(direction="maximize")
         
-    print(f"✅ The Bot will load these updated thresholds heavily weighted towards profit on next start.")
+        logger.info(f"\n🧪 Staring Grid Search for {direction}... Executing 1000 Simulated Realities...")
+        study.optimize(lambda t: objective(t, direction_df), n_trials=1000, n_jobs=-1, show_progress_bar=True)
+        
+        best_params = study.best_params
+        best_value = study.best_value
+        
+        print("\n" + "="*50)
+        print(f"🏆 {direction} OPTIMIZATION COMPLETE 🏆")
+        print("="*50)
+        print(f"Best Simulated Total PnL: {best_value:.2f}%")
+        print(f"Optimal Configuration Discovered:")
+        for param, val in best_params.items():
+            print(f" -> {param}: {val:.3f}")
+            
+        # Phase 70: Export back to bot!
+        out_path = get_dynamic_config_path(direction)
+        logger.info(f"Writing {len(best_params)} dynamic thresholds to {out_path}...")
+        with open(out_path, "w") as f:
+            json.dump(best_params, f, indent=4)
+            
+        print(f"✅ The Bot will load {direction} thresholds heavily weighted towards profit on next start.")
 
 if __name__ == "__main__":
     run_optimizer()
