@@ -2,6 +2,7 @@ import os
 import json
 import time
 import logging
+import asyncio
 from datetime import datetime
 
 
@@ -719,8 +720,8 @@ class TradeManager:
                     # Phase 42: Clean up SL tracking
                     self._cleanup_sl_tracking(symbol)
 
-                    # Phase 42.1: Release capital
-                    asyncio.create_task(self.capital_manager.release_slot(broker=self.fyers))
+                    # Phase 42.1: Release capital (Handled by main loop in Phase 97)
+                    pass
                     
                     # Phase 42.3.4: Mark Dirty
                     if self.reconciliation_engine: self.reconciliation_engine.mark_dirty()

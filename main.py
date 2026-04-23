@@ -747,6 +747,11 @@ async def main() -> int:
                     timeout=60
                 )
                 await _notify(f"[EOD] Square-off result:\n{message}")
+                
+                # Phase 97: Ensure capital slot is released after square-off
+                if ctx.capital_manager:
+                    await ctx.capital_manager.release_slot(broker=ctx.broker)
+                    logger.info("[EOD] Capital slot released after square-off.")
             except asyncio.TimeoutError:
                 logger.error("[EOD] Square-off timed out after 60s!")
                 await _notify("⚠️ EOD Square-off TIMED OUT. Some positions might stay open!")
