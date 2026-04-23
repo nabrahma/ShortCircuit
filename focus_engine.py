@@ -674,7 +674,9 @@ class FocusEngine:
         """
         # Adapt to OrderManager state or Legacy
         entry_price = position_data.get('entry_price', position_data.get('entry', 0))
-        sl_price = position_data.get('hard_stop_price', position_data.get('sl', 0))
+        sl_price = position_data.get('stop_loss',
+                       position_data.get('hard_stop_price',
+                           position_data.get('sl', 0)))
         actual_qty = position_data.get('qty', qty)
 
         # Phase 94: Read direction from config
@@ -846,19 +848,25 @@ class FocusEngine:
                 # If not, the user closed it manually via the app.
                 # SAFETY: Require 2 consecutive CONFIRMED flat reads to avoid
                 # false positives from transient API failures.
+                # Phase 97: Exponential backoff on API failures to avoid rate-limit storms.
                 _last_broker_check = getattr(self, '_last_broker_pos_check', 0)
-                if time.time() - _last_broker_check > 5:
+                _api_fail_streak = getattr(self, '_api_fail_streak', 0)
+                _check_interval = min(5 * (2 ** _api_fail_streak), 30)  # 5s → 10s → 20s → 30s max
+                if time.time() - _last_broker_check > _check_interval:
                     self._last_broker_pos_check = time.time()
                     broker_pos = self._check_broker_position(symbol)
 
                     # If API failed, skip — do NOT treat as flat
                     if isinstance(broker_pos, dict) and broker_pos.get('_api_failed'):
-                        logger.debug(f"[FOCUS] Broker API failed for {symbol} — skipping manual close check")
+                        self._api_fail_streak = _api_fail_streak + 1
+                        if self._api_fail_streak <= 3:  # Only log first few to avoid spam
+                            logger.debug(f"[FOCUS] Broker API failed for {symbol} — backoff to {min(5 * (2 ** self._api_fail_streak), 30)}s")
                         self._consecutive_flat_reads = 0
                         pass  # Continue monitoring
 
                     elif broker_pos is None or broker_pos.get('netQty', 0) == 0:
-                        # Confirmed flat — increment counter
+                        # Confirmed flat — increment counter (API succeeded, reset backoff)
+                        self._api_fail_streak = 0
                         self._consecutive_flat_reads = getattr(self, '_consecutive_flat_reads', 0) + 1
                         if self._consecutive_flat_reads < 2:
                             logger.info(f"[FOCUS] Broker flat read #{self._consecutive_flat_reads} for {symbol} — waiting for confirmation")
@@ -926,8 +934,9 @@ class FocusEngine:
                             return
 
                     else:
-                        # Position exists on broker — reset flat counter
+                        # Position exists on broker — reset flat counter & backoff
                         self._consecutive_flat_reads = 0
+                        self._api_fail_streak = 0
 
 
                 # ── Phase 89.9: TRUE BREAKEVEN (3.5% Trigger) ──────────────

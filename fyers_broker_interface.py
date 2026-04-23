@@ -1508,6 +1508,25 @@ class FyersBrokerInterface:
                 return self.order_status_cache[order_id].status
         return await self._check_order_status_rest(order_id)
 
+    async def get_order_avg_price(self, order_id: str) -> float:
+        """Fetch average fill price from cache or REST fallback."""
+        if order_id in self.order_status_cache:
+            return self.order_status_cache[order_id].avg_price
+        
+        # Fallback to REST
+        await self._rate_limit_wait('get_order_status')
+        try:
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(None, self.rest_client.orderbook)
+            if response['s'] == 'ok':
+                for order in response['orderBook']:
+                    if order['id'] == order_id:
+                        return float(order.get('tradedPrice', 0))
+        except Exception as e:
+            logger.error(f"Order price query error: {e}")
+        return 0.0
+
+
     async def get_ltp(self, symbol: str) -> Optional[float]:
         """Get Last Traded Price (uses WebSocket tick cache, falls back to REST)."""
         # Try WebSocket cache first (0ms latency)

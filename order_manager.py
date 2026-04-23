@@ -845,11 +845,27 @@ class OrderManager:
                     logger.error(f"❌ Exit Not Filled: {symbol}")
 
                 # STEP 4: CLEANUP (releases capital slot + re-syncs margin)
+                exit_price = 0.0
+                pnl = 0.0
+                if filled:
+                    try:
+                        # Try to get real exit price from broker
+                        exit_price = await self.broker.get_order_avg_price(exit_id)
+                        if exit_price > 0:
+                            entry_price = pos.get('entry_price', 0)
+                            qty = pos.get('qty', 0)
+                            if pos['side'] == 'SHORT':
+                                pnl = (entry_price - exit_price) * qty
+                            else:
+                                pnl = (exit_price - entry_price) * qty
+                    except Exception as e:
+                        logger.warning(f"[SAFE_EXIT] Could not fetch real exit price: {e}")
+
                 await self._finalize_closed_position(
                     symbol=symbol,
                     reason=reason,
-                    exit_price=0.0,
-                    pnl=0.0,
+                    exit_price=exit_price,
+                    pnl=pnl,
                     send_alert=False,
                 )
                 if self.telegram:
