@@ -1292,8 +1292,8 @@ class FyersAnalyzer:
                 "nifty_trend": self.market_context.get_trend_label() if hasattr(self.market_context, 'get_trend_label') else "UNKNOWN",
                 "atr": atr,
                 "sl_price": sl_price,
-                "tp_price": ltp - (atr * signal_meta.get('tp_atr_mult_override', 1.0)),
-                "direction": getattr(config, 'TRADE_DIRECTION', 'SHORT'),
+                "tp_price": ltp * 1.01 if getattr(config, "TRADE_DIRECTION", "SHORT") == "LONG" else ltp * 0.99,
+                "direction": getattr(config, "TRADE_DIRECTION", "SHORT"),
             }
             
             obs_id = ml_logger.log_observation(symbol, ltp, features)
