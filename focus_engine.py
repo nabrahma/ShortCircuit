@@ -950,6 +950,13 @@ class FocusEngine:
                     t['be_activated'] = True
                     
                     logger.info(f"🛡️ [PROTECTION] {symbol} up 3.5% (leveraged)! SL → ₹{new_sl:.2f} (Fee-Protected BE)")
+
+                    # Phase 97.2: Move the ACTUAL broker SL-M order to the BE price
+                    if self.order_manager and self._event_loop:
+                        asyncio.run_coroutine_threadsafe(
+                            self.order_manager.move_hard_stop(symbol, new_sl),
+                            self._event_loop
+                        )
                     
                     if self.telegram_bot and self._event_loop:
                         msg = (

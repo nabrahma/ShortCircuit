@@ -2,6 +2,7 @@ import asyncio
 import inspect
 import logging
 import os
+import time
 import pandas as pd
 from datetime import date, datetime
 
@@ -86,8 +87,17 @@ class EODAnalyzer:
 
         logger.info(f"Auditing {len(unlabeled)} missed signals for {target_date}...")
         results = {"processed": 0, "wins": 0, "losses": 0, "tp_hits": 0, "eod_wins": 0}
-
+        
+        # Phase 97.2: Global audit timeout to prevent EOD hang
+        audit_start_ts = time.monotonic()
+        MAX_AUDIT_SECONDS = 60
+        
         for obs in unlabeled:
+            # Check for global timeout
+            if time.monotonic() - audit_start_ts > MAX_AUDIT_SECONDS:
+                logger.warning(f"[GHOST AUDIT] Reached {MAX_AUDIT_SECONDS}s limit. Skipping remaining {len(unlabeled) - results['processed']} signals.")
+                break
+                
             symbol = obs.get("symbol")
             if not symbol: continue
             
@@ -106,9 +116,17 @@ class EODAnalyzer:
                     "cont_flag": "1"
                 }
                 
-                # Fetch history (raw fyers call)
-                response = await asyncio.to_thread(self.fyers.history, data=data)
-                if "candles" not in response or not response["candles"]:
+                # Fetch history with timeout
+                try:
+                    response = await asyncio.wait_for(
+                        asyncio.to_thread(self.fyers.history, data=data),
+                        timeout=15.0
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(f"[GHOST AUDIT] History API timeout for {symbol}")
+                    continue
+                    
+                if not response or response.get("s") != "ok" or "candles" not in response or not response["candles"]:
                     continue
                 
                 cols = ["epoch", "open", "high", "low", "close", "volume"]

@@ -513,45 +513,54 @@ class ReconciliationEngine:
             f"Phantoms={len(phantoms)}, Mismatch={len(mismatched)}"
         )
     
-        # ── DB log (defensive — auto-create columns if missing) ─────────
-        try:
-            await self.db.execute("""
-                INSERT INTO reconciliation_log (
-                    timestamp, internal_position_count, broker_position_count,
-                    orphaned_positions, phantom_positions, quantity_mismatches,
-                    status, session_date, check_duration_ms
-                ) VALUES (NOW(), $1, $2, $3, $4, $5, $6, $7, 0)
-            """,
-                len(db_pos), len(broker_pos),
-                json.dumps(orphans), json.dumps(phantoms), json.dumps(mismatched),
-                'DIVERGENCE_DETECTED', date.today()
-            )
-        except Exception as e:
-            err_msg = str(e)
-            if 'does not exist' in err_msg and 'column' in err_msg:
-                # Auto-migrate: add missing columns
-                try:
-                    for col in ['orphaned_positions', 'phantom_positions', 'quantity_mismatches']:
-                        await self.db.execute(f"""
-                            ALTER TABLE reconciliation_log 
-                            ADD COLUMN IF NOT EXISTS {col} TEXT DEFAULT '[]'
-                        """)
-                    logger.info("[RECONCILE] Auto-migrated reconciliation_log columns. Retrying insert...")
-                    await self.db.execute("""
-                        INSERT INTO reconciliation_log (
-                            timestamp, internal_position_count, broker_position_count,
-                            orphaned_positions, phantom_positions, quantity_mismatches,
-                            status, session_date, check_duration_ms
-                        ) VALUES (NOW(), $1, $2, $3, $4, $5, $6, $7, 0)
-                    """,
-                        len(db_pos), len(broker_pos),
-                        json.dumps(orphans), json.dumps(phantoms), json.dumps(mismatched),
-                        'DIVERGENCE_DETECTED', date.today()
-                    )
-                except Exception as migrate_err:
-                    logger.error(f"Reconciliation DB migration failed: {migrate_err}")
-            else:
-                logger.error(f"Failed to log reconciliation discrepancy: {e}")
+        # ── DB log (defensive — tries both column name conventions) ────────
+        async def _try_insert(int_col: str, brk_col: str) -> bool:
+            try:
+                await self.db.execute(f"""
+                    INSERT INTO reconciliation_log (
+                        timestamp, {int_col}, {brk_col},
+                        orphaned_positions, phantom_positions, quantity_mismatches,
+                        status, session_date, check_duration_ms
+                    ) VALUES (NOW(), $1, $2, $3, $4, $5, $6, $7, 0)
+                """,
+                    len(db_pos), len(broker_pos),
+                    json.dumps(orphans), json.dumps(phantoms), json.dumps(mismatched),
+                    'DIVERGENCE_DETECTED', date.today()
+                )
+                return True
+            except Exception:
+                return False
+
+        inserted = False
+        # Try long names first (new schema), then short names (old schema)
+        for int_col, brk_col in [
+            ('internal_position_count', 'broker_position_count'),
+            ('internal_pos_count',      'broker_pos_count'),
+        ]:
+            inserted = await _try_insert(int_col, brk_col)
+            if inserted:
+                break
+
+        if not inserted:
+            # Auto-migrate: add missing JSON columns and retry
+            try:
+                for col in ['orphaned_positions', 'phantom_positions', 'quantity_mismatches']:
+                    await self.db.execute(f"""
+                        ALTER TABLE reconciliation_log
+                        ADD COLUMN IF NOT EXISTS {col} TEXT DEFAULT '[]'
+                    """)
+                logger.info("[RECONCILE] Auto-migrated reconciliation_log JSON columns. Retrying...")
+                for int_col, brk_col in [
+                    ('internal_position_count', 'broker_position_count'),
+                    ('internal_pos_count',      'broker_pos_count'),
+                ]:
+                    inserted = await _try_insert(int_col, brk_col)
+                    if inserted:
+                        break
+                if not inserted:
+                    logger.error("[RECONCILE] DB insert still failed after migration — discrepancy logged to file only")
+            except Exception as migrate_err:
+                logger.error(f"Reconciliation DB migration failed: {migrate_err}")
     
         # ── ORPHANS: broker has position, internal state doesn't ─────────
         for orphan in orphans:

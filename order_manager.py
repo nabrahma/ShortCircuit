@@ -358,11 +358,21 @@ class OrderManager:
                             f"[HARD_STOP] Filled for {symbol} (sl_id={sl_id}). "
                             "Syncing state/capital/db cleanup."
                         )
+                        # Calculate PnL
+                        pnl = 0.0
+                        if exit_price > 0:
+                            entry_price = pos.get('entry_price', 0)
+                            qty = pos.get('qty', 0)
+                            if pos['side'] == 'SHORT':
+                                pnl = (entry_price - exit_price) * qty
+                            else:
+                                pnl = (exit_price - entry_price) * qty
+
                         await self._finalize_closed_position(
                             symbol=symbol,
                             reason='HARD_STOP_FILLED',
                             exit_price=exit_price,
-                            pnl=0.0,
+                            pnl=pnl,
                             send_alert=True,
                         )
                         return True
@@ -847,19 +857,19 @@ class OrderManager:
                 # STEP 4: CLEANUP (releases capital slot + re-syncs margin)
                 exit_price = 0.0
                 pnl = 0.0
-                if filled:
-                    try:
-                        # Try to get real exit price from broker
-                        exit_price = await self.broker.get_order_avg_price(exit_id)
-                        if exit_price > 0:
-                            entry_price = pos.get('entry_price', 0)
-                            qty = pos.get('qty', 0)
-                            if pos['side'] == 'SHORT':
-                                pnl = (entry_price - exit_price) * qty
-                            else:
-                                pnl = (exit_price - entry_price) * qty
-                    except Exception as e:
-                        logger.warning(f"[SAFE_EXIT] Could not fetch real exit price: {e}")
+                # Fallback: Try to get exit price even if wait_for_fill timed out (WebSocket lag)
+                try:
+                    # Try to get real exit price from broker
+                    exit_price = await self.broker.get_order_avg_price(exit_id)
+                    if exit_price > 0:
+                        entry_price = pos.get('entry_price', 0)
+                        qty = pos.get('qty', 0)
+                        if pos['side'] == 'SHORT':
+                            pnl = (entry_price - exit_price) * qty
+                        else:
+                            pnl = (exit_price - entry_price) * qty
+                except Exception as e:
+                    logger.warning(f"[SAFE_EXIT] Could not fetch real exit price fallback: {e}")
 
                 await self._finalize_closed_position(
                     symbol=symbol,
@@ -988,6 +998,84 @@ class OrderManager:
         except Exception as e:
             logger.error(f"[SL_QTY] Exception for {symbol}: {e}")
             return False
+
+    async def move_hard_stop(self, symbol: str, new_stop_price: float) -> bool:
+        """
+        Phase 97.2: Move the broker-side SL-M order to a new stop price (e.g. for BE activation).
+        Strategy: Modify the existing SL-M order to the new stop price.
+        Falls back to cancel+replace if modify is not supported.
+        Returns True if broker SL is now at new_stop_price, False otherwise.
+        """
+        try:
+            pos = self.active_positions.get(symbol)
+            if not pos:
+                logger.warning(f"[MOVE_SL] {symbol} not in active_positions")
+                return False
+
+            sl_id = pos.get('sl_id') or self.hard_stops.get(symbol)
+            if not sl_id:
+                logger.warning(f"[MOVE_SL] No sl_id found for {symbol}")
+                return False
+
+            loop = asyncio.get_event_loop()
+            rest = getattr(self.broker, 'rest_client', None)
+            if not rest:
+                logger.error(f"[MOVE_SL] No rest_client for {symbol}")
+                return False
+
+            # Get current SL order details to preserve qty
+            orderbook = await loop.run_in_executor(None, rest.orderbook)
+            if not isinstance(orderbook, dict) or orderbook.get('s') != 'ok':
+                logger.error(f"[MOVE_SL] Orderbook fetch failed for {symbol}")
+                return False
+
+            current_sl_order = None
+            for order in orderbook.get('orderBook', []):
+                if str(order.get('id')) == str(sl_id) and order.get('status') == FYERS_ORDER_STATUS_PENDING:
+                    current_sl_order = order
+                    break
+
+            if not current_sl_order:
+                logger.warning(f"[MOVE_SL] SL order {sl_id} not found as pending for {symbol} — may already be filled")
+                return False
+
+            qty = current_sl_order.get('qty', pos.get('qty', 0))
+            direction = pos.get('side', 'SHORT')
+
+            # For SHORT: SL is a BUY order above entry. Limit = stop * 1.005 (safety buffer)
+            # For LONG:  SL is a SELL order below entry. Limit = stop * 0.995
+            tick = 0.05
+            if direction == 'SHORT':
+                limit_price = round(round(new_stop_price * 1.005 / tick) * tick, 2)
+            else:
+                limit_price = round(round(new_stop_price * 0.995 / tick) * tick, 2)
+
+            modify_data = {
+                "id":         sl_id,
+                "qty":        qty,
+                "type":       4,              # SL-M order type
+                "limitPrice": limit_price,
+                "stopPrice":  round(new_stop_price, 2),
+            }
+
+            resp = await loop.run_in_executor(
+                None,
+                lambda: rest.modify_order(data=modify_data)
+            )
+
+            if resp and resp.get('s') == 'ok':
+                # Update our internal state to reflect the new SL
+                pos['stop_loss'] = new_stop_price
+                logger.info(f"✅ [MOVE_SL] {symbol} broker SL moved → ₹{new_stop_price:.2f} (order {sl_id})")
+                return True
+            else:
+                logger.error(f"❌ [MOVE_SL] modify_order failed for {symbol}: {resp}")
+                return False
+
+        except Exception as e:
+            logger.error(f"[MOVE_SL] Exception for {symbol}: {e}")
+            return False
+
 
     async def _emergency_exit(self, symbol: str, qty: int, side: str):
         try:
