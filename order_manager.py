@@ -144,22 +144,22 @@ class OrderManager:
             return self._round_sl_to_tick(sl_price, 'SELL', tick)
 
     def compute_take_profits(self, entry: float, signal: dict) -> dict:
-        """Phase 78: Single 100% Take Profit Target. Phase 94: Direction-aware."""
-        atr = signal.get('atr', 0)
+        """Phase 97.2: Fixed 1% Take Profit Target. Remove ATR dependency."""
         direction = config.TRADE_DIRECTION
-        if atr == 0:
-            # Default 1.5% TP in the correct direction
-            return {'tp': entry * 1.015 if direction == 'LONG' else entry * 0.985}
-
-        # Use signal override or default
-        tp_mult = signal.get('tp_atr_mult_override') or \
-                  signal.get('tp1_atr_mult_override') or \
-                  getattr(config, 'P78_SINGLE_TP_ATR_MULT_DEFAULT', 1.0)
-
+        
+        # Phase 97.2: Use fixed 1% price move for TP
+        # (1% price move * 5x leverage = 5% profit)
+        tp_pct = 0.01 
+        
         if direction == 'LONG':
-            tp = entry + atr * tp_mult
+            tp = entry * (1 + tp_pct)
         else:
-            tp = entry - atr * tp_mult
+            tp = entry * (1 - tp_pct)
+            
+        # Round to tick size
+        tick = signal.get('tick_size', 0.05)
+        tp = round(round(tp / tick) * tick, 2)
+        
         return {'tp': tp}
 
     async def _verify_fill_via_rest(self, order_id: str) -> Optional[float]:

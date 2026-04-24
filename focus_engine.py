@@ -697,8 +697,8 @@ class FocusEngine:
             except Exception as e:
                 logger.warning(f"[P52] compute_take_profits failed for {symbol}: {e}")
 
-        # TP default: 1.5% in the correct direction
-        tp_default = entry_price * 1.015 if is_long else entry_price * 0.985
+        # TP default: 1.0% in the correct direction
+        tp_default = entry_price * 1.01 if is_long else entry_price * 0.99
 
         self.active_trade = {
             'symbol':          symbol,
