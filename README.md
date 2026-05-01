@@ -1,860 +1,614 @@
 # ShortCircuit
 
-> *The market is not a place. It is a collision of asymmetric speed and conviction. 
-> Most participants react to the past; ShortCircuit observes the present in high-frequency 
-> to exploit the exhaustion of momentum before the crowd realizes the music has stopped.*
+**ShortCircuit is a live intraday NSE execution engine for detecting and trading momentum exhaustion.**
 
-***
+It is not a chart pattern script. It is not a notification bot with a broker wrapper bolted on. ShortCircuit is a full-stack trading system: real-time market data ingestion, microstructure filtering, sequential gate evaluation, capital-aware sizing, broker-side risk placement, reconciliation, audit logging, Telegram control, dashboard telemetry, and parquet-based ML feedback loops.
 
-## Origin
+The product thesis is simple:
 
-ShortCircuit was not born at a keyboard; it was born in the observation of fragility.
+> The edge is not in predicting every move.
+> The edge is in waiting until momentum is extended, structurally rejected, liquidity is fading, and execution can be verified.
 
-The market has a recurring character arc: the "Gamma Climax." A stock pushed up 10% on retail FOMO and institutional spoofing creates a specific microstructure tension. It is a conversation between those who are trapped at the high and those who are hiding their supply in the order book.
+ShortCircuit turns that thesis into software.
 
-The thesis is simple: **Pumped stocks fail.** Not because they have to, but because the physics of liquidity eventually demands a reversion. The challenge has always been the "Gap" — the psychological chasm between seeing a setup and executing it with absolute, cold-blooded precision.
+---
 
-ShortCircuit is the bridge across that chasm. It borrows the keen observations of professional microstructure traders and formalizes them into a 13-gate execution engine. It removes the human element — the negotiation, the hesitation, and the hope — and replaces it with a rigorous, event-driven algorithm that waits for exhaustion to become a fact before firing.
+## Executive Summary
 
-The core idea belongs to the observers; the implementation belongs to the machine.
+ShortCircuit scans thousands of NSE equity symbols during the live session and hunts for a very specific event:
 
-***
+**an overextended intraday mover failing at or above value while momentum buyers are trapped and upward auction quality is degrading.**
 
-## Why This Exists
+When the setup appears, the system does not immediately trade. It promotes the symbol into a staged gate pipeline. The analyzer must approve structure, momentum, volume, profile, confluence, higher-timeframe context, and signal eligibility. The focus engine then waits for a real structural trigger: a 1-minute close through the entry level, with invalidation above the setup high.
 
-Every market participant believes they have an edge.
+Only after that does the order layer engage.
 
-Most are wrong — not because their ideas are bad, but because the gap between
-*having an insight* and *acting on it correctly, every time, without hesitation,
-without error* is wider than any strategy can bridge manually.
+At runtime the bot coordinates:
 
-Human judgment degrades under pressure. Execution hesitates at exactly the wrong
-moment. Stops get moved. Rules get broken at 2:47 PM when a position is down and
-the brain starts negotiating with itself.
+- Fyers REST and WebSocket connectivity
+- NSE-EQ scanner universe
+- WebSocket-first quote cache with freshness tracking
+- Market regime and climax-window logic
+- Multi-gate analyzer
+- Signal validation engine
+- Single-position capital slot
+- Broker-side stop placement
+- Active trade monitor
+- Telegram command/control
+- FastAPI dashboard telemetry
+- PostgreSQL audit trail
+- ML parquet logger
+- EOD reporting and shutdown
+- Broker/DB reconciliation
 
-The negotiation is the problem. Not the market.
+ShortCircuit is designed around one operating principle:
 
-The mind under financial stress does not think in probabilities. It anchors to
-entry price as if the market knows or cares where you bought. It holds losers
-because closing them makes the loss *real*. It cuts winners because the relief
-of booking profit overrides the logic of letting the setup play out.
+**if the system cannot prove the setup, prove the fill, prove the stop, and prove the state, it should not trade.**
 
-These are not character flaws. They are the predictable outputs of a nervous system
-that was not designed for adversarial probabilistic environments with real stakes.
+---
 
-ShortCircuit is not an attempt to replace judgment.
-It is an attempt to protect it — by removing the execution layer from human control
-entirely, and trusting only what can be verified, logged, and audited.
+## Strategy Model
 
-The rules are written when the mind is calm.
-They execute when it is not.
-That gap is the entire value of the system.
+ShortCircuit is primarily a short-side mean-reversion and exhaustion engine.
 
-***
+The system is built around three market observations:
 
-## What It Is
+1. Strong intraday gain creates unstable positioning.
+2. Momentum becomes tradable only when extension meets rejection.
+3. A signal is not an entry until price confirms structural failure.
 
-A fully automated, event-driven intraday short-selling system for NSE equities.
+The bot is interested in stocks that have already moved aggressively, usually above VWAP and value, where late momentum participants are vulnerable. It then looks for evidence that the move is no longer being accepted.
 
-It watches the market continuously. It identifies one specific microstructure event —
-institutional exhaustion at intraday highs. It validates that observation through
-thirteen independent sequential checks. When all thirteen pass, it executes.
+Core setup ingredients:
 
-Between signals, it does nothing.
-It does not overtrade. It does not hedge. It does not improvise.
-The discipline is not in the trader. It is in the architecture.
+- Intraday gain expansion
+- VWAP standard-deviation stretch
+- Value Area High or profile rejection
+- VWAP flattening or momentum decay
+- Volume fade after surge
+- Failed continuation structure
+- Optional order-flow confluence
+- Higher-timeframe stall or fail-open guard
+- Candle-close trigger through the signal low
 
-***
+The strategy is not "short everything that is up."
 
-## The Philosophy of Infrastructure First
+It is "short only when an up-move has become statistically stretched, structurally rejected, and execution-confirmed."
 
-Before any strategy logic was written, three problems were solved completely.
-Not partially. Not "good enough for now." Completely.
+---
 
-**Authentication:**
-A trading system that re-authenticates mid-session is not a trading system.
-It is a liability with a Telegram interface. ShortCircuit uses a singleton OAuth token —
-one authentication per deploy, persisted to disk, validated on startup via a
-lightweight profile call. The broker session does not expire during trading hours. Ever.
+## Runtime Modes
 
-**State:**
-Every task shares one `asyncio.Event` — `shutdown_event`.
-When any component sets it, every `while not shutdown_event.is_set()` loop exits
-cleanly on its next iteration. There is no ambiguity about system state at any moment.
-There is no thread racing on position state. There is no "was that order filled?" —
-the Order WebSocket answers that question exactly once, immediately, without polling.
-Certainty is not a luxury in live trading. It is a prerequisite.
+### 09:30-10:00 IST: Climax Mode
 
-**Failure:**
-Every component has a documented failure mode.
-Every failure mode has a handler.
-Nothing fails silently.
-Silence in a live system is always the most dangerous state.
+The opening window is treated as a special regime.
 
-***
+During this period, normal market noise is dangerous. G7 blocks most candidates unless they qualify as a climax exception.
 
-## The Architecture (Phase 87 "Turbo")
+Current climax requirements:
 
-```
-NSE Market (9:15 AM → 3:30 PM IST)
-    │
-    ├─ Data WebSocket (0ms Latency Cache)
-    │   Direct high-frequency tick stream. UNINITIALIZED → PRIMING → READY.
-    │   Powers: 500ms Instant TP/SL Monitoring, and Multi-Factor Validation.
-    │   Seeded from REST at startup to ensure zero-gap coverage.
-    │
-    └─ Order WebSocket
-        Real-time fill confirmation. No polling. Zero internal latency 
-        between broker fill and system state transition.
-
-Scanner (The Sieve)
-    2,400+ NSE-EQ symbols. WebSocket-First analysis.
-    Pre-filter: Gain ≥7.5%, Periodic Volume (Delta) checks, LTP ≥₹50.
-    Hard Quality Guard: Rejects "Ghost Liquidity" (>50% zero-volume candles).
-    Output: Verified candidates promoted to the 13-Gate Pipeline.
-
-FocusEngine (Execution & Monitoring)
-    Validation: High-frequency triggers (LTP-touch) or Structural (Candle-Close).
-    Monitoring: 500ms Duty Cycle. Reads from local WebSocket cache for 
-                zero-network-latency Take Profit and Stop Loss execution.
-    Target Tracking: Adaptive logic derived from ATR and Intraday Gain.
-
-Order Manager
-    Phase 78 Precision: Single 100% exit targets for maximum reliability.
-    Atomic Entry/SL: SL-Limit orders placed immediately on fill.
-    Safety: Automated SL quantity sync and "Cancel-First" exit logic.
+```text
+P65_AMT_ENABLED = True
+P65_G7_CLIMAX_WINDOW_START = 09:30
+P65_G7_SAFE_TRADE_START = 10:00
+P65_G7_CLIMAX_SD_THRESHOLD = 2.5
+P65_G7_VOLUME_Z_SCORE_THRESHOLD = 2.0
 ```
 
-Capital Manager
-    Source of truth: Fyers /funds API. Never a hardcoded base capital.
-    Parses 3 Fyers response shapes. 2% safety buffer. Single-position slot lock.
-    release_slot() calls sync() outside asyncio.Lock — deadlock prevention.
+A candidate must show:
 
-Deployment & SEBI 2026
-    Azure VPS (`ShortCircuit-Server`) with static IP for SEBI compliance.
-    `ShortCircuit.sh` for `tmux`-persisted execution. 
-    "Smart URL Pasting" for zero-friction 9:15 AM manual 2FA.
-    Standardized `DB_PASS` architecture for multi-env reliability.
+- enough VWAP stretch
+- enough volume z-score
+- profile rejection
 
-GateResultLogger
-    Every gate evaluation → 36-column PostgreSQL record. Always. Regardless of outcome.
-    Batched async flush. JSON-Lines fallback on any DB failure — zero silent data loss.
-    Recoverable via tools/eod_reimport.py after market close.
+Otherwise it is rejected at `G7_REGIME`.
 
-Reconciliation Engine
-    Detects orphaned positions (broker open, DB closed) and phantoms (DB open, broker flat).
-    adopt_orphan(): emergency SL + capital slot + DB entry within 6 seconds.
-    Idempotency guards at two levels — 600 SL orders/hour otherwise.
-    _db_dirty flag terminates phantom detection loops — without it, same phantom fires every 6s forever.
+### After 10:00 IST: Normal Mode
 
-Telegram
-    The only interface. No web UI. No dashboard server. No REST endpoint.
-    Every signal. Every fill. Every partial. Every alert. Every exit. Real-time.
+After the safe-trade start, G7 stops acting as an opening-volatility blocker. The bot shifts into the normal exhaustion pipeline:
+
+- gain and rotation constraints
+- circuit guard
+- momentum safeguard
+- exhaustion/profile gate
+- confluence scoring
+- higher-timeframe confluence
+- signal manager eligibility
+- validation trigger
+
+This is where most clean VAH/Profile Rejection trades should come from.
+
+### Version A: Momentum Decay Fast Path
+
+Version A is a specialized decay path.
+
+It is enabled by:
+
+```text
+P92_VERSION_A_ENABLED = True
 ```
 
-***
+It only activates when decay is detected:
 
-## The 13 Gates
+```text
+slope_5m < slope_30m * 0.90
+vwap_sd > P66_G4_DECAY_SD_THRESHOLD
+```
 
-There is a specific reason there are thirteen and not three.
+Version A can bypass the normal G5/G6 exhaustion composite because the system treats the combination of:
 
-A single strong signal is a hypothesis.
-Thirteen independent confirmations are closer to a fact.
+- strong gain
+- VWAP stretch
+- confirmed decay
+- surge-and-fade volume audit
 
-Each gate is designed to kill the trade — not to approve it.
-The system is structurally biased toward inaction.
-A trade happens only when it runs out of reasons to reject.
+as the signal itself.
 
-This inverts the default psychology of a trader who looks for reasons to enter.
-The system looks for reasons to stay out.
-Whatever survives that search is worth acting on.
+Normal Version A thresholds:
 
-The gates have grown over time. Not because the original design was wrong,
-but because the market kept finding the gaps. Each new gate is scar tissue
-from a lesson that cost something to learn. They are not additions. They are corrections.
+```text
+P92_VA_MIN_GAIN = 10.0
+P92_VA_MIN_SD = 2.5
+P93_RVOL_SURGE_PEAK_MULT = 3.0
+P93_RVOL_SURGE_FADE_RATIO = 0.6
+```
 
-| Gate | ID | What It Kills |
+Version A+ is stricter and is intended for post-target conditions:
+
+```text
+P92_VA_PLUS_MIN_GAIN = 13.0
+P92_VA_PLUS_MIN_SD = 3.5
+P92_VA_PLUS_REQUIRE_NARROWING_HIGHS = True
+```
+
+Version A signals are named explicitly:
+
+```text
+A_EXHAUSTION_SCALP
+A+_EXHAUSTION_SCALP
+```
+
+If a signal is named `VAH_REJECTION + Profile Rejection`, it came from the normal profile/exhaustion path, not Version A.
+
+---
+
+## Gate Stack
+
+ShortCircuit is designed to reject aggressively. A trade is not "found"; it survives.
+
+| Gate | Name | Function |
 |---|---|---|
-| **G1** | STRUCTURAL_INTEGRITY | Time-since-high (45 candles), Kill Backdoor (price dropped >2.0% from high) |
-| **G2** | DATA_QUALITY | Insufficient candles (<45 or <15 in Climax) |
-| **G3** | CIRCUIT_GUARD | Session-permanent blacklist: any symbol that is <0.5% from Upper Circuit |
-| **G4** | MOMENTUM_DECAY | Rejects if price is extending with high slope. Refactored for **Immediate Decay Detection** in Phase 87. |
-| **G5** | EXHAUSTION | Gain outside 7.5–14.5%, price not above VAH, volume fade |
-| **G6** | TIERED_SCORING | Confluence score < 2 (DPOC, Trapped Longs, Patterns) |
-| **G7** | MARKET_REGIME | Pre-09:30 AM, Post-15:10 PM, or Nifty Trend conflict |
-| **G8** | SIGNAL_LIMIT | Max 5 trades today, 45-min per-symbol cooldown, Session loss pause |
-| **G9** | MATH_PHYSICS | Z-Score Stretch / Momentum Stall / institutional absorption detection |
-| **G10** | EXEC_PRECISION | Spread guard / Cautious qty mode |
-| **G11** | FIXED_TIMEOUT | Signals expire after exactly 15 minutes to prevent stale execution |
-| **G12** | INSTANT_TRIGGER | High-frequency WebSocket confirmation. Requires structure break to engage. |
-| **G13** | OUTCOME_LOG | Post-trade result recorded. Finalizes the feedback loop. |
+| Scanner | Pre-filter | Gain, volume, LTP, tick size, candle quality, dirty chart rejection |
+| G2 | RVOL/Data Validity | Rejects insufficient history or unreliable candle context |
+| G7 | Market Regime | Opening climax filter, premarket block, EOD cutoff, Nifty regime |
+| G1 | Gain/Rotation Constraints | Gain floor, normal threshold, retrace/kill-backdoor logic, adaptive softening |
+| G3 | Circuit Guard | Blocks symbols near or touching circuit behavior |
+| G4 | Momentum Safeguard | Blocks active extension unless slope inflection/decay is confirmed |
+| Version A | Decay Fast Path | Optional bypass of G5/G6 when decay + stretch + audit satisfy fast-path requirements |
+| G15 | Unspecified Move Audit | Surge-and-fade volume test used inside Version A/A+ |
+| G5 | Exhaustion/Profile | Confirms VAH/profile rejection, stretch score, volume fade, exhaustion state |
+| G6 | Confluence | Requires enough pro-confluence: value divergence, round level, wick rejection, order-flow evidence |
+| G9 | HTF Confluence | 15m stall/acceleration guard with alpha-strike bypass and fail-open behavior |
+| G8 | Signal Manager | Per-symbol cooldown, daily state, target/loss constraints |
+| G13 | Risk Model | Stop/target metadata, trade payload finalization |
+| G10 | Execution Precision | Spread guard and cautious execution mode |
+| G11 | Timeout | Pending signal expiry, default 15 minutes |
+| G12 | Validation | 1-minute candle close through trigger, invalidation above setup high |
 
-Every rejection at every gate produces a `GateResult` record with the exact failing value,
-the threshold it failed against, and the timestamp. The system cannot be accused of opacity.
+The current production flow is deliberately layered:
 
-Gate 9 used to live inside its own module with limited audit trails. It was promoted to G9 with full recording specifically because invisible rejections are indistinguishable from failures. Every rejection is now visible, queryable, and reviewable.
-
-Gate 13 does not block entries. It closes the feedback loop after they close.
-It is the system watching itself.
-
-***
-
-## The Microstructure Event
-
-The system hunts one specific setup.
-
-A stock has moved 9–14.5% intraday on elevated volume. Retail momentum buyers
-are extended. Market makers have been absorbing the buying at the high.
-The last retail breakout buyers are now trapped above their entry.
-
-The tell is not the candle pattern. The candle pattern is the last confirmation —
-the visible shadow of something that already happened at the order book level.
-
-The actual tell is the simultaneous presence of:
-order flow evidence (absorption at the high, trapped long structure),
-market profile deviation (LTP beyond 1.5SD above VWAP, POC far below current price),
-higher-timeframe structure failure (15m Lower High with volume fade),
-and volume character (extreme RVOL, zero net price progress — the definition of hidden supply).
-
-When these confirm simultaneously, the setup is not a prediction.
-It is an observation of something that has already happened.
-The trade does not anticipate the move. It confirms it has begun.
-
-The most significant execution safeguard is the shift from **LTP-touch** to **Candle-Close** validation.
-
-Retail traders enter on a single tick. Institutional traders wait for a candle to close to confirm that the level has truly broken. ShortCircuit now does the same:
-
-- **Entry**: The system will only fire an order if a 1-minute candle **closes** below the signal low. A brief spike (wick) below the trigger is ignored.
-- **Invalidation**: If a 1-minute candle **closes** above the signal high (plus a 0.2% buffer), the thesis is killed and the signal is removed.
-
-This ensures capital is only deployed when a structural break is confirmed.
-
-
-If a 1-minute candle **closes** above the signal high (plus a 0.2% buffer) at any point before the entry — the signal is invalidated and removed. The buffer exists because markets test and retrace. A 0.2% recovery is noise. Anything beyond it means the selling pressure was not real.
-
-### Five Parallel Edge Detectors
-
-| Detector | What It Finds |
-|---|---|
-| **Absorption Engine** | High volume, zero price progress — hidden limit supply absorbing every buy at the high |
-| **Bad High Analyzer** | Level 2 DOM supply wall sitting at the day extreme — the ceiling is visible in the depth |
-| **Trapped Long Scanner** | Failed breakout above prior high — retail buyers now underwater at a structural level |
-| **Failed Auction Detector** | Range expansion exhaustion — price was rejected by *time*, not by a single visible order |
-| **Classic Pattern Engine** | Bearish Engulfing, Shooting Star, Evening Star — volume-confirmed only, no pattern-only signals |
-
-Confidence tiers: `EXTREME ≥ 5.0` | `HIGH ≥ 3.0` | `MEDIUM ≥ 2.0`
-
-A signal with a confluence score < 2 is rejected at G6.
-A signal that fails Momentum Physics is rejected at G9.
-Confidence is a weight, not a passport.
-
-***
-
-## The WS Cache — Freshness vs Presence
-
-This distinction took multiple debugging sessions to discover and one architectural change to fix.
-
-The original health monitor tracked `known_pct` — the fraction of symbols with *any* cached data,
-whether from a REST seed or an actual WebSocket tick. This produced a system that reported
-`HEALTHY` while running on hours-old REST snapshots, because seeded symbols counted as known.
-
-The system scanned. It found candidates. It analyzed them.
-It was analyzing the market from data that had not been live-ticked in 20 minutes.
-
-The fix: DEGRADED status is now determined entirely by `fresh_pct` —
-the fraction of symbols that have received an actual WebSocket tick within the TTL window.
-REST-seeded data does not count toward freshness.
-
-```
-UNINITIALIZED   → broker constructed, no connection yet
-PRIMING         → subscribe_scanner_universe() called, WS connecting
-READY           → ≥85% of symbols have a valid WS tick within TTL
-
-Startup blocks for up to 45 seconds waiting for READY.
-If the 45s expires: CRITICAL alert + Telegram notification + REST fallback mode.
-
-During live operation:
-  fresh_pct drops → DEGRADED flag set (after 30s continuous degradation)
-  Max 3 re-prime attempts per degraded episode
-  3rd failure triggers nuclear reconnect: full WS teardown, 5s sleep, full re-subscribe + re-seed
-  3rd failure also triggers UNRECOVERABLE Telegram alert
+```text
+Scanner
+  -> Analyzer gates
+  -> Pending signal
+  -> G12 candle-close validation
+  -> Order entry
+  -> Stop placement
+  -> Active focus monitor
+  -> Exit/finalization
+  -> ML + DB + EOD feedback
 ```
 
-`seed_from_rest()` runs before `subscribe_scanner_universe()` at startup.
-This prevents "Missing:" inflation on cold starts where symbols take time to receive their first tick.
-REST-seeded entries are tagged `REST_SEED` and excluded from freshness calculations.
-They exist only to give the system something to read while WS catches up.
+---
 
-***
+## G9: Higher-Timeframe Physics
 
-## The Capital Architecture
-The capital manager has no hardcoded base capital.
+G9 is the higher-timeframe confluence layer.
 
-Every sizing decision derives from a live call to the Fyers `/funds` API.
-`_real_margin` is updated at session start, after every confirmed fill,
-after every position close, and every 5 minutes in the background health monitor.
-The system trades with what the broker says is available — nothing more, nothing less.
+It lives in `htf_confluence.py` and models whether the larger timeframe has stalled or is still accelerating.
 
-Three Fyers `/funds` response shapes exist across API versions.
-All three are parsed:
+Core logic:
 
-```python
-_parse_fyers_funds():
-    → fund_limit list (v3 standard) — indexed by id=2 "Available Balance"
-    → equity dict — direct key lookup
-    → flat dict — top-level key lookup
+```text
+if vwap_sd > P61_G9_BYPASS_SD_THRESHOLD:
+    PASS as Alpha Strike
+
+else:
+    read 15m candles
+    curr_move = current 15m close move
+    prev_move = previous 15m close move
+
+    if curr_move > P61_G9_ACCEL_REJECT_THRESHOLD:
+        BLOCK as momentum acceleration
+
+    if curr_move < P61_G9_STALL_PASS_THRESHOLD:
+        PASS as momentum stall
+
+    otherwise:
+        BLOCK as sustained trend
 ```
 
-On any Fyers API failure, `sync()` retains the last known value and logs a warning.
-It does not crash. It does not zero out capital. It continues with the last confirmed figure.
+Current parameters:
 
-`compute_qty()` applies a 2% safety buffer (`safety_cap = _real_margin × 0.98`)
-and walks down quantity until `margin_required ≤ safety_cap`.
-This buffer absorbs intraday margin fluctuations without ever touching the hard limit.
-
-`release_slot()` calls `sync(broker)` *outside* the `asyncio.Lock`.
-This is deliberate. Calling a potentially-blocking broker sync *inside* a lock
-would deadlock any concurrent coroutine waiting to check slot state.
-The lock protects state mutation. The sync does not need to be inside it.
-
-## The Signal Slot Architecture
-
-Historically, a signal could burn its daily slot at detection.
-
-A signal detected at 10:30 AM that timed out at 10:45 AM (never validated, never traded)
-still consumed one of the day's five slots. After four such timeouts, the system
-went silent for the rest of the session with trades still possible in the afternoon.
-
-The fix: `signal_manager.record_signal()` is called only at `enter_position()` success —
-not at detection, not at validation, not at pending queue entry.
-
-```
-Detection           → signal logged to CSV, ML observation recorded
-Validation (G12)    → two-tick confirmation
-enter_position()    → fill confirmed via WebSocket
-record_signal()     → slot burned here, and only here
+```text
+P61_G9_BYPASS_SD_THRESHOLD = 3.0
+P61_G9_ACCEL_REJECT_THRESHOLD = 2.0
+P61_G9_STALL_PASS_THRESHOLD = 1.0
 ```
 
-A signal that times out is a signal that did not trade.
-It should not cost a slot. It does not.
+Operationally, G9 is a confluence and protection layer, not the first signal generator.
 
-Historical reconciliation saw the engine detect orphaned positions and place duplicate orders. 
-On the next cycle — 6 seconds later — it detected the same position again.
-And placed another SL order. And another. And another.
+Important implementation behavior:
 
-At 10 cycles per minute: approximately 600 SL orders per hour.
+- If stretch is extreme, G9 passes immediately.
+- If 15m data is missing or insufficient, G9 passes fail-open.
+- If the calculation errors, G9 passes fail-open.
+- Version A normal mode bypasses G9.
+- Version A+ can require G9.
 
-The fix is `adopt_orphan()`:
+This is intentional in the sense that the system should not drop a high-quality immediate setup purely because the HTF fetch path is degraded. It is also auditable, because the G9 value is logged into gate results.
 
-```
-detect orphan → idempotency check (symbol already in active_positions?) → skip if yes
-              → place tick-rounded emergency SL via REST
-              → acquire capital slot
-              → log_trade_entry() to DB atomically
-              → _db_dirty = True   ← forces fresh DB read next cycle
-              → if capital slot occupied: CRITICAL alert "TWO POSITIONS OPEN"
-```
+---
 
-The idempotency guard exists at two levels: inside `adopt_orphan()` itself,
-and in the `_handle_divergence()` ORPHANS loop that calls it.
-Two concurrent reconciliation cycles cannot double-adopt the same position.
+## G15: Unspecified Move Audit
 
-`_db_dirty = True` is the mechanism that terminates the detection loop.
-Without it, the adopted position remains invisible to the next DB read,
-the orphan is re-detected, and the cycle repeats.
+G15 is not a universal gate. It is a specialized audit inside Version A/A+.
 
-The same dirty flag applies to phantom cleanup:
-after a manually-closed position is processed, `_db_dirty = True` is set —
-forcing a fresh DB read on the next cycle so the cleaned phantom does not re-appear.
+Its job is to reject steady institutional trend continuation and admit only overreaction-style moves that show surge and fade.
 
-***
+The logic:
 
-## The Partial Exit Problem
+```text
+baseline_vol = average volume of candles [-18:-3]
+max_recent_vol = max volume of last 3 candles
+current_vol = volume of latest candle
 
-At TP1, 40% of the position is closed. A new REST call modifies the active SL-M order
-to reflect the remaining quantity.
+surge_hit = max_recent_vol > baseline_vol * 3.0
+fade_hit = current_vol < max_recent_vol * 0.6
 
-If this step is skipped, the SL-M order retains the original full quantity.
-When price hits the stop, the broker tries to sell more shares than currently held.
-For a short position, selling more than held is a *buy*. The system would accidentally
-open a long position in the opposite direction.
-
-This is not a theoretical edge case. It is a predictable consequence of partial exits
-without SL quantity synchronization. `modify_sl_qty()` fires after every partial close.
-No exceptions.
-
-`safe_exit()` uses cancel-first logic:
-
-```
-1. Send cancel request for existing SL-M order
-2. Wait for cancel confirmation
-3. Submit new exit order at current market
+PASS only if surge_hit and fade_hit
 ```
 
-Submitting an exit without cancelling first risks two fills against the same position —
-one from the SL-M trigger and one from the manual exit. Cancel-first eliminates this.
-The cancelled order may already be filled. `safe_exit()` handles that case too:
-if the broker responds that the order is not cancellable (already executed),
-the fill is verified via REST before any new order is submitted.
+This makes Version A more selective.
 
-***
+It prevents the decay fast path from shorting a stock that is still being accumulated in a clean, persistent, high-quality trend. The system wants "exhaustion after overreaction," not "fade a real trend because it is up."
 
-## The Gate Audit Trail
+---
 
-Every gate evaluation produces a row in the `gate_results` table.
-Every row. Whether the signal fired, timed out, was rejected at G1, or was suppressed
-because auto mode was off. 36 columns per row.
+## Data Plane
 
-```sql
-verdict IN ('SIGNAL_FIRED', 'REJECTED', 'DATA_ERROR', 'SUPPRESSED', 'OBSERVED_NO_CAPITAL')
-first_fail_gate: 'G5_EXHAUSTION', 'G9_MATH_PHYSICS', 'G11_FIXED_TIMEOUT', ...
-rejection_reason: exact human-readable threshold description
-data_tier: 'WS_CACHE' | 'HYBRID' | 'REST_EMERGENCY'
+ShortCircuit uses a WebSocket-first data architecture.
+
+The scanner universe is seeded and maintained through a quote cache with freshness tracking.
+
+Cache lifecycle:
+
+```text
+UNINITIALIZED -> PRIMING -> READY -> DEGRADED -> REPRIME/RECOVER
 ```
 
-Phase 44.9 discovered that `g9_value` and `g11_value` were typed as `NUMERIC` in PostgreSQL,
-but both HTF structure gate (G9) and the timeout gate (G11) return string rejection reasons
-(`"NO_HTF_LOWER_HIGH"`, `"TIMEOUT_EXPIRED"`). Every batch insert failed silently with
-`decimal.ConversionSyntax`. 2,300+ gate records per session were disappearing into `/dev/null`.
+Design principles:
 
-Migration `v44_8_3_gate_results_g9_type_fix.sql` alters both columns to `VARCHAR(100)`.
-The `_sanitize_row()` function in `GateResultLogger` now coerces every value
-to its expected type before `executemany`. No type mismatch can silently drop a record.
+- REST seed gives cold-start coverage.
+- REST seed does not count as true freshness.
+- WebSocket tick freshness determines readiness.
+- Startup waits for cache readiness before scanning.
+- Degraded cache can reprime.
+- REST fallback is available during data stress.
 
-On any DB write failure, `GateResultLogger` falls through to `_flush_to_json_fallback()`:
+The system separates "known" from "fresh."
 
-```python
-# Non-blocking fallback via aiofiles
-# Appends to logs/gate_fallback_YYYYMMDD.jsonl
-# Recoverable via tools/eod_reimport.py after market close
+A stale cached quote is not live market data. The bot treats that distinction as a first-class safety property.
+
+---
+
+## Execution Plane
+
+The execution system is built around controlled state transitions.
+
+Entry lifecycle:
+
+```text
+Signal detected
+  -> Telegram alert / ML observation / gate audit
+  -> Pending validation
+  -> Candle close breaks trigger
+  -> Capital slot check
+  -> Entry order
+  -> WebSocket fill confirmation or REST verification fallback
+  -> Broker stop placement
+  -> Active focus monitor
 ```
 
-There is no state in which a gate evaluation produces no record.
-The fallback is not a degraded mode. It is the second line of an unbreakable audit trail.
+Exit lifecycle:
 
-***
+```text
+TP hit
+  -> cancel/coordinate protective stop
+  -> exit order
+  -> fill confirmation
+  -> DB close
+  -> ML outcome
+  -> capital release
 
-## Two WebSockets. Separate Concerns.
-
-```
-Data WebSocket
-    ─ Tick feed for all subscribed symbols
-    ─ Gate 12: 1-minute candle close below trigger = execution
-    ─ Gate 12 invalidation: candle close above signal_high × 1.002 cancels the signal
-    ─ Position monitor: SL/TP levels checked on every tick
-    ─ Dashboard: 2s P&L refresh, broker-verified LTP
-
-Order WebSocket
-    ─ Fill events: PENDING → TRADED status change
-    ─ Entry fill, SL-M hit, partial exit fill confirmation
-    ─ Capital slot released only after TRADED event — never on REST response alone
+SL hit
+  -> order WebSocket fill event
+  -> broker position sync
+  -> internal state close
+  -> capital release
 ```
 
-Both run as daemon threads using the blocking Fyers SDK.
-Callbacks bridge to the `asyncio` event loop via `asyncio.run_coroutine_threadsafe()`
-using `self._loop` captured during `initialize()` via `asyncio.get_running_loop()` —
-never `get_event_loop()` from a thread, which is unsafe in Python 3.12.
+The system defaults to one open position.
 
-***
+This is not a limitation. It is a risk boundary. Capital, state, reconciliation, and Telegram control are all simpler and more robust when the live system protects one thesis at a time.
 
-## The Single Asyncio Event Loop
+---
 
-One process. One event loop. Five concurrent tasks.
+## Capital Model
 
-```python
-async with asyncio.TaskGroup() as tg:
-    tg.create_task(_trading_loop(ctx, shutdown_event))
-    tg.create_task(bot.run(shutdown_event))
-    tg.create_task(reconciliation_engine.run(shutdown_event))
-    tg.create_task(eod_scheduler(...))
-    tg.create_task(eod_watchdog(shutdown_event))
+ShortCircuit sizes from live broker funds, not a hardcoded number.
+
+Capital manager responsibilities:
+
+- read Fyers funds
+- parse multiple response shapes
+- derive real margin
+- apply intraday leverage assumptions
+- reserve one active slot
+- prevent concurrent entries
+- release only after confirmed close
+- resync after fills and exits
+
+Current runtime behavior:
+
+```text
+AUTO_MODE = False on boot
+INTRADAY_LEVERAGE = 5.0
+DAILY_TARGET_INR = -1  # dynamic target mode
+single active capital slot
 ```
 
-`_supervised()` wraps each task — crashes retry up to `max_retries` within a rolling window,
-then hard-fail with a critical Telegram alert. `_validate_dependencies()` hard-crashes
-before the TaskGroup starts if any critical dependency is `None`.
-No degraded state. No partial systems that look alive but cannot execute.
+The bot can scan continuously, but entry is blocked while capital is occupied.
 
-***
+---
 
-## The 40/40/20 Exit Engine
+## Operator Surface
 
-Partial exits are not a compromise. They are a statement about uncertainty.
+ShortCircuit exposes two operator surfaces.
 
-You do not know that TP2 will hit when TP1 does. No one does.
-Taking 40% at TP1 is not discipline failure. It is probability applied honestly.
-The remaining 60% now rides with a breakeven stop — after TP1,
-the worst possible outcome is zero loss. That changes the psychology of holding entirely.
-You are no longer asking the market for permission to feel good.
+### Telegram
 
-```
-Entry: Short 100 shares
+Telegram is the command surface.
 
-TP1 (ATR × 1.5) hit:
-    → Close 40 shares via REST
-    → modify_sl_qty(60) — broker SL-M updated immediately
-    → SL moves to entry price: zero remaining risk
-    → 60 shares remain on a free ride
+It handles:
 
-TP2 (ATR × 2.5) hit:
-    → Close 40 shares via REST
-    → modify_sl_qty(20) — broker SL-M updated immediately
-    → SL locks to TP1 level: profit guaranteed on runner
-    → 20 shares remain: trailing begins
+- startup/status alerts
+- signal discovery
+- validation updates
+- auto-mode control
+- mode switching
+- trade notifications
+- risk alerts
+- EOD reports
 
-TP3 zone (ATR × 3.5+):
-    → 20-share runner trails at ATR × 0.5 distance
-    → Closes on structure break, not on a fixed price
-    → The market decides when it is done
-```
+Auto trading is deliberately off on boot. The operator must explicitly enable it.
 
-### Human Intervention Safety
+### AEGIS Dashboard
 
-You can override the system. The system accepts that.
-What it does not do is leave a mess when you do.
+The dashboard is the observability surface.
 
-```
-You close the position manually on the Fyers app:
-    → CLOSED_EXTERNALLY detected within 2 ticks
-    → stop_focus() halts the position monitor
-    → cleanup_orders() cancels ALL pending SL/TP orders immediately
-    → _finalize_closed_position() updates DB: OPEN → CLOSED
-    → Capital slot released
-    → Gate 13 does not record the outcome — human action ≠ system performance data
+It exists for runtime telemetry, not manual trading.
 
-You open a position manually (orphan):
-    → ReconciliationEngine detects within 6 seconds
-    → adopt_orphan() places emergency SL, acquires slot, writes DB
-    → _db_dirty = True prevents re-detection on next cycle
-    → If a system trade is already open: CRITICAL Telegram alert "TWO POSITIONS OPEN"
-```
+It gives a fast visual view of:
 
-***
+- scanner heartbeat
+- cache health
+- gate updates
+- order events
+- candidate pulses
+- active position state
 
-## Reconciliation
+The dashboard runs through FastAPI/WebSocket when enabled.
 
-The reconciliation engine runs continuously.
-It compares DB state to broker state — detecting orphans, phantoms, and quantity mismatches.
+---
 
-It is aware of its own cost:
+## Persistence And Auditability
 
-```
-Market hours, open positions   → every 6 seconds
-Off-hours, open positions      → every 30 seconds
-Off-hours, fully flat          → every 300 seconds
-```
+ShortCircuit records the session as structured data.
 
-When flat off-hours, `_has_open_positions = False` short-circuits the entire cycle.
-Zero DB queries. Zero broker REST calls. Zero WS checks.
-The system is genuinely idle when there is nothing to protect.
-Idle compute is not discipline. It is noise.
+Storage layers:
 
-***
+- PostgreSQL for orders, positions, reconciliation, gate results
+- CSV signal log for human-readable setup review
+- daily session logs
+- daily rejection summary
+- ML parquet observations
+- EOD report markdown
 
-## EOD Shutdown
+Every candidate that reaches analyzer evaluation produces a gate result.
 
-EOD is the highest-risk operational moment — not because of the market,
-but because of the software. A stuck scan loop, a hung DB query,
-or a WebSocket reconnect in backoff can prevent shutdown and leave
-open positions in after-hours where they cannot be managed.
+The daily rejection summary answers:
 
-Two independent mechanisms. Neither depends on the other:
+- how many scans ran
+- how many symbols were evaluated
+- which symbols appeared
+- where each symbol failed most often
+- how many signals fired
+- which gates were systemically restrictive
 
-```
-15:10 IST  → TradeManager.close_all_positions()  [hard square-off]
-15:32 IST  → eod_scheduler fires → shutdown_event.set()
-15:32 IST  → eod_watchdog independently fires → shutdown_event.set()
-15:40 IST  → eod_watchdog → os.kill(os.getpid(), SIGTERM)  [cannot be trapped]
-```
+This matters because the bot is not only an execution engine. It is a research instrument.
 
-The watchdog checks every 30 seconds from within its own isolated task.
-No scan loop, no DB hang, no WS thread can block it.
+---
 
-Maximum graceful shutdown window: **25 seconds.**
+## ML Feedback Loop
 
-```
-reconciliation_engine.stop()  → 10s timeout
-bot.stop()                    → 5s timeout
-db_pool.close()               → 5s timeout
-broker.disconnect()           → 5s timeout
+ShortCircuit logs observations at signal time and labels outcomes later.
+
+ML logger fields include:
+
+- symbol/date/time
+- gain percent
+- VWAP distance and SD
+- VWAP slope
+- volume and RVOL
+- pattern metadata
+- profile/confluence flags
+- direction
+- ATR
+- stop/target prices
+- outcome
+- exit price
+- max favorable excursion
+- max adverse excursion
+- pnl percent
+- hold time
+
+Data is written daily:
+
+```text
+data/ml/observations_YYYY-MM-DD.parquet
+data/ml/observations_YYYY-MM-DD.csv
 ```
 
-***
+The trainer is intended to use this archive to search parameter space for better thresholds. The goal is not to replace the strategy with a black box. The goal is to tune the deterministic gate stack using observed market response.
 
-## The SL State Machine
+---
 
-A stop loss is not a number. It is a state. And state has a history.
+## Reconciliation And Recovery
 
-```
-INITIAL    → max(ATR × 0.5, 3 × tick_size) above signal_high.
-             Placed atomically with entry. Immovable until TP1.
-             Defines the maximum loss before the trade breathes.
-     ↓
-BREAKEVEN  → SL moves to entry after TP1 hit.
-             The trade has paid for itself.
-             A winning trade that becomes a loss is not acceptable. Ever.
-     ↓
-TP1_LEVEL  → SL locks to TP1 price after TP2 hit.
-             Profit on the runner is now guaranteed regardless of outcome.
-     ↓
-TRAILING   → SL trails at ATR × 0.5 distance on the runner.
-             Only tightens. Never widens.
-             The market decides when the move is over.
-```
+Live trading systems fail when internal state and broker state diverge.
 
-### Exit Hierarchy
+ShortCircuit treats reconciliation as a core runtime service.
 
-Seven exit types. Priority order is fixed and never negotiated.
+It detects:
 
-```
-1. EMERGENCY       → Full close. No confirmation. No hesitation.
-2. HARD_SL         → Broker SL-M triggered. Order WS fill confirmation.
-3. SOFT_STOP       → DiscretionaryEngine: orderflow reversal detected pre-SL.
-4. TP1 (40%)       → ATR × 1.5. Partial close. modify_sl_qty(). SL → breakeven.
-5. TP2 (40%)       → ATR × 2.5. Partial close. modify_sl_qty(). SL → TP1 level.
-6. TP3 TRAIL (20%) → ATR × 3.5 zone. Runner trails. Structure break closes it.
-7. EOD_SQUAREOFF   → 15:10 IST. Hard close. No exceptions.
-```
+- orphaned broker positions
+- phantom internal positions
+- quantity mismatches
+- manual closes
+- broker-side fills missed by the internal loop
 
-***
+Recovery behavior:
 
-## The Live Dashboard
+- adopt orphan positions with emergency protection
+- release capital for phantoms
+- update DB state
+- mark DB cache dirty
+- alert operator
+- avoid duplicate adoption
 
-```
-⚡ ACTIVE TRADE — SHORT
+The reconciliation engine is what lets the bot survive manual intervention, WebSocket drops, partial broker outages, and delayed REST responses.
 
-NSE:TATASTEEL-EQ
-Entry: ₹849.20  |  Qty: 10  |  Margin: ₹1,699
+---
 
-━━━━━━━━━━━━━━━━━━━━━━━━
-LTP:    ₹842.50  ⬇️
-P&L:    +₹67.00  (+0.79%)
+## EOD Protocol
 
-SL:     ₹849.20  [BREAKEVEN 🔒]
-TP1:    ₹836.54  (ATR×1.5) — 40% [HIT ✅]
-TP2:    ₹827.55  (ATR×2.5) — 40%
-TP3:    ₹818.56  (ATR×3.5) — 20% runner, trail active
+End of day is a controlled shutdown, not a process kill.
 
-OF:     🔴 BEARISH CONFIRMED — Trapped longs detected
-HTF:    ✅ 15m Lower High: 849.80 → 847.40
-━━━━━━━━━━━━━━━━━━━━━━━━
+EOD responsibilities:
 
-[🔄 Refresh]  [❌ Close Now]
-```
+- square off open risk
+- stop scanning
+- flush gate results
+- save reports
+- audit missed signals
+- label ML observations
+- release resources
+- notify operator
 
-Broker-verified via Data WebSocket every 2 seconds.
-Not estimated. Not interpolated. Not from the last REST snapshot.
+The session should end with a broker-flat state, clean DB state, and a complete audit trail.
 
-***
+---
 
-## What Gets Logged
+## Project Layout
 
-Everything. Without exception.
-
-```
-logs/YYYY-MM-DD_session.log         — daily session snapshot, written at shutdown
-logs/signals.csv                    — every signal: executed, rejected, timed out, suppressed
-logs/rejections_YYYYMMDD.log        — gate-level rejection reasons with exact threshold values
-logs/diagnostic_analysis.csv        — every /why query, gate-by-gate breakdown
-logs/emergency_alerts.log           — critical failure events only
-logs/gate_fallback_YYYYMMDD.jsonl   — DB-failure recovery buffer (aiofiles, non-blocking)
-data/ml/YYYY-MM-DD.parquet          — 40+ features per signal, UUID4 observation ID
-data/trade_journal.csv              — human-readable trade record
+```text
+main.py                    Runtime supervisor and task orchestration
+config.py                  Strategy, risk, mode, and infrastructure parameters
+scanner.py                 NSE-EQ scanner and candle prefetcher
+analyzer.py                Gate pipeline and signal construction
+god_mode_logic.py          Core exhaustion, VWAP, ATR, and constraint math
+market_context.py          G7 market regime and opening-window logic
+htf_confluence.py          G9 higher-timeframe confluence
+focus_engine.py            Pending validation and active position monitoring
+order_manager.py           Entry, stops, exits, fill verification
+capital_manager.py         Funds sync, sizing, capital slot control
+fyers_broker_interface.py  Data/order WebSocket and broker abstraction
+telegram_bot.py            Operator command and alert interface
+dashboard_server.py        FastAPI dashboard server
+dashboard_bridge.py        Runtime telemetry bridge
+database.py                PostgreSQL access layer
+gate_result_logger.py      Gate audit trail and EOD rejection summary
+ml_logger.py               Parquet/CSV ML observation logger
+reconciliation.py          Broker/DB/internal-state reconciliation
+eod_analyzer.py            EOD analytics, missed-signal audit, ML labeling
+tools/trainer.py           Parameter search over ML parquet observations
 ```
 
-The gate fallback log exists because DB failures during market hours are not recoverable
-in real time. The JSON-Lines file accumulates all gate records that could not be written to PostgreSQL.
-After market close, `tools/eod_reimport.py` replays them into `gate_results`.
-No audit record is ever permanently lost.
+---
 
-The rejection log is the most useful file in the system.
-Every missed signal has a reason. Every reason has a threshold.
-Every threshold is a choice that can be revisited with evidence.
+## Quick Start
 
-The ML parquet exists because today's rejected signals are tomorrow's training labels.
-The system is building the dataset that will eventually allow it to learn from its own history.
-Every observation recorded today is a vote in a future decision the system cannot yet make.
-
-***
-
-## The `/why` Command
-
-```
-/why RELIANCE 14:25
-```
-
-The system reruns the full 13-gate analysis on historical data for that symbol at that timestamp
-and returns a gate-by-gate pass/fail breakdown to Telegram, including the exact value
-that caused each rejection and the threshold it failed against.
-
-The system cannot be accused of opacity.
-Every missed signal has a reason. Every reason is visible.
-Every threshold is adjustable with evidence.
-Every run is appended to `logs/diagnostic_analysis.csv`. Cumulative.
-
-***
-
-## The Database
-
-PostgreSQL 14+. asyncpg. Pool: 10 minimum, 50 maximum connections.
-
-Four tables:
-
-```
-positions           — every trade: entry, exit, size, P&L, status, partial timestamps
-orders              — every order: submission, fill, status, broker ID, qty modifications
-reconciliation_log  — every reconciliation cycle: divergences, timestamps, resolution actions
-gate_results        — every gate evaluation: 36 columns, verdict, first_fail_gate, data_tier
-```
-
-`log_trade_entry()` wraps `positions` and `orders` in a single atomic transaction.
-Either both succeed or neither does.
-There is no state where a position exists without a corresponding order record.
-The database is the source of truth. Not memory. Not the broker. The database.
-
-***
-
-***
-
-## Technical Stack
-
-| Layer | Technology |
-|---|---|
-| Language | Python 3.10+ |
-| Concurrency | `asyncio.TaskGroup` + `threading` (WS daemon threads) |
-| Broker | Fyers API v3 — REST + dual WebSocket |
-| Database | PostgreSQL 14+ via asyncpg (pool: 10–50) |
-| Interface | python-telegram-bot v20+ (PTB) |
-| Data | pandas, numpy, Apache Parquet, aiofiles |
-| Auth | OAuth 2.0, singleton token, file persistence |
-| Logging | `RotatingFileHandler` 10MB × 5 + dated daily session snapshot |
-
-***
-
-## Setup
+Install dependencies:
 
 ```bash
-git clone https://github.com/nabrahma/ShortCircuit.git
-cd ShortCircuit
-
+python -m venv .venv
+. .venv/bin/activate
 pip install -r requirements.txt
-
-cp .env.example .env
-# FYERS_CLIENT_ID, FYERS_SECRET, FYERS_REDIRECT_URI
-# DB_HOST, DB_NAME, DB_USER, DB_PASS
-# TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
-
-psql -U postgres -c "CREATE DATABASE shortcircuit_trading;"
-python apply_migration.py  # runs v42, v44_8_2, v44_8_3 in sequence
-
-python main.py
-# OAuth flow on first run. Token saved to data/access_token.txt.
-# No re-auth needed on subsequent restarts.
 ```
 
-Before enabling auto-trade, verify startup log contains all three lines:
+Create `.env`:
 
+```text
+FYERS_CLIENT_ID=
+FYERS_SECRET_ID=
+FYERS_REDIRECT_URI=
+TELEGRAM_BOT_TOKEN=
+TELEGRAM_CHAT_ID=
+DB_HOST=localhost
+DB_PORT=5432
+DB_USER=
+DB_PASSWORD=
+DB_NAME=shortcircuit_trading
 ```
-[INIT]     ✅ OrderManager constructed and injected into FocusEngine.
-[STARTUP]  ✅ All dependency checks passed. Safe to trade.
-[WATCHDOG] ✅ EOD watchdog started. Monitoring for 15:32 IST.
-```
 
-If any line is missing — the system failed a dependency check before the first scan.
-The failure reason is in the log immediately above. Fix it before trading.
-The system is designed to fail loudly. Silence is not readiness.
-
-***
-
-## Commands
-
-| Command | What It Does |
-|---|---|
-| `/auto on` | Enable autonomous execution (queued if sent pre-9:45 AM) |
-| `/auto off` | Revert to alert-only mode |
-| `/status` | Capital state (live Fyers margin), open positions, session P&L, WS health |
-| `/positions` | All open positions with broker-verified P&L |
-| `/pnl` | Session P&L summary |
-| `/why SYMBOL TIME` | Full 13-gate replay — exact failing values and thresholds |
-| `/pause` | Suspend signal generation |
-| `/resume` | Resume scanning |
-
-***
-
-## Who Should Use This
-
-People who understand that an algo does not make you a better trader.
-It makes you a *more consistent* trader — which is only valuable if the
-underlying judgment is already sound.
-
-The system enforces discipline mechanically. But the parameters it enforces —
-the gain thresholds, the RVOL minimums, the ATR multiples, the HTF structure rules —
-those were written by a human. If that human's understanding of markets is wrong,
-the system will execute that wrongness with perfect consistency.
-
-There is something quietly clarifying about that.
-You cannot blame the rules for following your own instructions.
-The system is a mirror. What it shows you is what you believed
-when you were thinking clearly, run at scale, without hesitation.
-
-Read the code before running it with real capital.
-Understand every gate before trusting any of them.
-Monitor the system during market hours — not to intervene, but to learn.
-
-This is a tool. The responsibility for how it is used
-remains entirely with the person who built it.
-
-***
-
-## Risk
-
-Markets are adversarial. Not competitive — adversarial.
-Someone is on the other side of every fill, and they are not neutral about the outcome.
-
-The system is built around a statistical edge — not certainty. Never certainty.
-Losses are expected. Drawdowns are modeled for.
-Three consecutive losses trigger an automatic pause — not because three losses means
-the edge is gone, but because three losses in sequence is a signal to stop and look,
-not to keep firing.
-
-The edge, if it exists, is in the microstructure event described above —
-a real, repeatable phenomenon in liquid markets, detectable with the right instrumentation
-and the right filters applied in the right sequence.
-
-Whether that edge persists, degrades, or disappears entirely is an empirical question.
-The only honest answer is a live trading record built over months, not a backtest.
-
-This system is built to generate that record cleanly.
-That is the only honest claim it makes.
-
-***
-
-## Security
-
-- All credentials in `.env` — never transmitted, never logged, never hardcoded
-- No telemetry, no external data collection, no callbacks home
-- OAuth 2.0 — no broker password stored anywhere in the system
-- Trade and read permissions only — withdrawal access is structurally impossible
-- Fully open source — every gate, every order path, every failure handler is auditable
-
-***
-
-## License
-
-Apache 2.0. Use, modify, distribute. No warranty.
-
-Trading equities involves substantial risk of capital loss.
-The software is provided as-is. No liability for trading losses,
-system failures, or consequential damages of any kind.
-
-You are responsible for understanding what you run.
-
-***
-
-*[@nabrahma](https://github.com/nabrahma)*
-
-**ShortCircuit. Built to listen carefully.** ⚡
+Run:
 
 ```bash
-git clone https://github.com/nabrahma/ShortCircuit.git
+python main.py
 ```
+
+The bot starts alert-only. Enable automated execution from Telegram when ready.
+
+---
+
+## Risk Statement
+
+ShortCircuit is live trading infrastructure. It can place real orders, create real exposure, and lose real money.
+
+It is engineered for discipline, observability, and fast recovery. It is not engineered to guarantee outcomes. Markets are adversarial, broker APIs fail, liquidity disappears, and no gate stack can eliminate risk.
+
+Use it like a production system:
+
+- monitor it
+- audit it
+- keep secrets out of logs
+- verify broker state
+- review every EOD report
+- never assume a green process means a flat broker account
+
+---
+
+## One-Line Positioning
+
+ShortCircuit is a real-time, gate-driven, WebSocket-first NSE execution engine that converts intraday momentum exhaustion into auditable, capital-aware, broker-verified trades.
