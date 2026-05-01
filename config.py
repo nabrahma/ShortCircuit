@@ -201,7 +201,7 @@ DISCRETIONARY_CONFIG = {
 }
 
 # ============================================================================
-# 7. LOGGING, HUD, & ML OVERRIDES (PHASE 70-74)
+# 7. LOGGING & ML OVERRIDES (PHASE 70-74)
 # ============================================================================
 # Logging Paths
 LOG_FILE = "logs/bot.log"
@@ -209,10 +209,6 @@ SIGNAL_LOG_PATH = "logs/signals.csv"
 DETECTOR_LOG_PATH = "logs/detector_performance.csv"
 EMERGENCY_LOG_PATH = "logs/emergency_alerts.log"
 ORPHANED_POSITION_LOG_PATH = "logs/orphaned_positions.log"
-
-# AEGIS HUD (Phase 72)
-P72_DASHBOARD_ENABLED = True
-P72_DASHBOARD_PORT = 8555
 
 # ML Weekend Overrides (Phase 70)
 P70_ML_DYNAMIC_OVERRIDE_ENABLED = False

@@ -236,7 +236,7 @@ class SignalManager:
     
 
     def get_status(self):
-        """Get current status for dashboard/logging."""
+        """Get current status for operator commands and logging."""
         self._reset_if_new_day()
         return {
             'date': self.current_date,

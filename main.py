@@ -31,8 +31,6 @@ from scanner import FyersScanner
 from startup_recovery import StartupRecovery
 from telegram_bot import ShortCircuitBot
 from trade_manager import TradeManager
-from dashboard_bridge import get_dashboard_bridge
-from tools.dashboard_logger import DashboardLoggerHandler
 
 IST = pytz.timezone("Asia/Kolkata")
 logger = logging.getLogger("shortcircuit.supervisor")
@@ -71,13 +69,6 @@ def _configure_logging() -> None:
         force=True,
     )
     
-    # Phase 75: High-frequency Dashboard Log Stream
-    try:
-        dash_handler = DashboardLoggerHandler()
-        logging.getLogger().addHandler(dash_handler)
-    except Exception:
-        pass
-
 
 def _install_signal_handlers(loop: asyncio.AbstractEventLoop, shutdown_event: asyncio.Event):
     def _handler(signum: Optional[int] = None, frame: Optional[Any] = None):
@@ -460,13 +451,6 @@ async def _trading_loop(shutdown_event: asyncio.Event, ctx: RuntimeContext):
                 "candidate_count": len(candidates) if candidates else 0,
             }
             
-            # Phase 72: Jarvis Heartbeat
-            from dashboard_bridge import get_dashboard_bridge
-            get_dashboard_bridge().broadcast("HEARTBEAT", {
-                "pnl": ctx.trade_manager.daily_pnl if hasattr(ctx.trade_manager, 'daily_pnl') else 0.0,
-                "status": "SCANNING"
-            })
-
             # Phase 89.6: Parallelized Analysis
             async def run_analysis(cand):
                 signal = await asyncio.to_thread(
@@ -695,27 +679,8 @@ async def _run_startup_validation(ctx: RuntimeContext) -> None:
 async def main() -> int:
     _configure_logging()
 
-    # Phase 72: AEGIS HUD (V1)
-    if getattr(config, 'P72_DASHBOARD_ENABLED', False):
-        try:
-            from dashboard_server import start_dashboard_server
-            import threading
-            # Running FastAPI in a daemon thread to keep it fully non-blocking
-            dashboard_thread = threading.Thread(
-                target=start_dashboard_server,
-                kwargs={'port': config.P72_DASHBOARD_PORT},
-                daemon=True
-            )
-            dashboard_thread.start()
-            logger.info(f"Phase 72: AEGIS HUD V1 deployed at http://127.0.0.1:{config.P72_DASHBOARD_PORT}")
-        except Exception as _e:
-            logger.error(f"Failed to start AEGIS HUD: {_e}")
-
     shutdown_event = asyncio.Event()
     loop = asyncio.get_running_loop()
-    
-    # Phase 75: Neural Link initialization
-    get_dashboard_bridge().set_loop(loop)
     
     _install_signal_handlers(loop, shutdown_event)
 

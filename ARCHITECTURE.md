@@ -143,15 +143,15 @@ FocusEngine.stop(reason) [NEW METHOD]:
 ---
 
 ### telegram_bot.py
-**Role:** Full Telegram operator interface — PTB Application, all command handlers (`/auto`, `/status`, `/positions`, `/pnl`, `/why`, `/skip`, `/go`), signal/trade alert formatters, live 2-second dashboard loop, and the global PTB error handler.
+**Role:** Full Telegram operator interface — PTB Application, all command handlers (`/auto`, `/status`, `/positions`, `/pnl`, `/why`, `/skip`, `/go`), signal/trade alert formatters, status/P&L snapshots, and the global PTB error handler.
 **Key Classes:** `ShortCircuitBot`
 **Key Functions:** None (all methods on `ShortCircuitBot`)
 **Imports from project:** `config`, `capital_manager.CapitalManager`, `focus_engine.FocusEngine`, `order_manager.OrderManager` (via injection)
 **Called by:** `main.py` (construction, `bot.run(shutdown_event)`)
 **Calls into:** `focus_engine.py`, `order_manager.py`, `capital_manager.py`, `signal_manager.py`, `diagnostic_analyzer.py`
-**State it owns:** `_auto_mode: bool` (default `False`), `_auto_on_queued: bool` (default `False`), `_morning_brief_sent: bool` (default `False`), `app: Application` (PTB), `order_manager` (injected post-construction), dashboard task handle
+**State it owns:** `_auto_mode: bool` (default `False`), `_auto_on_queued: bool` (default `False`), `_morning_brief_sent: bool` (default `False`), `app: Application` (PTB), `order_manager` (injected post-construction)
 **Error handling:** Global `_error_handler` registered via `app.add_error_handler()`. [Bug 3 FIX] — Transient `getaddrinfo`/`NetworkError` errors now return a single WARNING log instead of full traceback + Telegram alert. Other errors log full traceback + send alert.
-**Notes:** `AUTO_MODE` must be `False` on startup — enforced by `config.py`. Dashboard refresh loop (`_dashboard_refresh_loop`) polls `focus_engine.get_position_snapshot()` every 2 seconds. `send_signal_alert` displays confidence, vol_fade, pattern bonus, and Futures OI emoji. `/auto_on` before 09:45 IST queues activation (`_auto_on_queued=True`) and replies with minutes remaining — does not activate immediately. Queue resolves at trading loop start in `main.py`. `_send_morning_briefing()` fires once per session at trading loop start (guarded by `_morning_brief_sent`); includes NIFTY morning range, WS cache stats, candle/DB status, and Auto Mode state.
+**Notes:** `AUTO_MODE` must be `False` on startup — enforced by `config.py`. `send_signal_alert` displays confidence, vol_fade, pattern bonus, and Futures OI emoji. `/auto_on` before 09:45 IST queues activation (`_auto_on_queued=True`) and replies with minutes remaining — does not activate immediately. Queue resolves at trading loop start in `main.py`. `_send_morning_briefing()` fires once per session at trading loop start (guarded by `_morning_brief_sent`); includes NIFTY morning range, WS cache stats, candle/DB status, and Auto Mode state.
 
 ---
 

@@ -42,7 +42,7 @@ class FocusEngine:
         
     async def get_position_snapshot(self, symbol: str) -> dict:
         """
-        Phase 42.3.1: Provide live position data for Telegram Dashboard.
+        Phase 42.3.1: Provide live position data for Telegram status commands.
         Called by telegram_bot.py every 2 seconds.
         """
         if not self.active_trade or self.active_trade.get('symbol') != symbol:
@@ -656,7 +656,7 @@ class FocusEngine:
                                 break
                     
                     # Start Focus
-                    # We pass message_id=None so it sends a new dashboard
+                    # We pass message_id=None so Telegram sends a fresh recovery alert.
                     self.start_focus(symbol, entry_price, sl_price, message_id=None, trade_id="RECOVERY", qty=abs(qty))
                     
                     if self.bot and config.TELEGRAM_CHAT_ID:
@@ -1119,4 +1119,3 @@ class FocusEngine:
         
         # Send using thread-safe wrapper
         asyncio.create_task(self.telegram_bot.send_alert(msg))
-

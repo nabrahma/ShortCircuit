@@ -4,7 +4,6 @@ import datetime
 import csv
 import os
 import config
-from dashboard_bridge import get_dashboard_bridge
 from typing import Optional, Dict, Any, Tuple
 from collections import deque
 
@@ -220,16 +219,6 @@ class FyersAnalyzer:
         except Exception as e:
             logger.warning(f"Profile/VolZ pre-calc error for {symbol}: {e}")
 
-        # V1: Broadcast Symbol Focus to HUD
-        get_dashboard_bridge().broadcast("SYMBOL_UPDATE", {
-            "symbol": symbol,
-            "ltp": ltp,
-            "gain_pct": gain_pct if 'gain_pct' in locals() else 0.0,
-            "rvol": rvol if 'rvol' in locals() else 0.0,
-            "slope": slope_now if 'slope_now' in locals() else 0.0,
-            "nifty_trend": getattr(reason, 'split')(':')[-1].strip() if 'reason' in locals() else "Unknown"
-        })
-
         # ── G7: Market Regime & Time Gate (Phase 65 Signature) ────────
         allowed, reason = self.market_context.evaluate_g7(
             vwap_sd=vwap_sd, 
@@ -239,7 +228,6 @@ class FyersAnalyzer:
             
         gr.g7_pass = allowed
         gr.g7_value = reason
-        get_dashboard_bridge().broadcast("GATE_UPDATE", {"gate": "G7", "status": "PASS" if allowed else "FAIL"})
         if not allowed:
             gr.verdict = "REJECTED"
             gr.first_fail_gate = "G7_REGIME"
@@ -267,7 +255,6 @@ class FyersAnalyzer:
         
         gr.g1_pass = ok
         gr.g1_value = round(gain_pct, 2)
-        get_dashboard_bridge().broadcast("GATE_UPDATE", {"gate": "G1", "status": "PASS" if ok else "FAIL"})
         if not ok:
             gr.verdict = "REJECTED"
             gr.first_fail_gate = "G1_GAIN_CONSTRAINTS"
@@ -292,7 +279,6 @@ class FyersAnalyzer:
         
         gr.g3_pass = not circuit_blocked
         gr.g3_value = "BLACKLISTED" if is_blacklisted else round(ltp, 2)
-        get_dashboard_bridge().broadcast("GATE_UPDATE", {"gate": "G3", "status": "PASS" if not circuit_blocked else "FAIL"})
         if circuit_blocked:
             gr.verdict = "REJECTED"
             gr.first_fail_gate = "G3_CIRCUIT_GUARD"
@@ -305,7 +291,6 @@ class FyersAnalyzer:
         momentum_blocked = self._is_momentum_too_strong(df, slope_5m, slope_30m, vwap_sd, symbol, gain_pct)
         gr.g4_pass = not momentum_blocked
         gr.g4_value = round(slope_now, 3)
-        get_dashboard_bridge().broadcast("GATE_UPDATE", {"gate": "G4", "status": "PASS" if not momentum_blocked else "FAIL"})
         if momentum_blocked:
             gr.verdict = "REJECTED"
             gr.first_fail_gate = "G4_MOMENTUM"
@@ -399,8 +384,6 @@ class FyersAnalyzer:
             gr.g5_value = 1.0
             gr.g6_pass = True
             gr.g6_value = "+A_BYPASS"
-            get_dashboard_bridge().broadcast("GATE_UPDATE", {"gate": "G5", "status": "BYPASS"})
-            get_dashboard_bridge().broadcast("GATE_UPDATE", {"gate": "G6", "status": "BYPASS"})
 
             if is_post_target:
                 # Version A+: G9 HTF required — extra confluence before bonus trade
@@ -414,7 +397,6 @@ class FyersAnalyzer:
 
                 gr.g9_pass  = htf_ok
                 gr.g9_value = htf_msg
-                get_dashboard_bridge().broadcast("GATE_UPDATE", {"gate": "G9", "status": "PASS" if htf_ok else "FAIL", "value": htf_msg})
 
                 if htf_ok:
                     logger.info(f"⭐ [PROMOTED A+] {symbol} — G9 HTF stall confirmed. EXTREME trade cleared.")
@@ -428,7 +410,6 @@ class FyersAnalyzer:
                 # Version A: G9 skipped — decay on 5m/30m is sufficient for 1% scalp
                 gr.g9_pass  = True
                 gr.g9_value = "G9_SKIPPED_VERSION_A"
-                get_dashboard_bridge().broadcast("GATE_UPDATE", {"gate": "G9", "status": "BYPASS"})
 
             # G8: Signal Manager cooldown + daily target gate
             can_signal_v, sm_reason_v = self.signal_manager.can_signal(symbol, confidence=signal_meta.get('confidence', ''))
@@ -472,7 +453,6 @@ class FyersAnalyzer:
         )
         gr.g5_pass = exhaustion["fired"]
         gr.g5_value = round(exhaustion.get("stretch_score", 0), 3)
-        get_dashboard_bridge().broadcast("GATE_UPDATE", {"gate": "G5", "status": "PASS" if exhaustion["fired"] else "FAIL"})
 
         if not exhaustion["fired"]:
             gr.verdict = "REJECTED"
@@ -504,7 +484,6 @@ class FyersAnalyzer:
             
         gr.g6_pass = valid_signal
         gr.g6_value = f"+{len(pro_conf_msgs)}conf"
-        get_dashboard_bridge().broadcast("GATE_UPDATE", {"gate": "G6", "status": "PASS" if valid_signal else "FAIL"})
         if pro_conf_msgs:
             pattern_desc += f" + {', '.join(pro_conf_msgs)}"
 
@@ -525,7 +504,6 @@ class FyersAnalyzer:
 
         gr.g9_pass  = htf_ok
         gr.g9_value = htf_msg
-        get_dashboard_bridge().broadcast("GATE_UPDATE", {"gate": "G9", "status": "PASS" if htf_ok else "FAIL"})
         
         # ── Phase 90.8: Institutional Promotion (G4 Decay + G9 HTF Stall) ─────────
         if htf_ok and is_decaying and signal_meta.get('confidence') == 'HIGH' and vwap_sd > 2.0:
@@ -547,7 +525,6 @@ class FyersAnalyzer:
 
         gr.g8_pass = can_signal
         gr.g8_value = None
-        get_dashboard_bridge().broadcast("GATE_UPDATE", {"gate": "G8", "status": "PASS" if can_signal else "FAIL"})
         if not can_signal:
             gr.verdict = "REJECTED"
             gr.first_fail_gate = "G8_SIGNAL_MANAGER"
@@ -565,10 +542,8 @@ class FyersAnalyzer:
         # Phase 66: Snapshot Reference High (Peak of Day)
         # Ensure SL and Signal High are derived from the absolute top, even if rotating.
         signal_meta['snapshot_high'] = day_high
-        get_dashboard_bridge().broadcast("GATE_UPDATE", {"gate": "G13", "status": "PASS"})
 
         gr.verdict = "ANALYZER_PASS"
-        get_dashboard_bridge().broadcast("SYSTEM_ALERT", {"msg": f"🎯 Signal Confirmed: {symbol}"})
         finalized = self._finalize_signal(symbol, ltp, df, pattern_desc, slope_now, "", signal_meta)
         if finalized:
             finalized['_gate_result'] = gr
@@ -1011,27 +986,6 @@ class FyersAnalyzer:
             baseline = open_price
             gain_pct = ((ltp - baseline) / baseline) * 100
         
-        # --- Phase 75: V2 Pulse Instrumentation ---
-        try:
-            atr = self.gm_analyst.calculate_atr(df)
-            slope_now, _ = self.gm_analyst.calculate_vwap_slope(df.iloc[-30:])
-            vol_avg = df['volume'].iloc[-21:-1].mean()
-            rvol = df['volume'].iloc[-1] / vol_avg if vol_avg > 0 else 1.0
-            
-            pulse_data = {
-                "ltp": ltp,
-                "gain_pct": gain_pct,
-                "rvol": rvol,
-                "slope": slope_now,
-                "atr": atr,
-                "vwap": df['vwap'].iloc[-1] if 'vwap' in df.columns else ltp
-            }
-            get_dashboard_bridge().broadcast_candidate_pulse(symbol, pulse_data)
-            get_dashboard_bridge().broadcast("GATE_UPDATE", {"symbol": symbol, "gate": "G2", "status": "PASS"})
-        except Exception:
-            pass
-        # ------------------------------------------
-
         atr = self.gm_analyst.calculate_atr(df)
         vwap_sd = self.gm_analyst.calculate_vwap_bands(prev_df)
         is_extended = vwap_sd > 2.0
@@ -1044,15 +998,6 @@ class FyersAnalyzer:
             profile = self.profile_analyzer.calculate_market_profile(df, mode='VOLUME')
             if profile:
                 profile_rejection, _ = self.profile_analyzer.check_profile_rejection(df, ltp)
-                # Phase 75: Broadcast Volume Profile to UI for AMT Charting
-                get_dashboard_bridge().broadcast("AMT_UPDATE", {
-                    "symbol": symbol,
-                    "vah": profile.get('vah'),
-                    "poc": profile.get('poc'),
-                    "val": profile.get('val'),
-                    "counts": profile.get('counts', []).tolist() if hasattr(profile.get('counts'), 'tolist') else [],
-                    "bins": profile.get('bins', []).tolist() if hasattr(profile.get('bins'), 'tolist') else []
-                })
             vol_z = self.market_context.get_volume_z_score(df)
         except Exception as e:
             logger.warning(f"Profile/VolZ pre-calc error for edge {symbol}: {e}")
@@ -1065,7 +1010,6 @@ class FyersAnalyzer:
         )
         gr.g7_pass  = allowed
         gr.g7_value = regime_reason
-        get_dashboard_bridge().broadcast("GATE_UPDATE", {"symbol": symbol, "gate": "G7", "status": "PASS" if allowed else "FAIL", "value": regime_reason})
         if not allowed:
             gr.verdict = "REJECTED"
             gr.first_fail_gate = "G7_REGIME"
@@ -1093,7 +1037,6 @@ class FyersAnalyzer:
 
         gr.g1_pass  = ok
         gr.g1_value = round(gain_pct, 2)
-        get_dashboard_bridge().broadcast("GATE_UPDATE", {"symbol": symbol, "gate": "G1", "status": "PASS" if ok else "FAIL", "value": f"{gain_pct:.1f}%"})
         if not ok:
             gr.verdict = "REJECTED"
             gr.first_fail_gate  = "G1_GAIN_CONSTRAINTS"
@@ -1113,7 +1056,6 @@ class FyersAnalyzer:
         circuit_blocked = self._check_circuit_guard(symbol, ltp, depth_data)
         gr.g3_pass  = not circuit_blocked
         gr.g3_value = round(ltp, 2)
-        get_dashboard_bridge().broadcast("GATE_UPDATE", {"symbol": symbol, "gate": "G3", "status": "PASS" if not circuit_blocked else "FAIL"})
         if circuit_blocked:
             gr.verdict = "REJECTED"
             gr.first_fail_gate  = "G3_CIRCUIT_GUARD"
@@ -1128,7 +1070,6 @@ class FyersAnalyzer:
         momentum_blocked = self._is_momentum_too_strong(df, slope_now, slope_prev, vwap_sd, symbol, gain_pct)
         gr.g4_pass  = not momentum_blocked
         gr.g4_value = round(slope_now, 3)
-        get_dashboard_bridge().broadcast("GATE_UPDATE", {"symbol": symbol, "gate": "G4", "status": "PASS" if not momentum_blocked else "FAIL", "value": f"{slope_now:.1f}"})
         if momentum_blocked:
             gr.verdict = "REJECTED"
             gr.first_fail_gate  = "G4_MOMENTUM"
@@ -1139,7 +1080,6 @@ class FyersAnalyzer:
         # ── Edge-specific entry trigger check ─────────────────────────
         current_ltp = df.iloc[-1]['close']
         is_g5_pass = current_ltp < edge_payload['entry_trigger']
-        get_dashboard_bridge().broadcast("GATE_UPDATE", {"symbol": symbol, "gate": "G5", "status": "PASS" if is_g5_pass else "FAIL", "value": f"@{current_ltp}"})
         if not is_g5_pass:
             gr.g5_pass  = False
             gr.g5_value = round(current_ltp - edge_payload['entry_trigger'], 4)
@@ -1179,7 +1119,6 @@ class FyersAnalyzer:
 
         gr.g9_pass  = htf_ok
         gr.g9_value = htf_msg
-        get_dashboard_bridge().broadcast("GATE_UPDATE", {"symbol": symbol, "gate": "G9", "status": "PASS" if htf_ok else "FAIL", "value": htf_msg})
         if not htf_ok:
             gr.verdict = "REJECTED"
             gr.first_fail_gate  = "G9_HTF_CONFLUENCE"
@@ -1210,10 +1149,6 @@ class FyersAnalyzer:
 
         if edge_payload.get('recommended_sl') and edge_payload['recommended_sl'] < base_signal['stop_loss']:
             base_signal['stop_loss'] = edge_payload['recommended_sl']
-
-        get_dashboard_bridge().broadcast("CANDIDATE_PULSE", {"symbol": symbol, "status": "CONFIRMED"})
-        # G12: Pattern Quality
-        get_dashboard_bridge().broadcast("GATE_UPDATE", {"symbol": symbol, "gate": "G12", "status": "PASS", "value": edge_payload['confidence']})
 
         return base_signal
     def _finalize_signal(self, symbol, ltp, df, pattern_desc, slope, wall_msg, signal_meta: dict = None):

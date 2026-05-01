@@ -521,7 +521,7 @@ class FyersScanner:
                         c['history_df'] = df
                         c['history_df_15m'] = df_15m # Phase 51
                         
-                        # Phase 88.1: Enhanced HUD Logging
+                        # Phase 88.1: Enhanced candidate logging
                         leverage = c.get('leverage', 1.0)
                         logger.info(
                             f"[CANDIDATE] {c['symbol']} | "
@@ -539,16 +539,6 @@ class FyersScanner:
         top_gainers = filtered_candidates[:20]
         
         logger.info(f"Scan Complete. Found {len(filtered_candidates)} candidates.")
-
-        # Phase 75: Neural Grid Sync
-        try:
-            from dashboard_bridge import get_dashboard_bridge
-            get_dashboard_bridge().broadcast("SCAN_BATCH", {
-                "scan_id": scan_id,
-                "candidates": [c['symbol'] for c in filtered_candidates]
-            })
-        except Exception:
-            pass
 
         return top_gainers
 

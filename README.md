@@ -2,7 +2,7 @@
 
 **ShortCircuit is a live intraday NSE execution engine for detecting and trading momentum exhaustion.**
 
-It is not a chart pattern script. It is not a notification bot with a broker wrapper bolted on. ShortCircuit is a full-stack trading system: real-time market data ingestion, microstructure filtering, sequential gate evaluation, capital-aware sizing, broker-side risk placement, reconciliation, audit logging, Telegram control, dashboard telemetry, and parquet-based ML feedback loops.
+It is not a chart pattern script. It is not a notification bot with a broker wrapper bolted on. ShortCircuit is a full-stack trading system: real-time market data ingestion, microstructure filtering, sequential gate evaluation, capital-aware sizing, broker-side risk placement, reconciliation, audit logging, Telegram command/control, and parquet-based ML feedback loops.
 
 The product thesis is simple:
 
@@ -35,7 +35,6 @@ At runtime the bot coordinates:
 - Broker-side stop placement
 - Active trade monitor
 - Telegram command/control
-- FastAPI dashboard telemetry
 - PostgreSQL audit trail
 - ML parquet logger
 - EOD reporting and shutdown
@@ -384,11 +383,11 @@ The bot can scan continuously, but entry is blocked while capital is occupied.
 
 ## Operator Surface
 
-ShortCircuit exposes two operator surfaces.
+ShortCircuit exposes one operator surface.
 
 ### Telegram
 
-Telegram is the command surface.
+Telegram is the command and observability surface.
 
 It handles:
 
@@ -397,28 +396,15 @@ It handles:
 - validation updates
 - auto-mode control
 - mode switching
+- position and P&L snapshots
+- broker health alerts
 - trade notifications
 - risk alerts
 - EOD reports
 
-Auto trading is deliberately off on boot. The operator must explicitly enable it.
+There is no separate web UI in the runtime path. The bot is intentionally Telegram-first so the live operator stack stays lean: fewer services, fewer sockets, fewer deployment dependencies, and one control plane for alerts and action.
 
-### AEGIS Dashboard
-
-The dashboard is the observability surface.
-
-It exists for runtime telemetry, not manual trading.
-
-It gives a fast visual view of:
-
-- scanner heartbeat
-- cache health
-- gate updates
-- order events
-- candidate pulses
-- active position state
-
-The dashboard runs through FastAPI/WebSocket when enabled.
+Auto trading is deliberately off on boot. The operator must explicitly enable it from Telegram.
 
 ---
 
@@ -545,8 +531,6 @@ order_manager.py           Entry, stops, exits, fill verification
 capital_manager.py         Funds sync, sizing, capital slot control
 fyers_broker_interface.py  Data/order WebSocket and broker abstraction
 telegram_bot.py            Operator command and alert interface
-dashboard_server.py        FastAPI dashboard server
-dashboard_bridge.py        Runtime telemetry bridge
 database.py                PostgreSQL access layer
 gate_result_logger.py      Gate audit trail and EOD rejection summary
 ml_logger.py               Parquet/CSV ML observation logger

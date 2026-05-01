@@ -37,11 +37,11 @@ class SignalMsgState:
     message_id: Optional[int] = None
 class ShortCircuitBot:
     """
-    Telegram Bot — Command Interface + Trading Dashboard.
+    Telegram Bot — Command Interface.
     Responsibilities:
     - Auto-Trade Gate (single source of truth for auto_mode state)
     - Signal alerts (alert-only + interactive GO/SKIP buttons)
-    - Live position dashboard (auto-refresh every 2s)
+    - Live status, P&L, position, and broker-health commands
     - All user commands (/status, /why, /pnl, etc.)
     Auto Mode State:
     - ALWAYS False on boot — no exceptions
@@ -375,47 +375,10 @@ class ShortCircuitBot:
             f"SL:      ₹{sl:.2f}\n"
             f"Target:  ₹{target:.2f}\n"
             f"ID:      <code>{_he(order_id)}</code>\n\n"
-            f"<i>Position manager activated. Dashboard starting...</i>"
+            f"<i>Position manager activated. Telegram alerts active.</i>"
         )
         await self.send_message(text)
-    # ════════════════════════════════════════════════════════════
-    # LIVE DASHBOARD — auto-refreshes every 2 seconds
-    # ════════════════════════════════════════════════════════════
-    async def start_live_dashboard(self, position: dict):
-        """Dashboard disabled in Minimalist Mode."""
-        pass
 
-    async def stop_live_dashboard(self, position: dict, exit_reason: str):
-        """Send final closed-trade summary."""
-        symbol = position.get('symbol')
-        side = position.get('side')
-        entry = position.get('entry_price', 0)
-        exit_price = position.get('exit_price', 0)
-        qty = position.get('quantity', 0)
-        pnl = position.get('realised_pnl', 0)
-        pnl_pct = (pnl / (entry * qty)) * 100 if entry and qty else 0
-        roi = pnl_pct * 5
-        result_emoji = "✅" if pnl > 0 else "❌"
-        pnl_str = f"+₹{pnl:.2f}" if pnl >= 0 else f"-₹{abs(pnl):.2f}"
-        
-        exit_reason_map = {
-            'SL_HIT': '🛑 Stop Loss Hit',
-            'TP_HIT': '🏆 Target Hit',
-            'MANUAL_EXIT': '👤 Manual Exit',
-            'EOD_SQUAREOFF': '🕒 EOD Square-off',
-            'EMERGENCY': '🚨 Emergency Exit'
-        }
-        reason_str = exit_reason_map.get(exit_reason, exit_reason)
-
-        text = (
-            f"{result_emoji} <b>TRADE CLOSED: {_he(symbol)}</b>\n\n"
-            f"Entry: ₹{entry:.2f} | Exit: ₹{exit_price:.2f}\n"
-            f"P&L:   <b>{pnl_str} ({'+' if pnl_pct >= 0 else ''}{pnl_pct:.2f}%)</b>\n"
-            f"ROI:   <b>{'+' if roi >= 0 else ''}{roi:.2f}%</b> (5x)\n\n"
-            f"Reason: {reason_str}\n"
-            f"<i>Time: {datetime.now().strftime('%H:%M:%S')}</i>"
-        )
-        await self.send_message(text)
     # ════════════════════════════════════════════════════════════
     # COMMAND HANDLERS
     # ════════════════════════════════════════════════════════════

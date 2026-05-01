@@ -244,14 +244,6 @@ class OrderManager:
                 logger.info(f"   [ML] Outcome recorded for {symbol} (obs={pos['obs_id']}) "
                             f"MFE={pos.get('mfe_pct', 0):.2f}% MAE={pos.get('mae_pct', 0):.2f}% PNL={pnl_pct:.2f}%")
                 
-                # Phase 72: Jarvis Broadcast
-                from dashboard_bridge import get_dashboard_bridge
-                get_dashboard_bridge().broadcast("ORDER_EVENT", {
-                    "symbol": symbol,
-                    "type": "EXIT",
-                    "pnl": pnl,
-                    "reason": reason
-                })
             except Exception as e:
                 logger.error(f"❌ [ML-OUTCOME] Failed for {symbol}: {e}")
 
@@ -694,16 +686,6 @@ class OrderManager:
                     'tp_targets': self.compute_take_profits(ltp, signal)
                 }
 
-                # Phase 72: Jarvis Broadcast
-                get_ml_logger() # Ensure lazy load
-                from dashboard_bridge import get_dashboard_bridge
-                get_dashboard_bridge().broadcast("ORDER_EVENT", {
-                    "symbol": symbol,
-                    "type": "ENTRY",
-                    "ltp": ltp,
-                    "qty": qty,
-                    "side": signal_type
-                })
                 self.active_positions[symbol] = pos_state
 
                 # DB Log
