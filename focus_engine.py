@@ -792,10 +792,15 @@ class FocusEngine:
                 if now.hour == 15 and now.minute >= 10:
                     logger.warning(f"⏰ [EOD] Force Closing {symbol} at 15:10")
                     if self.order_manager and self._event_loop:
-                        asyncio.run_coroutine_threadsafe(
+                        future = asyncio.run_coroutine_threadsafe(
                             self.order_manager.safe_exit(symbol, "EOD_SQUARE_OFF"),
                             self._event_loop
                         )
+                        try:
+                            result = future.result(timeout=30)
+                            logger.info(f"[EOD] safe_exit completed for {symbol}: success={result}")
+                        except Exception as eod_err:
+                            logger.error(f"[EOD] safe_exit failed for {symbol}: {eod_err}")
                     self.stop_focus("EOD")
                     return
 
@@ -951,21 +956,37 @@ class FocusEngine:
                     
                     logger.info(f"🛡️ [PROTECTION] {symbol} up 3.5% (leveraged)! SL → ₹{new_sl:.2f} (Fee-Protected BE)")
 
-                    # Phase 97.2: Move the ACTUAL broker SL-M order to the BE price
+                    # Phase 98: Move the ACTUAL broker SL-M order and WAIT for confirmation
+                    sl_moved = False
                     if self.order_manager and self._event_loop:
-                        asyncio.run_coroutine_threadsafe(
-                            self.order_manager.move_hard_stop(symbol, new_sl),
-                            self._event_loop
-                        )
+                        try:
+                            future = asyncio.run_coroutine_threadsafe(
+                                self.order_manager.move_hard_stop(symbol, new_sl),
+                                self._event_loop
+                            )
+                            sl_moved = future.result(timeout=10)
+                        except Exception as be_err:
+                            logger.error(f"[PROTECTION] move_hard_stop failed for {symbol}: {be_err}")
                     
                     if self.telegram_bot and self._event_loop:
-                        msg = (
-                            f"🛡️ **Fee-Protected BE Activated**\n"
-                            f"Symbol: `{symbol}`\n"
-                            f"Target: +3.5% hit (0.7% move)\n"
-                            f"New SL: ₹{new_sl:.2f} (+0.25% profit zone)\n"
-                            f"_Your fees are now covered._"
-                        )
+                        if sl_moved:
+                            msg = (
+                                f"🛡️ **Fee-Protected BE Activated**\n"
+                                f"Symbol: `{symbol}`\n"
+                                f"Target: +3.5% hit (0.7% move)\n"
+                                f"New SL: ₹{new_sl:.2f} (+0.25% profit zone)\n"
+                                f"✅ Broker SL updated.\n"
+                                f"_Your fees are now covered._"
+                            )
+                        else:
+                            msg = (
+                                f"⚠️ **BE Triggered — SL Move FAILED**\n"
+                                f"Symbol: `{symbol}`\n"
+                                f"Target: +3.5% hit (0.7% move)\n"
+                                f"Attempted SL: ₹{new_sl:.2f}\n"
+                                f"❌ Broker rejected modification.\n"
+                                f"_Original SL still active. Monitor manually._"
+                            )
                         asyncio.run_coroutine_threadsafe(
                             self.telegram_bot.send_alert(msg),
                             self._event_loop
@@ -977,10 +998,16 @@ class FocusEngine:
                 if _tp_hit:
                     logger.info(f"🎯 [TP] {symbol} hit ₹{t['tp']:.2f} — closing 100% ({t['remaining_qty']} shares)")
                     if self.order_manager and self._event_loop:
-                        asyncio.run_coroutine_threadsafe(
+                        future = asyncio.run_coroutine_threadsafe(
                             self.order_manager.safe_exit(symbol, "TP_HIT"),
                             self._event_loop
                         )
+                        # Wait for safe_exit to complete (max 30s) to ensure capital is released
+                        try:
+                            result = future.result(timeout=30)
+                            logger.info(f"[TP] safe_exit completed for {symbol}: success={result}")
+                        except Exception as tp_exit_err:
+                            logger.error(f"[TP] safe_exit failed/timed out for {symbol}: {tp_exit_err}")
                     self.stop_focus("TP_HIT")
                     return
 
@@ -993,11 +1020,17 @@ class FocusEngine:
                     if _soft_hit:
                         decision = self.discretionary_engine.evaluate_soft_stop(symbol, t)
                         if decision == 'EXIT':
-                            if self._event_loop:
-                                asyncio.run_coroutine_threadsafe(
+                            if self.order_manager and self._event_loop:
+                                future = asyncio.run_coroutine_threadsafe(
                                     self.order_manager.safe_exit(symbol, "SOFT_STOP"),
                                     self._event_loop
                                 )
+                                try:
+                                    result = future.result(timeout=30)
+                                    logger.info(f"[SOFT_STOP] safe_exit completed for {symbol}: success={result}")
+                                except Exception as ss_err:
+                                    logger.error(f"[SOFT_STOP] safe_exit failed for {symbol}: {ss_err}")
+                            self.stop_focus("SOFT_STOP")
                             return
 
                 # ── FALLBACK / LEGACY LOGIC ──────────────────────

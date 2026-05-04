@@ -34,6 +34,7 @@ requests>=2.31.0
 pandas>=2.0.0
 numpy>=1.26.0
 pyarrow>=14.0.0
+optuna>=3.6.0
 
 # ── Telegram Alerts ────────────────────────────────────────
 python-telegram-bot>=21.0.0

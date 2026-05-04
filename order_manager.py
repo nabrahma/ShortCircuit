@@ -793,65 +793,130 @@ class OrderManager:
 
                 pos['status'] = 'CLOSING'
 
-                # STEP 1: CANCEL SL FIRST
+                # STEP 1: CANCEL SL (Best-effort, non-blocking)
+                # The SL may already be cancelled/triggered/filled by the exchange.
+                # This is expected during fast price action — DO NOT abort exit.
                 sl_id = pos.get('sl_id') or self.hard_stops.get(symbol)
                 if sl_id:
                     logger.info(f"[EXIT] Cancelling SL {sl_id}...")
-                    cancelled = await self.broker.cancel_order(sl_id)
+                    try:
+                        cancelled = await self.broker.cancel_order(sl_id)
+                        if cancelled:
+                            logger.info(f"✅ SL Cancelled: {sl_id}")
+                        else:
+                            logger.warning(f"⚠️ SL Cancel returned False for {sl_id} — may already be triggered/cancelled. Continuing exit.")
+                    except Exception as sl_cancel_err:
+                        logger.warning(f"⚠️ SL Cancel exception for {sl_id}: {sl_cancel_err} — continuing exit anyway.")
+                    
+                    # Always clean up hard_stops reference
+                    if symbol in self.hard_stops:
+                        del self.hard_stops[symbol]
 
-                    if cancelled:
-                        logger.info(f"✅ SL Cancelled: {sl_id}")
-                        if symbol in self.hard_stops:
-                            del self.hard_stops[symbol]
-                    else:
-                        logger.warning(f"⚠️ SL Cancel Failed: {sl_id}")
-                        pos_check = await self.broker.get_position(symbol)
-                        if pos_check is None:
-                            logger.info(f"POSITION_CLOSED_BY_SL {symbol}")
-                            await self._finalize_closed_position(
-                                symbol=symbol,
-                                reason='HARD_STOP_FILLED',
-                                exit_price=0.0,
-                                pnl=0.0,
-                                send_alert=True,
-                            )
-                            return True
-                        if not emergency:
-                            return False
+                # STEP 2: CHECK IF POSITION STILL EXISTS ON BROKER
+                # If SL already filled (fast price action), position is already closed.
+                try:
+                    broker_positions = await self.broker.get_all_positions()
+                    pos_on_broker = None
+                    for bp in broker_positions:
+                        if bp.get('symbol') == symbol and bp.get('qty', 0) != 0:
+                            pos_on_broker = bp
+                            break
+                    
+                    if pos_on_broker is None:
+                        logger.info(f"[SAFE_EXIT] {symbol} already flat on broker (SL/manual close). Finalizing cleanup.")
+                        # Try to get actual exit price from the SL order that filled
+                        exit_price = 0.0
+                        pnl = 0.0
+                        if sl_id:
+                            try:
+                                exit_price = await self.broker.get_order_avg_price(sl_id)
+                            except Exception:
+                                pass
+                        if exit_price > 0:
+                            entry_price = pos.get('entry_price', 0)
+                            qty = pos.get('qty', 0)
+                            if pos['side'] == 'SHORT':
+                                pnl = (entry_price - exit_price) * qty
+                            else:
+                                pnl = (exit_price - entry_price) * qty
+                        
+                        await self._finalize_closed_position(
+                            symbol=symbol,
+                            reason='HARD_STOP_FILLED' if reason == 'TP_HIT' else reason,
+                            exit_price=exit_price,
+                            pnl=pnl,
+                            send_alert=True,
+                        )
+                        return True
+                except Exception as pos_check_err:
+                    logger.warning(f"[SAFE_EXIT] Position check failed: {pos_check_err} — proceeding with exit order anyway.")
 
-                # STEP 2: PLACE EXIT ORDER
+                # STEP 3: PLACE EXIT ORDER
                 exit_side = 'BUY' if pos['side'] == 'SHORT' else 'SELL'
-                exit_id = await self.broker.place_order(
-                    symbol=symbol,
-                    side=exit_side,
-                    qty=pos['qty'],
-                    order_type='MARKET'
-                )
-                logger.info(f"[EXIT] Exit Order Placed: {exit_id}")
+                exit_id = None
+                try:
+                    exit_id = await self.broker.place_order(
+                        symbol=symbol,
+                        side=exit_side,
+                        qty=pos['qty'],
+                        order_type='MARKET'
+                    )
+                    logger.info(f"[EXIT] Exit Order Placed: {exit_id}")
+                except Exception as exit_err:
+                    logger.error(f"❌ [EXIT] Exit order placement failed: {exit_err}")
+                    # Emergency: try once more
+                    try:
+                        exit_id = await self.broker.place_order(
+                            symbol=symbol,
+                            side=exit_side,
+                            qty=pos['qty'],
+                            order_type='MARKET'
+                        )
+                        logger.info(f"[EXIT] Emergency retry succeeded: {exit_id}")
+                    except Exception as retry_err:
+                        logger.critical(f"🚨 [EXIT] BOTH exit attempts failed for {symbol}: {retry_err}")
+                        # MUST finalize even if exit fails — capital cannot stay locked
+                        await self._finalize_closed_position(
+                            symbol=symbol,
+                            reason=f'{reason}_EXIT_FAILED',
+                            exit_price=0.0,
+                            pnl=0.0,
+                            send_alert=True,
+                        )
+                        if self.telegram:
+                            await self.telegram.send_alert(
+                                f"🚨 *EXIT FAILED*\n\n"
+                                f"Symbol: `{symbol}`\n"
+                                f"Both exit attempts failed.\n"
+                                f"⚠️ *CHECK YOUR BROKER APP IMMEDIATELY*\n"
+                                f"Capital slot released."
+                            )
+                        return False
 
-                # STEP 3: WAIT FOR FILL (15s)
-                filled = await self.broker.wait_for_fill(exit_id, timeout=15.0)
-                if filled:
-                    logger.info(f"✅ Exit Filled: {symbol}")
-                else:
-                    logger.error(f"❌ Exit Not Filled: {symbol}")
+                # STEP 4: WAIT FOR FILL (15s)
+                if exit_id:
+                    filled = await self.broker.wait_for_fill(exit_id, timeout=15.0)
+                    if filled:
+                        logger.info(f"✅ Exit Filled: {symbol}")
+                    else:
+                        logger.warning(f"⚠️ Exit fill not confirmed via WS for {symbol} — checking REST fallback")
 
-                # STEP 4: CLEANUP (releases capital slot + re-syncs margin)
+                # STEP 5: CLEANUP (releases capital slot + re-syncs margin)
                 exit_price = 0.0
                 pnl = 0.0
-                # Fallback: Try to get exit price even if wait_for_fill timed out (WebSocket lag)
-                try:
-                    # Try to get real exit price from broker
-                    exit_price = await self.broker.get_order_avg_price(exit_id)
-                    if exit_price > 0:
-                        entry_price = pos.get('entry_price', 0)
-                        qty = pos.get('qty', 0)
-                        if pos['side'] == 'SHORT':
-                            pnl = (entry_price - exit_price) * qty
-                        else:
-                            pnl = (exit_price - entry_price) * qty
-                except Exception as e:
-                    logger.warning(f"[SAFE_EXIT] Could not fetch real exit price fallback: {e}")
+                # Always try to get exit price, even if wait_for_fill timed out
+                if exit_id:
+                    try:
+                        exit_price = await self.broker.get_order_avg_price(exit_id)
+                        if exit_price > 0:
+                            entry_price = pos.get('entry_price', 0)
+                            qty = pos.get('qty', 0)
+                            if pos['side'] == 'SHORT':
+                                pnl = (entry_price - exit_price) * qty
+                            else:
+                                pnl = (exit_price - entry_price) * qty
+                    except Exception as e:
+                        logger.warning(f"[SAFE_EXIT] Could not fetch real exit price: {e}")
 
                 await self._finalize_closed_position(
                     symbol=symbol,
@@ -861,12 +926,39 @@ class OrderManager:
                     send_alert=False,
                 )
                 if self.telegram:
-                    await self.telegram.send_alert(f"✅ **CLOSED**: {symbol} ({reason})")
+                    pnl_str = f"+₹{pnl:.2f}" if pnl >= 0 else f"-₹{abs(pnl):.2f}"
+                    await self.telegram.send_alert(
+                        f"✅ **CLOSED**: `{symbol}` ({reason})\n"
+                        f"Exit: ₹{exit_price:.2f} | PnL: {pnl_str}"
+                    )
 
                 return True
 
             except Exception as e:
                 logger.error(f"❌ [EXIT] Critical Error: {e}")
+                # SAFETY NET: Even on crash, try to release capital
+                try:
+                    await self._finalize_closed_position(
+                        symbol=symbol,
+                        reason=f'{reason}_CRASH_RECOVERY',
+                        exit_price=0.0,
+                        pnl=0.0,
+                        send_alert=True,
+                    )
+                    if self.telegram:
+                        await self.telegram.send_alert(
+                            f"🚨 *EXIT ERROR*: `{symbol}`\n"
+                            f"Error: {str(e)[:100]}\n"
+                            f"Capital slot released. ⚠️ Check broker app."
+                        )
+                except Exception as cleanup_err:
+                    logger.critical(f"🚨 [EXIT] CLEANUP ALSO FAILED for {symbol}: {cleanup_err}")
+                    # Last resort: force release capital
+                    if self.capital:
+                        try:
+                            await self.capital.release_slot(broker=self.broker)
+                        except Exception:
+                            pass
                 return False
             finally:
                 self.exit_in_progress[symbol] = False

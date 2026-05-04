@@ -25,12 +25,14 @@ import datetime
 import threading
 from pathlib import Path
 from typing import Dict, Any, Optional
+from zoneinfo import ZoneInfo
 import pandas as pd
 
 logger = logging.getLogger("MLDataLogger")
+IST = ZoneInfo("Asia/Kolkata")
 
 # Schema version - increment when changing feature set
-SCHEMA_VERSION = "1.0.0"
+SCHEMA_VERSION = "1.1.0"
 
 # Feature columns for ML training
 FEATURE_COLUMNS = [
@@ -39,6 +41,7 @@ FEATURE_COLUMNS = [
     "schema_version",   # For backward compatibility
     "date",             # YYYY-MM-DD
     "time",             # HH:MM:SS
+    "timestamp_ist",    # ISO-8601 signal timestamp with Asia/Kolkata offset
     "symbol",           # NSE:SYMBOL-EQ
     
     # Price Context
@@ -101,6 +104,8 @@ FEATURE_COLUMNS = [
     "max_adverse",      # Max adverse excursion (MAE)
     "pnl_pct",          # P&L as % of entry
     "hold_time_mins",   # How long position held
+    "label_source",     # LIVE/GHOST/LEGACY
+    "exit_reason",      # SL_HIT/TP_HIT/EOD_SQUAREOFF/etc.
 ]
 
 class MLDataLogger:
@@ -109,12 +114,12 @@ class MLDataLogger:
     Logs observations at signal time, updates outcomes at EOD.
     """
     
-    def __init__(self, data_dir: str = "data/ml"):
+    def __init__(self, data_dir: str = "data/ml", session_date: Optional[str] = None):
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
         
         # Daily file path
-        self.today = datetime.date.today().isoformat()
+        self.today = session_date or datetime.datetime.now(IST).date().isoformat()
         self.daily_file = self.data_dir / f"observations_{self.today}.parquet"
         self.backup_file = self.data_dir / f"observations_{self.today}.csv"
         
@@ -132,14 +137,29 @@ class MLDataLogger:
         if self.daily_file.exists():
             try:
                 df = pd.read_parquet(self.daily_file)
-                self._buffer = df.to_dict('records')
+                self._buffer = [self._normalize_record(r) for r in df.to_dict('records')]
                 logger.info(f"[ML] Loaded {len(self._buffer)} existing observations")
             except Exception as e:
                 logger.error(f"[ML] Error loading existing data: {e}")
                 # Try backup
                 if self.backup_file.exists():
                     df = pd.read_csv(self.backup_file)
-                    self._buffer = df.to_dict('records')
+                    self._buffer = [self._normalize_record(r) for r in df.to_dict('records')]
+
+    def _normalize_record(self, record: Dict[str, Any]) -> Dict[str, Any]:
+        """Backfill new schema fields without rewriting old files on read."""
+        record.setdefault("timestamp_ist", None)
+        record.setdefault("label_source", None)
+        record.setdefault("exit_reason", None)
+        return record
+
+    def _dataframe_from_buffer(self) -> pd.DataFrame:
+        df = pd.DataFrame([self._normalize_record(dict(r)) for r in self._buffer])
+        for col in FEATURE_COLUMNS:
+            if col not in df.columns:
+                df[col] = None
+        ordered = FEATURE_COLUMNS + [c for c in df.columns if c not in FEATURE_COLUMNS]
+        return df[ordered]
     
     def _save(self):
         """Atomic save to parquet + CSV backup."""
@@ -148,7 +168,7 @@ class MLDataLogger:
                 return
             
             try:
-                df = pd.DataFrame(self._buffer)
+                df = self._dataframe_from_buffer()
                 
                 # Parquet (primary)
                 temp_file = self.daily_file.with_suffix('.tmp')
@@ -172,7 +192,7 @@ class MLDataLogger:
         Returns observation ID for later outcome update.
         """
         obs_id = str(uuid.uuid4())[:8]  # Short unique ID
-        now = datetime.datetime.now()
+        now = datetime.datetime.now(IST)
         
         # Determine time bucket
         hour = now.hour
@@ -189,6 +209,7 @@ class MLDataLogger:
             "schema_version": SCHEMA_VERSION,
             "date": now.strftime("%Y-%m-%d"),
             "time": now.strftime("%H:%M:%S"),
+            "timestamp_ist": now.isoformat(timespec="seconds"),
             "symbol": symbol,
             
             # From features dict
@@ -243,6 +264,8 @@ class MLDataLogger:
             "max_adverse": None,
             "pnl_pct": None,
             "hold_time_mins": None,
+            "label_source": None,
+            "exit_reason": None,
         }
         
         with self._lock:
@@ -261,14 +284,17 @@ class MLDataLogger:
         max_favorable: float = 0,
         max_adverse: float = 0,
         hold_time_mins: int = 0,
-        pnl_pct: Optional[float] = None
-    ):
+        pnl_pct: Optional[float] = None,
+        label_source: str = "LIVE",
+        exit_reason: Optional[str] = None
+    ) -> bool:
         """
         Update the outcome for an observation (called at EOD or trade close).
         """
         with self._lock:
             for obs in self._buffer:
                 if obs["obs_id"] == obs_id:
+                    self._normalize_record(obs)
                     entry = obs["ltp"]
                     if pnl_pct is None:
                         # Fallback for old calls without pnl_pct passed
@@ -280,11 +306,19 @@ class MLDataLogger:
                     obs["max_adverse"] = max_adverse
                     obs["pnl_pct"] = pnl_pct
                     obs["hold_time_mins"] = hold_time_mins
+                    obs["label_source"] = label_source
+                    obs["exit_reason"] = exit_reason
                     
                     logger.info(f"[ML] Updated outcome for {obs_id}: {outcome} ({pnl_pct:.2f}%)")
+                    found = True
                     break
+            else:
+                found = False
         
         self._save()
+        if not found:
+            logger.warning(f"[ML] Outcome update skipped; obs_id not found: {obs_id}")
+        return found
     
     def _extract_sector(self, symbol: str) -> str:
         """Extract sector from symbol (simplified)."""
@@ -310,13 +344,22 @@ class MLDataLogger:
         with self._lock:
             return pd.DataFrame(self._buffer)
     
-    def get_unlabeled_observations(self) -> pd.DataFrame:
+    def get_unlabeled_observations(self, session_date: Optional[str] = None) -> pd.DataFrame:
         """Get observations that haven't been labeled yet."""
         with self._lock:
-            unlabeled = [obs for obs in self._buffer if obs["outcome"] is None]
+            unlabeled = [
+                self._normalize_record(dict(obs))
+                for obs in self._buffer
+                if obs["outcome"] is None and (session_date is None or obs.get("date") == session_date)
+            ]
             return pd.DataFrame(unlabeled)
     
-    def export_for_training(self, output_path: str = "data/ml/training_data.parquet"):
+    def export_for_training(
+        self,
+        output_path: str = "data/ml/training_data.parquet",
+        include_ghost: bool = False,
+        include_legacy: bool = False,
+    ):
         """
         Combine all daily files into one training dataset.
         Only includes labeled observations.
@@ -331,8 +374,17 @@ class MLDataLogger:
         for f in all_files:
             try:
                 df = pd.read_parquet(f)
+                if "label_source" not in df.columns:
+                    df["label_source"] = "LEGACY"
+                df["label_source"] = df["label_source"].fillna("LEGACY")
                 # Only include labeled observations
                 df = df[df["outcome"].notna()]
+                allowed_sources = {"LIVE"}
+                if include_ghost:
+                    allowed_sources.add("GHOST")
+                if include_legacy:
+                    allowed_sources.add("LEGACY")
+                df = df[df["label_source"].isin(allowed_sources)]
                 dfs.append(df)
             except Exception as e:
                 logger.error(f"[ML] Error reading {f}: {e}")

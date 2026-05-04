@@ -5,6 +5,7 @@ import os
 import time
 import pandas as pd
 from datetime import date, datetime
+from zoneinfo import ZoneInfo
 
 import config
 from database import DatabaseManager
@@ -14,6 +15,7 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
+IST = ZoneInfo("Asia/Kolkata")
 
 REPORT_DIR = "logs/eod_reports"
 
@@ -76,10 +78,16 @@ class EODAnalyzer:
         Phase 73: Finds signals that passed validation but weren't traded.
         Simulates their path (SL/TP) to provide labeled data for the ML Trainer.
         """
-        from ml_logger import get_ml_logger
-        ml_logger = get_ml_logger()
+        from ml_logger import MLDataLogger, get_ml_logger
+        target_date_str = target_date.isoformat()
+        active_logger = get_ml_logger()
+        ml_logger = (
+            active_logger
+            if getattr(active_logger, "today", None) == target_date_str
+            else MLDataLogger(session_date=target_date_str)
+        )
         
-        unlabeled_df = ml_logger.get_unlabeled_observations()
+        unlabeled_df = ml_logger.get_unlabeled_observations(target_date_str)
         unlabeled = unlabeled_df.to_dict('records') if not unlabeled_df.empty else []
         if not unlabeled:
             logger.info("No unlabeled observations to audit.")
@@ -101,10 +109,12 @@ class EODAnalyzer:
             symbol = obs.get("symbol")
             if not symbol: continue
             
-            # 1. Fetch history from signal time to EOD
-            # Signal time is in obs['time'] (HH:MM:SS)
-            signal_time_str = obs.get("time")
             try:
+                sig_dt = self._observation_timestamp(obs, target_date)
+                if sig_dt is None:
+                    logger.warning("[GHOST AUDIT] Missing/invalid signal timestamp for %s", symbol)
+                    continue
+
                 # We need historical data to simulate the path
                 # Fyers history API: resolution 1
                 data = {
@@ -133,14 +143,9 @@ class EODAnalyzer:
                 df = pd.DataFrame(response["candles"], columns=cols)
                 df['dt'] = pd.to_datetime(df['epoch'], unit='s', utc=True).dt.tz_convert('Asia/Kolkata')
                 
-                # Filter df for candles AFTER signal_time
-                sig_dt = datetime.strptime(f"{target_date} {signal_time_str}", "%Y-%m-%d %H:%M:%S")
-                # Add timezone for comparison
-                import pytz
-                IST = pytz.timezone('Asia/Kolkata')
-                sig_dt = IST.localize(sig_dt)
-                
-                relevant_candles = df[df['dt'] >= sig_dt]
+                # Use candles strictly after the signal timestamp. The signal
+                # minute candle can contain price action from before the signal.
+                relevant_candles = df[df['dt'] > sig_dt]
                 if relevant_candles.empty:
                     continue
 
@@ -155,7 +160,10 @@ class EODAnalyzer:
                         exit_price=outcome_data["exit_price"],
                         max_favorable=outcome_data["max_favorable"],
                         max_adverse=outcome_data["max_adverse"],
-                        hold_time_mins=outcome_data["hold_time_mins"]
+                        hold_time_mins=outcome_data["hold_time_mins"],
+                        pnl_pct=outcome_data["pnl_pct"],
+                        label_source="GHOST",
+                        exit_reason=outcome_data["exit_reason"],
                     )
                     results["processed"] += 1
                     if outcome_data["outcome"] == "WIN":
@@ -176,14 +184,36 @@ class EODAnalyzer:
         logger.info(f"Ghost Audit Complete: {results}")
         return results
 
+    def _observation_timestamp(self, obs, target_date: date):
+        """Return a timezone-aware IST timestamp for an ML observation."""
+        timestamp_ist = obs.get("timestamp_ist")
+        if timestamp_ist and not pd.isna(timestamp_ist):
+            ts = pd.Timestamp(timestamp_ist)
+            if ts.tzinfo is None:
+                ts = ts.tz_localize(IST)
+            else:
+                ts = ts.tz_convert(IST)
+            return ts.to_pydatetime()
+
+        signal_time_str = obs.get("time")
+        if not signal_time_str or pd.isna(signal_time_str):
+            return None
+
+        obs_date = obs.get("date") or target_date.isoformat()
+        sig_dt = datetime.strptime(f"{obs_date} {signal_time_str}", "%Y-%m-%d %H:%M:%S")
+        return sig_dt.replace(tzinfo=IST)
+
     def _simulate_path(self, obs, df):
         """
         Core path simulation engine for ShortCircuit strategy.
         Checks for SL, TP1, TP2, TP3 hits in order.
         """
-        entry_price = obs.get("ltp")
-        sl_price = obs.get("sl_price")
-        tp_price = obs.get("tp_price") or obs.get("tp1_price")
+        try:
+            entry_price = float(obs.get("ltp"))
+            sl_price = float(obs.get("sl_price"))
+            tp_price = float(obs.get("tp_price") or obs.get("tp1_price"))
+        except (TypeError, ValueError):
+            return None
         
         if not all([entry_price, sl_price, tp_price]):
             return None
@@ -199,8 +229,8 @@ class EODAnalyzer:
         outcome = "LOSS" # Default
         exit_reason = None
         
-        # Phase 96: Infer direction since ghost signals might be LONG or SHORT
-        is_short = sl_price > entry_price
+        direction = str(obs.get("direction") or "").upper()
+        is_short = direction == "SHORT" if direction in {"SHORT", "LONG"} else sl_price > entry_price
 
         for _, row in df.iterrows():
             high = row['high']
@@ -209,12 +239,12 @@ class EODAnalyzer:
             
             if is_short:
                 # SHORT: AE (Price going AGAINST = UP), FE (Price going WITH = DOWN)
-                adv = ((high - entry_price) / entry_price) * 100
-                fav = ((entry_price - low) / entry_price) * 100
+                adv = max(0.0, ((high - entry_price) / entry_price) * 100)
+                fav = max(0.0, ((entry_price - low) / entry_price) * 100)
             else:
                 # LONG: AE (Price going AGAINST = DOWN), FE (Price going WITH = UP)
-                adv = ((entry_price - low) / entry_price) * 100
-                fav = ((high - entry_price) / entry_price) * 100
+                adv = max(0.0, ((entry_price - low) / entry_price) * 100)
+                fav = max(0.0, ((high - entry_price) / entry_price) * 100)
 
             max_adverse = max(max_adverse, adv)
             max_favorable = max(max_favorable, fav)
