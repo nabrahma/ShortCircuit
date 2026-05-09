@@ -41,6 +41,8 @@ class ReconciliationEngine:
         self._has_open_positions: bool = False
         self._shutdown_event:    asyncio.Event = None
         self._last_rest_sync:    float = 0.0
+        self._recently_closed:   dict = {}  # Phase 98.1: symbol → close_timestamp (grace period)
+        self._orphan_grace_secs: float = 30.0  # Ignore orphans for 30s after internal close
         # ─────────────────────────────────────────────────────────────
 
     # ── Called by TradeManager when trade opens or closes ─────────────
@@ -50,6 +52,15 @@ class ReconciliationEngine:
         Forces DB re-fetch on next reconciliation cycle.
         """
         self._db_dirty = True
+
+    def mark_recently_closed(self, symbol: str):
+        """
+        Phase 98.1: Record that a position was just closed internally.
+        Prevents false orphan alerts during broker settlement lag.
+        """
+        import time
+        self._recently_closed[symbol] = time.time()
+        logger.debug(f"[RECONCILE] {symbol} marked recently closed — grace period active")
         logger.debug("🔁 Reconciliation marked dirty.")
     # ──────────────────────────────────────────────────────────────────
 
@@ -163,6 +174,20 @@ class ReconciliationEngine:
             b_qty = b_pos.get('qty', 0)
             b_qty_abs = abs(b_qty)  # Phase 95: Fyers uses negative qty for shorts
             if symbol not in db_positions:
+                # Phase 98.1: Grace period — skip orphan alert if recently closed internally
+                import time
+                closed_at = self._recently_closed.get(symbol, 0)
+                if time.time() - closed_at < self._orphan_grace_secs:
+                    logger.debug(
+                        f"[RECONCILE] Suppressed orphan for {symbol} — "
+                        f"closed {time.time() - closed_at:.1f}s ago (grace={self._orphan_grace_secs}s)"
+                    )
+                    continue
+                # Clean up expired grace entries
+                self._recently_closed = {
+                    s: t for s, t in self._recently_closed.items()
+                    if time.time() - t < self._orphan_grace_secs
+                }
                 orphans.append({'symbol': symbol, 'qty': b_qty})
             elif db_positions[symbol] != b_qty_abs:
                 mismatched.append({
@@ -508,10 +533,16 @@ class ReconciliationEngine:
         Previous version: alert only.
         Now: adopts orphans, releases phantom capital slots.
         """
-        logger.critical(
-            f"🚨 DISCREPANCY: Orphans={len(orphans)}, "
-            f"Phantoms={len(phantoms)}, Mismatch={len(mismatched)}"
-        )
+        if orphans:
+            logger.critical(
+                f"🚨 DISCREPANCY: Orphans={len(orphans)}, "
+                f"Phantoms={len(phantoms)}, Mismatch={len(mismatched)}"
+            )
+        else:
+            logger.warning(
+                f"⚠️ DISCREPANCY (non-orphan): Orphans={len(orphans)}, "
+                f"Phantoms={len(phantoms)}, Mismatch={len(mismatched)}"
+            )
     
         # ── DB log (defensive — tries both column name conventions) ────────
         async def _try_insert(int_col: str, brk_col: str) -> bool:

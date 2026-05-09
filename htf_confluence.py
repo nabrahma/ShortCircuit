@@ -78,10 +78,19 @@ class HTFConfluence:
 
         # ── Step 3: Momentum Physics (Velocity/Acceleration) ─────
         try:
-            curr_c = df['c'].iloc[-1]
-            prev_c = df['c'].iloc[-2]
-            pprev_c = df['c'].iloc[-3]
+            # Phase 98.1: Handle both column naming conventions
+            # Analyzer DataFrames use 'close', HTF self-fetched uses 'c'
+            close_col = 'c' if 'c' in df.columns else 'close'
+            if close_col not in df.columns:
+                return True, "G9 SKIP: No close column in DataFrame"
+
+            curr_c = df[close_col].iloc[-1]
+            prev_c = df[close_col].iloc[-2]
+            pprev_c = df[close_col].iloc[-3]
             
+            if prev_c == 0 or pprev_c == 0:
+                return True, "G9 SKIP: Zero price in candle data"
+
             # move_pct in last 15 mins vs previous 15 mins
             curr_move = ((curr_c - prev_c) / prev_c) * 100
             prev_move = ((prev_c - pprev_c) / pprev_c) * 100
@@ -98,7 +107,7 @@ class HTFConfluence:
                  return True, f"G9 PASS: Momentum Stall (Move {curr_move:.2f}% < {config.P61_G9_STALL_PASS_THRESHOLD}%)"
 
         except Exception as e:
-            logger.warning(f"G9 Math Logic Error: {e}")
+            logger.debug(f"G9 Math Logic Error (non-fatal): {e}")
             return True, "G9 ERROR — PASS"
 
         return False, f"G9 BLOCK: Sustained Trend (Move {curr_move:.2f}%)"

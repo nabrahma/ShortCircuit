@@ -254,6 +254,10 @@ class OrderManager:
             except Exception as e:
                 logger.error(f"[CLOSE] Capital release_slot failed for {symbol}: {e}")
 
+        # Phase 98.1: Prevent reconciliation orphan noise by starting a grace period
+        if getattr(self, 'trade_manager', None) and getattr(self.trade_manager, 'reconciliation_engine', None):
+            self.trade_manager.reconciliation_engine.mark_recently_closed(symbol)
+
         if self.db:
             try:
                 await self.db.log_trade_exit(
