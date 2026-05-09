@@ -162,6 +162,17 @@ class FyersAnalyzer:
             grl.record(gr)
             return None
         gr.g2_pass = True
+
+        # Phase 98.2: Early RSI Filter (Saves Processing Power)
+        # We check this first before running expensive VWAP/AMT/Profile calculations
+        current_rsi = self.gm_analyst.calculate_rsi(df, period=14)
+        if pd.isna(current_rsi) or current_rsi < 65.0:
+            gr.verdict = "REJECTED"
+            gr.first_fail_gate = "G0_RSI"
+            gr.rejection_reason = f"RSI {current_rsi:.1f} < 65.0"
+            grl.record(gr)
+            return None
+
         # Enrichment & Technicals
         self._enrich_dataframe(df)
         prev_df = df.iloc[:-1]
