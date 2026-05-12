@@ -1768,8 +1768,17 @@ class FyersBrokerInterface:
         try:
             data_ws = getattr(self, 'data_ws', None) or getattr(self, '_data_ws', None)
             if data_ws:
-                await asyncio.to_thread(data_ws.close)
-                logger.info("[BROKER] Data WebSocket closed.")
+                # Phase 98.3: Fyers SDK may use stop()/disconnect() instead of close()
+                _stopped = False
+                for _method in ('stop', 'disconnect', 'close'):
+                    fn = getattr(data_ws, _method, None)
+                    if callable(fn):
+                        await asyncio.to_thread(fn)
+                        logger.info(f"[BROKER] Data WebSocket closed via .{_method}().")
+                        _stopped = True
+                        break
+                if not _stopped:
+                    logger.warning("[BROKER] Data WebSocket: no stop/disconnect/close method found (non-fatal).")
         except Exception as e:
             logger.warning(f"[BROKER] Data WS close error (non-fatal): {e}")
 
@@ -1777,8 +1786,17 @@ class FyersBrokerInterface:
         try:
             order_ws = getattr(self, 'order_ws', None) or getattr(self, '_order_ws', None)
             if order_ws:
-                await asyncio.to_thread(order_ws.close)
-                logger.info("[BROKER] Order WebSocket closed.")
+                # Phase 98.3: Fyers SDK may use stop()/disconnect() instead of close()
+                _stopped = False
+                for _method in ('stop', 'disconnect', 'close'):
+                    fn = getattr(order_ws, _method, None)
+                    if callable(fn):
+                        await asyncio.to_thread(fn)
+                        logger.info(f"[BROKER] Order WebSocket closed via .{_method}().")
+                        _stopped = True
+                        break
+                if not _stopped:
+                    logger.warning("[BROKER] Order WebSocket: no stop/disconnect/close method found (non-fatal).")
         except Exception as e:
             logger.warning(f"[BROKER] Order WS close error (non-fatal): {e}")
 

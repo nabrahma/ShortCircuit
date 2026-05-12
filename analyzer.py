@@ -165,11 +165,14 @@ class FyersAnalyzer:
 
         # Phase 98.2: Early RSI Filter (Saves Processing Power)
         # We check this first before running expensive VWAP/AMT/Profile calculations
+        # Threshold: 60 (not 65 — 65 was blocking valid exhaustion setups like SASKEN +14.97%)
         current_rsi = self.gm_analyst.calculate_rsi(df, period=14)
-        if pd.isna(current_rsi) or current_rsi < 65.0:
+        _rsi_threshold = getattr(config, 'RSI_GATE_THRESHOLD', 60.0)
+        if pd.isna(current_rsi) or current_rsi < _rsi_threshold:
+            rsi_display = f"{current_rsi:.1f}" if not pd.isna(current_rsi) else "NaN"
             gr.verdict = "REJECTED"
             gr.first_fail_gate = "G0_RSI"
-            gr.rejection_reason = f"RSI {current_rsi:.1f} < 65.0"
+            gr.rejection_reason = f"RSI {rsi_display} < {_rsi_threshold}"
             grl.record(gr)
             return None
 

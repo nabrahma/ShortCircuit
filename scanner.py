@@ -217,19 +217,26 @@ class FyersScanner:
                 df['datetime'] = pd.to_datetime(df['epoch'], unit='s').dt.tz_localize('UTC').dt.tz_convert('Asia/Kolkata')
                 
                 # Phase 51: Pre-fetch 15m candles for G9 trend exhaustion
+                # Phase 98.3: Add timeout protection — slow 15m fetch was causing 90s scan timeout
                 df_15m = None
                 try:
-                    today     = _dt.date.today()
-                    five_back = today - _dt.timedelta(days=5)
+                    from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
+                    today_str     = today.strftime("%Y-%m-%d")
+                    five_back_str = five_back.strftime("%Y-%m-%d")
                     data_15m = {
                         "symbol": symbol, "resolution": "15", "date_format": "1",
-                        "range_from": five_back.strftime("%Y-%m-%d"),
-                        "range_to": today.strftime("%Y-%m-%d"), "cont_flag": "1"
+                        "range_from": five_back_str,
+                        "range_to": today_str, "cont_flag": "1"
                     }
-                    resp_15m = self.fyers.history(data=data_15m)
-                    if resp_15m.get('s') == 'ok' and resp_15m.get('candles'):
-                        df_15m = pd.DataFrame(resp_15m['candles'], columns=cols)
-                        df_15m['datetime'] = pd.to_datetime(df_15m['epoch'], unit='s').dt.tz_localize('UTC').dt.tz_convert('Asia/Kolkata')
+                    with ThreadPoolExecutor(max_workers=1) as _ex:
+                        _f = _ex.submit(self.fyers.history, data_15m)
+                        try:
+                            resp_15m = _f.result(timeout=8)  # Hard 8s cap on 15m fetch
+                            if resp_15m.get('s') == 'ok' and resp_15m.get('candles'):
+                                df_15m = pd.DataFrame(resp_15m['candles'], columns=cols)
+                                df_15m['datetime'] = pd.to_datetime(df_15m['epoch'], unit='s').dt.tz_localize('UTC').dt.tz_convert('Asia/Kolkata')
+                        except FutureTimeout:
+                            logger.debug(f"15m fetch timed out for {symbol} — skipping HTF (G9 will fail-open)")
                 except Exception as e:
                     logger.warning(f"Failed to fetch 15m candles for {symbol}: {e}")
                 
@@ -515,7 +522,7 @@ class FyersScanner:
                 symbol = futures[future]
                 try:
                     logger.debug(f"Waiting for quality check result: {symbol}...")
-                    is_good, df, df_15m = future.result(timeout=10)
+                    is_good, df, df_15m = future.result(timeout=15)  # Phase 98.3: raised from 10s to give 8s 15m-fetch room
                     if is_good:
                         c = candidates_map[symbol]
                         c['history_df'] = df
