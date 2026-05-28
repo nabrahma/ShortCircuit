@@ -86,6 +86,7 @@ P51_G5_GATE_E_LATE_SESSION_EXTREME_ONLY = False
 
 # G6: RSI & Confluence
 P55_G6_RSI_DIVERGENCE_WINDOW: int = 25
+RSI_GATE_ENABLED: bool = False     # Phase 98.4: Toggle RSI pre-filter on/off (disabled for now)
 RSI_GATE_THRESHOLD: float = 60.0  # Phase 98.2: Early RSI pre-filter (was 65 — lowered, too strict)
 EDGE_WEIGHTS = {
     "ABSORPTION": 3.0, "BAD_HIGH": 2.0, "TRAPPED_LONGS": 2.0,

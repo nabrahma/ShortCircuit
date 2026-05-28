@@ -164,17 +164,17 @@ class FyersAnalyzer:
         gr.g2_pass = True
 
         # Phase 98.2: Early RSI Filter (Saves Processing Power)
-        # We check this first before running expensive VWAP/AMT/Profile calculations
-        # Threshold: 60 (not 65 — 65 was blocking valid exhaustion setups like SASKEN +14.97%)
-        current_rsi = self.gm_analyst.calculate_rsi(df, period=14)
-        _rsi_threshold = getattr(config, 'RSI_GATE_THRESHOLD', 60.0)
-        if pd.isna(current_rsi) or current_rsi < _rsi_threshold:
-            rsi_display = f"{current_rsi:.1f}" if not pd.isna(current_rsi) else "NaN"
-            gr.verdict = "REJECTED"
-            gr.first_fail_gate = "G0_RSI"
-            gr.rejection_reason = f"RSI {rsi_display} < {_rsi_threshold}"
-            grl.record(gr)
-            return None
+        # Toggle: config.RSI_GATE_ENABLED (default False — disabled for now)
+        if getattr(config, 'RSI_GATE_ENABLED', False):
+            current_rsi = self.gm_analyst.calculate_rsi(df, period=14)
+            _rsi_threshold = getattr(config, 'RSI_GATE_THRESHOLD', 60.0)
+            if pd.isna(current_rsi) or current_rsi < _rsi_threshold:
+                rsi_display = f"{current_rsi:.1f}" if not pd.isna(current_rsi) else "NaN"
+                gr.verdict = "REJECTED"
+                gr.first_fail_gate = "G0_RSI"
+                gr.rejection_reason = f"RSI {rsi_display} < {_rsi_threshold}"
+                grl.record(gr)
+                return None
 
         # Enrichment & Technicals
         self._enrich_dataframe(df)
