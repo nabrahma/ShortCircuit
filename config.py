@@ -134,6 +134,7 @@ P66_G4_DECAY_SD_THRESHOLD = 2.0
 
 # Phase 65: AMT & Opening Climax
 P65_AMT_ENABLED = True
+G7_CLIMAX_WINDOW_ENABLED = False  # Phase 98.5: Toggle climax window. False = normal trading from 09:30
 P65_G7_CLIMAX_WINDOW_START = "09:30"
 P65_G7_SAFE_TRADE_START = "10:00"
 P65_G7_CLIMAX_SD_THRESHOLD = 2.5   # Phase 92: Lowered 3.0 → 2.5 to catch KOPRAN-type decaying setups in climax window
