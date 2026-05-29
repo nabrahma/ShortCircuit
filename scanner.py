@@ -105,6 +105,10 @@ class FyersScanner:
             # No local import needed anymore
             import datetime as _dt
             
+            # Phase 98.4: Define date vars at top — needed by both 1m REST fallback and 15m fetch
+            today     = _dt.date.today()
+            five_back = today - _dt.timedelta(days=5)
+            
             # --- Phase 82: Local Candle Engine ---
             candles = None
             if getattr(config, 'P82_LOCAL_CANDLES_ENABLED', False) and self.broker:
@@ -116,9 +120,6 @@ class FyersScanner:
 
             if not candles:
                 # Fallback to REST history
-                today     = _dt.date.today()
-                five_back = today - _dt.timedelta(days=5)
-
                 data = {
                     "symbol": symbol,
                     "resolution": "1",
