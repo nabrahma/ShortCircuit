@@ -88,15 +88,19 @@ P51_G5_GATE_E_LATE_SESSION_EXTREME_ONLY = False
 P55_G6_RSI_DIVERGENCE_WINDOW: int = 25
 RSI_GATE_ENABLED: bool = False     # Phase 98.4: Toggle RSI pre-filter on/off (disabled for now)
 RSI_GATE_THRESHOLD: float = 60.0  # Phase 98.2: Early RSI pre-filter (was 65 — lowered, too strict)
-EDGE_WEIGHTS = {
-    "ABSORPTION": 3.0, "BAD_HIGH": 2.0, "TRAPPED_LONGS": 2.0,
-    "PATTERN_SHOOTING_STAR": 1.5, "PATTERN_MOMENTUM_BREAKDOWN": 1.5,
-    "PATTERN_BEARISH_ENGULFING": 1.0, "PATTERN_EVENING_STAR": 1.0,
-    "PATTERN_VOLUME_TRAP": 1.0, "FAILED_AUCTION": 1.0,
-}
-CONFIDENCE_THRESHOLD_EXTREME = 5.0
-CONFIDENCE_THRESHOLD_HIGH    = 3.0
-CONFIDENCE_THRESHOLD_MEDIUM  = 2.0
+# ============================================================================
+# STRATEGY: BackToVWAPShort
+# ============================================================================
+STRATEGY_VWAP_SD_FLOOR: float = 2.5       # Minimum VWAP stretch (SD) for any signal
+STRATEGY_VWAP_SD_HIGH: float = 3.3        # HIGH confidence tier threshold
+STRATEGY_VWAP_SD_EXTREME: float = 4.5     # EXTREME confidence tier threshold
+STRATEGY_REQUIRE_FAILED_AUCTION: bool = True  # Hard gate: require auction failure behavior
+STRATEGY_VOL_FADE_MAX_RATIO: float = 0.65    # Volume fade ratio (< this = fading)
+STRATEGY_VOL_FADE_LOOKBACK: int = 15         # Candles to look back for volume baseline
+STRATEGY_VOL_FADE_DECAY_RELAX: float = 0.85  # Relaxed fade threshold when decaying
+STRATEGY_RSI_DIVERGENCE_WINDOW: int = 25      # Window for RSI divergence check
+STRATEGY_MOMENTUM_SLOPE_FLAT_THRESHOLD: float = 5.0  # bp/min — below this = flat
+STRATEGY_SPEAR_VOL_CLIMAX_MULT: float = 3.0  # Volume climax multiplier for Spear bypass
 
 # G7: Regime & Timing
 P51_G7_TIME_GATE_ENABLED = True   # Enables EOD cutoff logic
@@ -154,25 +158,7 @@ P66_G1_ROTATION_THRESHOLD_PCT: float = 0.030
 # Phase 90.7: Adaptive Volume Fade (Absorption Threshold)
 P90_G5_DECAY_VOL_RELAXATION = 0.85
 
-# ============================================================================
-# PHASE 92: TWO-TIER EXHAUSTION SCALPER
-# ============================================================================
-# Version A: Normal trading mode (pre-5% daily goal)
-# Simpler 6-condition gate — catches KOPRAN/FIRSTCRY type exhaustion scalps
-P92_VERSION_A_ENABLED = True
-P92_VA_MIN_GAIN = 10.0            # Raise from 7.5/9.0 → 10.0% (genuine extreme only)
-P92_VA_MIN_SD = 2.5               # Raise from 2.0 → 2.5 (statistically extended)
-P92_VA_BYPASS_G5_G6 = True        # Skip exhaustion composite + confluence scoring for 1% scalps
 
-# Version A+: Post-5% goal (EXTREME confidence only, higher conviction required)
-P92_VA_PLUS_MIN_GAIN = 13.0       # Only extreme runners (99th percentile intraday)
-P92_VA_PLUS_MIN_SD = 3.5          # Leung & Li: maximum OU reversion pull
-P92_VA_PLUS_REQUIRE_NARROWING_HIGHS = True   # Last 3 candles each lower high = distribution
-P92_VA_PLUS_RVOL_FADE_RATIO = 0.5            # Current RVOL < 50% of session peak = buyers gone
-
-# Phase 93: Unspecified Move Audit (RVOL Trends)
-P93_RVOL_SURGE_PEAK_MULT = 3.0       # Peak volume must be 3x over average (The Surge)
-P93_RVOL_SURGE_FADE_RATIO = 0.6      # Current volume must be 60% of peak (The Fade)
 
 # ============================================================================
 # PHASE 79: LEVERAGE GUARD (G14)
@@ -233,7 +219,7 @@ if P70_ML_DYNAMIC_OVERRIDE_ENABLED:
 # ============================================================================
 # 8. FEATURE TOGGLES & LEGACY (PHASE 41 - PHASE 44)
 # ============================================================================
-MULTI_EDGE_ENABLED = False
+
 RVOL_VALIDITY_GATE_ENABLED = True
 ENABLE_POSITION_VERIFICATION = True
 ENABLE_BROKER_POSITION_POLLING = True
@@ -246,16 +232,9 @@ RVOL_MIN_CANDLES = 15
 # Phase 44.4: Telegram UX
 ETF_CLUSTER_DEDUP_ENABLED = True
 ETF_CLUSTER_KEYWORDS = ["SILVER"]
-EDITABLE_SIGNAL_FLOW_ENABLED = False
 
-# Multi-Edge Detectors (Phase 41.1)
-ENABLED_DETECTORS = {
-    "PATTERN": True,            # P0 — Existing 6-pattern engine
-    "TRAPPED_POSITION": True,   # P0 — Trapped longs
-    "ABSORPTION": True,         # P0 — Hidden limit sellers
-    "BAD_HIGH": True,           # P0 — DOM sell-wall
-    "FAILED_AUCTION": True,     # P1 — Simplified in 41.1
-}
+
+
 
 # Legacy & Backward Compatibility
 CAPITAL = 1800              # OFFLINE FALLBACK ONLY (Real Margin)

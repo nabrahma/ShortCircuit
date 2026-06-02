@@ -504,10 +504,7 @@ async def _trading_loop(shutdown_event: asyncio.Event, ctx: RuntimeContext):
                     correlation_id = await ctx.bot.queue_signal_discovery(pending_signal)
                     pending_signal["correlation_id"] = correlation_id
                 else:
-                    if signal.get("edges_detected"):
-                        ctx.bot.send_multi_edge_alert(signal)
-                    else:
-                        ctx.bot.send_validation_alert(signal)
+                    ctx.bot.send_validation_alert(signal)
 
                 ctx.bot.focus_engine.add_pending_signal(pending_signal)
 

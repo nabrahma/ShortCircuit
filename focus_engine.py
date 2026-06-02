@@ -8,7 +8,7 @@ import pytz
 from fyers_connect import FyersConnect
 import config
 from order_manager import OrderManager
-from discretionary_engine import DiscretionaryEngine
+
 from gate_result_logger import get_gate_result_logger
 
 # Setup Logger
