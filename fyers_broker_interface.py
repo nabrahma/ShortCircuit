@@ -1638,9 +1638,10 @@ class FyersBrokerInterface:
             if age < 10.0 and pos_update.net_qty != 0:
                 positions.append({
                     'symbol': symbol,
-                    'qty': pos_update.net_qty,
-                    'avg_price': pos_update.avg_price,
-                    'unrealized_pnl': pos_update.unrealized_pnl
+                    'netQty': pos_update.net_qty,
+                    'avgPrice': pos_update.avg_price,
+                    'unrealized_profit': getattr(pos_update, 'unrealized_pnl', 0),
+                    'realized_profit': getattr(pos_update, 'realized_pnl', 0)
                 })
         
         if not positions:
@@ -1651,15 +1652,7 @@ class FyersBrokerInterface:
                 if response['s'] == 'ok':
                     for pos in response.get('netPositions', []):
                         if pos.get('netQty', 0) != 0:
-                            positions.append({
-                                'symbol': pos.get('symbol', ''),
-                                'qty': pos.get('netQty', 0),
-                                'avg_price': pos.get('avgPrice', pos.get('buyAvg', pos.get('sellAvg', 0))),
-                                'unrealized_pnl': pos.get('unrealized_profit', pos.get('pl', 0))
-                            })
-                            # Update cache? The cache object expects WS format.
-                            # We might need to map REST format to WS format if we want to cache it.
-                            # For now, we just return it.
+                            positions.append(pos)
             except Exception as e:
                 logger.error(f"Get all positions error: {e}")
         return positions
