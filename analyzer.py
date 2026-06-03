@@ -21,11 +21,11 @@ from typing import Optional, Dict, Any, Tuple
 import pandas as pd
 
 import config
-import features as F
+from strategy import features as F
 from gate_result_logger import GateResult, get_gate_result_logger
-from htf_confluence import HTFConfluence
-from market_context import MarketContext
-from market_profile import ProfileAnalyzer
+from strategy.htf_confluence import HTFConfluence
+from strategy.market_context import MarketContext
+from strategy.market_profile import ProfileAnalyzer
 from ml_logger import get_ml_logger
 from signal_manager import get_signal_manager
 from strategy.back_to_vwap import BackToVWAPShort

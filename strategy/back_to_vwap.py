@@ -21,7 +21,7 @@ from typing import Optional, Dict, Any
 
 import pandas as pd
 import config as cfg
-import features as F
+from strategy import features as F
 
 logger = logging.getLogger(__name__)
 
