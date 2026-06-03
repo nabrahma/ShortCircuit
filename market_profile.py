@@ -204,22 +204,4 @@ class ProfileAnalyzer:
         
         return False, f"Inside VA (VAH: {vah:.2f})"
 
-    def check_single_prints(self, df, ltp):
-        """
-        Detects 'Single Prints' (Thin Liquidity / Vacuum Zones).
-        """
-        # Logic: Fast price movement with low TPO counts.
-        # This acts as a target (Price magnets to fill singles) or Rejection (if created at top).
-        
-        # Simplified: Large range candle with low volume relative to day?
-        pass
 
-    def get_developing_poc(self, df):
-        """
-        Calculates the Point of Control (POC) for the given dataframe.
-        Used to track dPOC migration.
-        """
-        profile = self.calculate_market_profile(df, mode='VOLUME')
-        if profile:
-            return profile['vpoc']
-        return 0

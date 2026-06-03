@@ -546,11 +546,7 @@ class GateResultLogger:
             )
         return flushed
 
-    def get_scan_count(self) -> int:
-        return max((r.scan_id for r in self._records), default=0)
 
-    def get_records(self) -> List[GateResult]:
-        return list(self._records)
 
 
 def _to_num(val) -> Optional[float]:
@@ -579,7 +575,3 @@ def get_gate_result_logger() -> GateResultLogger:
     return _gate_result_logger
 
 
-def reset_gate_result_logger() -> None:
-    """Resets the singleton — used in tests only."""
-    global _gate_result_logger
-    _gate_result_logger = None

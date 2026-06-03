@@ -128,8 +128,8 @@ class OrderManager:
         atr    = signal.get('atr', 0)
         tick   = signal.get('tick_size', 0.05)
         # PRD: max(atr * 0.5, 3 * tick_size) — using config constants
-        buffer = max(atr * getattr(config, 'P51_SL_ATR_MULTIPLIER', 0.5),
-                     tick * getattr(config, 'P51_SL_MIN_TICK_BUFFER', 3))
+        buffer = max(atr * getattr(config, 'SL_ATR_MULTIPLIER', 0.5),
+                     tick * getattr(config, 'SL_MIN_TICK_BUFFER', 3))
         
         direction = config.TRADE_DIRECTION
         if direction == 'LONG':
@@ -967,115 +967,7 @@ class OrderManager:
             finally:
                 self.exit_in_progress[symbol] = False
 
-    async def close_partial_position(self, symbol: str, quantity: int, reason: str) -> dict:
-        """
-        Phase 52: Closes `quantity` shares of an open short position via market BUY order.
-        Returns: {"status": "SUCCESS", "order_id": str, "filled_qty": int}
-              or {"status": "FAILED", "error": str}
-        
-        CRITICAL: Must NEVER call _finalize_closed_position() (G13 isolation).
-        """
-        lock = self._get_lock(symbol)
-        async with lock:
-            try:
-                if symbol not in self.active_positions:
-                    return {"status": "FAILED", "error": f"{symbol} not active"}
 
-                pos = self.active_positions[symbol]
-                if pos['qty'] < quantity:
-                    return {"status": "FAILED", "error": f"Insufficient qty: {pos['qty']} < {quantity}"}
-
-                # ── IDEMPOTENCY GUARD ──
-                # Phase 77: Reject if the same TP level for this symbol was triggered in last 30s
-                import time
-                now_ts = time.time()
-                symbol_partials = self.partial_exits_in_progress.get(symbol, {})
-                last_ts = symbol_partials.get(reason, 0)
-                if now_ts - last_ts < 30:
-                    logger.warning(f"🚫 [PARTIAL EXIT] Duplicate {reason} for {symbol} suppressed (last attempt {now_ts - last_ts:.1f}s ago)")
-                    return {"status": "FAILED", "error": "Duplicate request (idempotency)"}
-
-                # Mark as in progress
-                if symbol not in self.partial_exits_in_progress:
-                    self.partial_exits_in_progress[symbol] = {}
-                self.partial_exits_in_progress[symbol][reason] = now_ts
-
-                logger.info(f"🔻 [PARTIAL EXIT] Closing {quantity} shares of {symbol} ({reason})")
-                
-                exit_side = 'BUY' if pos['side'] == 'SHORT' else 'SELL'
-                exit_id = await self.broker.place_order(
-                    symbol=symbol,
-                    side=exit_side,
-                    qty=quantity,
-                    order_type='MARKET'
-                )
-                
-                # Wait for fill (15s)
-                filled = await self.broker.wait_for_fill(exit_id, timeout=15.0)
-                if filled:
-                    logger.info(f"✅ Partial Fill: {symbol} ×{quantity}")
-                    # Update internal qty
-                    pos['qty'] -= quantity
-                    # NOTE: _finalize_closed_position is NOT called here.
-                    return {"status": "SUCCESS", "order_id": exit_id, "filled_qty": quantity}
-                else:
-                    return {"status": "FAILED", "error": "Fill timeout"}
-
-            except Exception as e:
-                logger.error(f"❌ [PARTIAL EXIT] Error: {e}")
-                return {"status": "FAILED", "error": str(e)}
-
-    async def modify_sl_qty(self, symbol: str, new_qty: int) -> bool:
-        """
-        Phase 52: After partial close, reduce the SL-M order qty to match remaining position.
-        Searches pending orderbook for symbol's SL order and modifies qty.
-        Returns True if modified, False if not found or failed.
-        """
-        try:
-            loop = asyncio.get_event_loop()
-            rest = getattr(self.broker, 'rest_client', None)
-            if not rest:
-                logger.error(f"[SL_QTY] No rest_client for {symbol}")
-                return False
-
-            # Run blocking REST call in thread
-            orderbook = await loop.run_in_executor(None, rest.orderbook)
-            if not isinstance(orderbook, dict) or orderbook.get('s') != 'ok':
-                return False
-
-            for order in orderbook.get('orderBook', []):
-                if (order.get('symbol') == symbol
-                        and order.get('status') == FYERS_ORDER_STATUS_PENDING
-                        and order.get('side') == 1):   # side=1 = BUY (our SL for a SHORT)
-                    order_id = order['id']
-                    tick = 0.05
-                    stop_price = order.get('stopPrice', 0)
-                    limit_price = round(stop_price * 1.005 / tick) * tick  # 0.5% above trigger
-
-                    modify_data = {
-                        "id":         order_id,
-                        "qty":        new_qty,
-                        "type":       4,          # SL-M
-                        "limitPrice": round(limit_price, 2),
-                        "stopPrice":  stop_price,
-                    }
-                    resp = await loop.run_in_executor(
-                        None,
-                        lambda: rest.modify_order(data=modify_data)
-                    )
-                    if resp and resp.get('s') == 'ok':
-                        logger.info(f"[SL_QTY] {symbol} SL qty updated → {new_qty}")
-                        return True
-                    else:
-                        logger.error(f"[SL_QTY] modify failed for {symbol}: {resp}")
-                        return False
-
-            logger.warning(f"[SL_QTY] No pending BUY SL order found for {symbol}")
-            return False
-
-        except Exception as e:
-            logger.error(f"[SL_QTY] Exception for {symbol}: {e}")
-            return False
 
     async def move_hard_stop(self, symbol: str, new_stop_price: float) -> bool:
         """

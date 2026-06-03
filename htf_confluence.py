@@ -112,33 +112,3 @@ class HTFConfluence:
 
         return False, f"G9 BLOCK: Sustained Trend (Move {curr_move:.2f}%)"
     
-    def get_key_levels(self, symbol):
-        """
-        Calculate key support/resistance levels from daily chart.
-        """
-        today = datetime.date.today()
-        yesterday = today - datetime.timedelta(days=3)
-        
-        data = {
-            "symbol": symbol,
-            "resolution": "D",
-            "date_format": "1",
-            "range_from": yesterday.strftime("%Y-%m-%d"),
-            "range_to": today.strftime("%Y-%m-%d"),
-            "cont_flag": "1"
-        }
-        
-        try:
-            response = self.fyers.history(data=data)
-            if response.get('s') == 'ok' and response.get('candles') and len(response['candles']) >= 2:
-                candles = response['candles']
-                prev_day = candles[-2]
-                return {
-                    'PDH': prev_day[2],
-                    'PDL': prev_day[3],
-                    'PDC': prev_day[4],
-                }
-        except Exception as e:
-            logger.error(f"Failed to fetch daily data for {symbol}: {e}")
-        
-        return {}

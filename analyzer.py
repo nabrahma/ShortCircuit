@@ -189,14 +189,13 @@ class FyersAnalyzer:
 
         # Decay trigger: fast slope drops below slow slope
         is_decaying = False
-        if getattr(config, 'P66_ADAPTIVE_G1_ENABLED', False):
-            decay_sd = getattr(config, 'P66_G4_DECAY_SD_THRESHOLD', 2.0)
-            if slope_5m < (slope_30m * 0.90) and vwap_sd > decay_sd:
-                is_decaying = True
-                logger.info(
-                    "⚡ [INFLECTION] %s Decaying: Fast(%.2f) < Slow(%.2f)",
-                    symbol, slope_5m, slope_30m,
-                )
+        decay_sd = 2.0
+        if slope_5m < (slope_30m * 0.90) and vwap_sd > decay_sd:
+            is_decaying = True
+            logger.info(
+                "⚡ [INFLECTION] %s Decaying: Fast(%.2f) < Slow(%.2f)",
+                symbol, slope_5m, slope_30m,
+            )
 
         # ── Gain Calculation ─────────────────────────────────────────
         pc = 0
@@ -230,12 +229,7 @@ class FyersAnalyzer:
         except Exception as e:
             logger.warning(f"Profile/VolZ pre-calc error for {symbol}: {e}")
 
-        # ── G7: Market Regime & Time Gate ─────────────────────────────
-        allowed, reason = self.market_context.evaluate_g7(
-            vwap_sd=vwap_sd,
-            profile_rejection=profile_rejection,
-            volume_z=vol_z,
-        )
+        allowed, reason = self.market_context.is_safe_trade_window()
         gr.g7_pass = allowed
         gr.g7_value = reason
         if not allowed:
@@ -245,92 +239,33 @@ class FyersAnalyzer:
             grl.record(gr)
             return None
 
-        # ── G1: Gain Floor & Kill Backdoor ────────────────────────────
-        min_gain = getattr(config, 'P65_G1_NORMAL_THRESHOLD', 9.0)
-        amt_failing_auction = False
-        if getattr(config, 'P65_AMT_ENABLED', False):
-            if profile_rejection and gain_pct >= config.P65_G1_NET_GAIN_THRESHOLD:
-                min_gain = config.P65_G1_NET_GAIN_THRESHOLD
-                amt_failing_auction = True
-
-        # Kill backdoor: price too far from high
-        kill_blocked, kill_msg = F.check_kill_backdoor(
-            ltp, day_high, atr=atr,
-            fixed_pct=getattr(config, 'P51_G1_KILL_BACKDOOR_FIXED_PCT', 0.015),
-            atr_mult=getattr(config, 'P51_G1_KILL_BACKDOOR_ATR_MULT', 0.3),
-        )
-
-        # Time-since-high
-        time_ok = F.check_time_since_high(
-            df, max_candles=getattr(config, 'P65_G1_TIME_SINCE_HIGH_CANDLES', 25)
-        )
-
-        g1_pass = True
-        g1_msg = "PASSED"
-
-        if gain_pct < min_gain:
-            g1_pass = False
-            g1_msg = (
-                f"Insufficient Gain: {gain_pct:.1f}% "
-                f"(need {min_gain}% {'with AMT' if amt_failing_auction else ''})"
-            )
-        elif getattr(config, 'P51_G1_KILL_BACKDOOR', True) and kill_blocked:
-            g1_pass = False
-            g1_msg = kill_msg
-        elif not time_ok:
-            g1_pass = False
-            g1_msg = "G1 Time Gate: high too stale"
-
-        gr.g1_pass = g1_pass
-        gr.g1_value = round(gain_pct, 2)
-        if not g1_pass:
-            gr.verdict = "REJECTED"
-            gr.first_fail_gate = "G1_GAIN_CONSTRAINTS"
-            gr.rejection_reason = g1_msg
-            grl.record(gr)
-            return None
-
-        # ── G3: Circuit Guard & Blacklist ─────────────────────────────
-        depth_data = None
+        # ── Pre-fetch Depth for Strategy ─────────────────────────────
+        upper_circuit = 0.0
+        lower_circuit = 0.0
+        spread_pct = 0.0
+        is_circuit_hitter = False
         try:
             full_depth = self.fyers.depth(data={"symbol": symbol, "ohlcv_flag": "1"})
             if 'd' in full_depth and symbol in full_depth['d']:
                 depth_data = full_depth['d'][symbol]
-                uc = depth_data.get('upper_ckt', 0)
-                if uc > 0 and ltp >= uc * 0.999:
+                upper_circuit = depth_data.get('upper_ckt', 0)
+                lower_circuit = depth_data.get('lower_ckt', 0)
+                
+                if upper_circuit > 0 and ltp >= upper_circuit * 0.999:
                     self.market_context.mark_circuit_touched(symbol)
+                
+                # Spread
+                ask = depth_data['ask'][0]['price'] if depth_data.get('ask') else ltp
+                bid = depth_data['bid'][0]['price'] if depth_data.get('bid') else ltp
+                if ltp > 0:
+                    spread_pct = (ask - bid) / ltp
+                    
         except Exception:
             pass
 
-        is_blacklisted = self.market_context.is_circuit_hitter(symbol)
-        circuit_blocked = is_blacklisted or self._check_circuit_guard(symbol, ltp, depth_data)
+        is_circuit_hitter = self.market_context.is_circuit_hitter(symbol)
 
-        gr.g3_pass = not circuit_blocked
-        gr.g3_value = "BLACKLISTED" if is_blacklisted else round(ltp, 2)
-        if circuit_blocked:
-            gr.verdict = "REJECTED"
-            gr.first_fail_gate = "G3_CIRCUIT_GUARD"
-            gr.rejection_reason = (
-                "Circuit Hitter (Session Blacklist)" if is_blacklisted
-                else f"LTP {ltp} too close to upper circuit"
-            )
-            grl.record(gr)
-            return None
-
-        # ── G4: Momentum Guard ────────────────────────────────────────
-        momentum_blocked = self._is_momentum_too_strong(
-            df, slope_5m, slope_30m, vwap_sd, symbol, gain_pct
-        )
-        gr.g4_pass = not momentum_blocked
-        gr.g4_value = round(slope_5m, 3)
-        if momentum_blocked:
-            gr.verdict = "REJECTED"
-            gr.first_fail_gate = "G4_MOMENTUM"
-            gr.rejection_reason = f"Momentum too strong (slope={slope_5m:.2f})"
-            grl.record(gr)
-            return None
-
-        # ── STRATEGY EVALUATION (replaces G5 + G6) ────────────────────
+        # ── STRATEGY EVALUATION (Replaces G1-G6) ────────────────────
         result = self.strategy.evaluate(
             symbol=symbol,
             ltp=ltp,
@@ -343,6 +278,10 @@ class FyersAnalyzer:
             slope_fast=slope_5m,
             slope_slow=slope_30m,
             is_decaying=is_decaying,
+            upper_circuit=upper_circuit,
+            lower_circuit=lower_circuit,
+            spread_pct=spread_pct,
+            is_circuit_hitter=is_circuit_hitter,
         )
 
         if result is None:
@@ -408,15 +347,11 @@ class FyersAnalyzer:
             grl.record(gr)
             return None
 
-        # ── G13: Risk & Reward (TP scaling) ───────────────────────────
+        # ── Reward Risk ───────────────────────────
         if gain_pct < 9.0:
-            signal_meta['tp_atr_mult_override'] = getattr(
-                config, 'P78_SINGLE_TP_ATR_MULT_LOW_GAIN', 0.5
-            )
+            signal_meta['tp_atr_mult_override'] = 0.5
         else:
-            signal_meta['tp_atr_mult_override'] = getattr(
-                config, 'P78_SINGLE_TP_ATR_MULT_DEFAULT', 1.0
-            )
+            signal_meta['tp_atr_mult_override'] = 1.0
 
         signal_meta['snapshot_high'] = day_high
 
@@ -437,85 +372,8 @@ class FyersAnalyzer:
     # PRIVATE HELPERS (kept)
     # ──────────────────────────────────────────────────────────────────
 
-    def _check_circuit_guard(self, symbol: str, ltp: float, quote: dict = None) -> bool:
-        """Safety: blocks trade if price is too close to upper/lower circuit."""
-        try:
-            if not quote:
-                depth_data = self.fyers.depth(data={"symbol": symbol, "ohlcv_flag": "1"})
-                if 'd' in depth_data:
-                    quote = depth_data['d'].get(symbol, {})
 
-            if quote:
-                uc = quote.get('upper_ckt', 0)
-                lc = quote.get('lower_ckt', 0)
 
-                if uc > 0:
-                    buffer_price = uc * 0.985
-                    if ltp >= buffer_price:
-                        logger.warning(
-                            "🛑 CIRCUIT GUARD: %s @ %s (Too close to UC %s)", symbol, ltp, uc
-                        )
-                        return True
-
-                if lc > 0 and ltp <= lc * 1.005:
-                    return True
-        except Exception as e:
-            logger.error(f"Circuit Check Error: {e}")
-
-        return False
-
-    def _is_momentum_too_strong(
-        self, df: pd.DataFrame, slope_fast: float, slope_slow: float,
-        vwap_sd: float, symbol: str, gain_pct: float = 0.0,
-    ) -> bool:
-        """Checks if momentum is too strong to short (dual-window)."""
-        try:
-            recent_vols = df['volume'].iloc[-20:-1]
-            avg_v = recent_vols.mean()
-            curr_v = df['volume'].iloc[-1]
-            rvol_now = curr_v / avg_v if avg_v > 0 else 0
-
-            rvol_thresh = config.P51_G4_RVOL_THRESHOLD if config.PHASE_51_ENABLED else 5.0
-            slope_thresh = config.P51_G4_SLOPE_MIN if config.PHASE_51_ENABLED else 3.0
-
-            if rvol_now > rvol_thresh:
-                logger.info(
-                    "📈 [CLIMAX] %s RVOL peak: %.1fx — tracking for fade", symbol, rvol_now
-                )
-                # Allow through — strategy checks volume fade downstream
-
-            # Inflection check: fast slope dropping below slow
-            if getattr(config, 'P57_G4_SLOPE_DECAY_ENABLED', False):
-                div_thresh = getattr(config, 'P57_G4_DIVERGENCE_SD', 1.5)
-                structural = gain_pct > getattr(config, 'P60_G4_STRUCTURAL_FALLBACK_GAIN', 10.0)
-
-                if slope_fast < (slope_slow * 0.90) and (vwap_sd > div_thresh or structural):
-                    logger.info(
-                        "✅ [MOMENTUM DECAY] %s allowed via Inflection "
-                        "(Fast:%.2f < Slow:%.2f)", symbol, slope_fast, slope_slow,
-                    )
-                    return False
-
-                if slope_slow > slope_thresh:
-                    logger.warning(
-                        "  MOMENTUM BLOCK %s Slow Slope %.1f (> %.1f) — NOT INFLECTED",
-                        symbol, slope_slow, slope_thresh,
-                    )
-                    return True
-
-        except Exception:
-            pass
-        return False
-
-    def _is_post_daily_target(self) -> bool:
-        """Returns True if the daily P&L target has been reached."""
-        try:
-            daily_target = getattr(config, 'DAILY_TARGET_INR', 0)
-            if daily_target == -1:
-                daily_target = self.signal_manager.daily_target_inr
-            return daily_target > 0 and self.signal_manager.daily_pnl >= daily_target
-        except Exception:
-            return False
 
     def _finalize_signal(
         self, symbol, ltp, df, pattern_desc, slope, wall_msg, signal_meta: dict = None,

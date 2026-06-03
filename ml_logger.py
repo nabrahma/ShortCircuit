@@ -339,10 +339,6 @@ class MLDataLogger:
         else:
             return "OTHER"
     
-    def get_todays_observations(self) -> pd.DataFrame:
-        """Get all observations for today as DataFrame."""
-        with self._lock:
-            return pd.DataFrame(self._buffer)
     
     def get_unlabeled_observations(self, session_date: Optional[str] = None) -> pd.DataFrame:
         """Get observations that haven't been labeled yet."""
@@ -354,50 +350,6 @@ class MLDataLogger:
             ]
             return pd.DataFrame(unlabeled)
     
-    def export_for_training(
-        self,
-        output_path: str = "data/ml/training_data.parquet",
-        include_ghost: bool = False,
-        include_legacy: bool = False,
-    ):
-        """
-        Combine all daily files into one training dataset.
-        Only includes labeled observations.
-        """
-        all_files = list(self.data_dir.glob("observations_*.parquet"))
-        
-        if not all_files:
-            logger.warning("[ML] No observation files found")
-            return None
-        
-        dfs = []
-        for f in all_files:
-            try:
-                df = pd.read_parquet(f)
-                if "label_source" not in df.columns:
-                    df["label_source"] = "LEGACY"
-                df["label_source"] = df["label_source"].fillna("LEGACY")
-                # Only include labeled observations
-                df = df[df["outcome"].notna()]
-                allowed_sources = {"LIVE"}
-                if include_ghost:
-                    allowed_sources.add("GHOST")
-                if include_legacy:
-                    allowed_sources.add("LEGACY")
-                df = df[df["label_source"].isin(allowed_sources)]
-                dfs.append(df)
-            except Exception as e:
-                logger.error(f"[ML] Error reading {f}: {e}")
-        
-        if not dfs:
-            logger.warning("[ML] No labeled observations found")
-            return None
-        
-        combined = pd.concat(dfs, ignore_index=True)
-        combined.to_parquet(output_path, index=False)
-        
-        logger.info(f"[ML] Exported {len(combined)} observations to {output_path}")
-        return combined
 
 
 # Singleton instance

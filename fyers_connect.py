@@ -225,9 +225,6 @@ class FyersConnect:
     def access_token(self) -> str:
         return self._access_token
 
-    def get_access_token(self) -> str:
-        """Legacy method alias for backward compat."""
-        return self._access_token
     
     def authenticate(self):
         """Legacy alias."""

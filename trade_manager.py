@@ -32,14 +32,7 @@ class TradeManager:
         self.scalper_manager = None
 
 
-    def set_auto_trade(self, enabled: bool):
-        self.auto_trade_enabled = enabled
-        logger.info(f"Auto-Trade set to: {self.auto_trade_enabled}")
-        return self.auto_trade_enabled
 
-    def tick_round(self, price, tick=0.05):
-        """Rounds price to nearest tick size."""
-        return round(round(price / tick) * tick, 2)
 
     # ==================================================================
     # PHASE 42: POSITION SAFETY — CRITICAL GUARDS
@@ -74,59 +67,6 @@ class TradeManager:
             logger.error(f"[SAFETY] Broker position query failed: {e}")
             return None
 
-    def _verify_position_safe(self, symbol: str, intended_action: str) -> bool:
-        """
-        CRITICAL safety check: Verify we're not about to flip direction.
-
-        Args:
-            symbol: NSE:SYMBOL-EQ
-            intended_action: 'ENTER_SHORT', 'EXIT_SHORT'
-
-        Returns:
-            True if safe to proceed, False if dangerous
-        """
-        if not getattr(config, 'ENABLE_POSITION_VERIFICATION', True):
-            return True  # Bypass if explicitly disabled
-
-        broker_pos = self._get_broker_position(symbol)
-
-        if broker_pos is None:
-            logger.critical(f"🚨 [SAFETY] Cannot verify position for {symbol} — BLOCKING order (fail-safe)")
-            return False
-
-        net_qty = broker_pos['net_qty']
-
-        if intended_action == 'ENTER_SHORT':
-            if net_qty > 0:
-                logger.critical(f"🚨 BLOCKED: Trying to SHORT {symbol} but already LONG {net_qty}!")
-                return False
-            if net_qty < 0:
-                logger.warning(f"[SAFETY] Already SHORT {abs(net_qty)} of {symbol}, adding more")
-            return True
-
-        elif intended_action == 'EXIT_SHORT':
-            if net_qty >= 0:
-                logger.critical(
-                    f"🚨 BLOCKED: Trying to BUY (exit short) {symbol} "
-                    f"but position is {net_qty} (already flat or LONG)!"
-                )
-                return False
-            return True
-
-        elif intended_action == 'ENTER_LONG':
-            if net_qty < 0:
-                logger.critical(f"🚨 BLOCKED: Trying to LONG {symbol} but already SHORT {abs(net_qty)}!")
-                return False
-            return True
-
-        elif intended_action == 'EXIT_LONG':
-            if net_qty <= 0:
-                logger.critical(f"🚨 BLOCKED: Trying to exit LONG {symbol} but position is {net_qty}!")
-                return False
-            return True
-
-        logger.critical(f"🚨 [SAFETY] Unknown intended_action '{intended_action}' — BLOCKING")
-        return False
 
 
 

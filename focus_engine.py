@@ -40,29 +40,6 @@ class FocusEngine:
         # Phase 52: Event loop reference for sync thread async dispatch
         self._event_loop = None
         
-    async def get_position_snapshot(self, symbol: str) -> dict:
-        """
-        Phase 42.3.1: Provide live position data for Telegram status commands.
-        Called by telegram_bot.py every 2 seconds.
-        """
-        if not self.active_trade or self.active_trade.get('symbol') != symbol:
-            return None
-            
-        t = self.active_trade
-        return {
-            'symbol': t['symbol'],
-            'side': t.get('direction', config.TRADE_DIRECTION),  # Phase 94: Use actual direction
-            'entry_price': t['entry'],
-            'quantity': t['qty'],
-            'current_price': t.get('last_price', t['entry']),
-            'unrealised_pnl': (t['entry'] - t.get('last_price', t['entry'])) * t['qty'] if t.get('direction', 'SHORT') == 'SHORT' else (t.get('last_price', t['entry']) - t['entry']) * t['qty'],
-            'stop_loss': t.get('sl', 0),
-            'target': t.get('current_target', 0),
-            'sl_state': 'TRAILING' if t.get('target_extended') else 'INITIAL',
-            'order_id': t.get('trade_id'),
-            'status': t.get('status', 'OPEN'),
-            'orderflow_bias': t.get('orderflow_bias', 'NEUTRAL')
-        }
 
     def add_pending_signal(self, signal_data):
         """
@@ -80,9 +57,7 @@ class FocusEngine:
         entry_trigger = signal_low
         # G12: Tighter invalidation buffer (signal_high * 1.002)
         signal_high = signal_data.get('signal_high', signal_low * 1.01)
-        invalidation_trigger = signal_high * config.P51_G12_INVALIDATION_BUFFER_PCT if config.PHASE_51_ENABLED else signal_high * 1.002
-        # Actually P51_G12_INVALIDATION_BUFFER_PCT is 0.002. So 1 + 0.002 = 1.002.
-        invalidation_trigger = signal_high * (1 + config.P51_G12_INVALIDATION_BUFFER_PCT)
+        invalidation_trigger = signal_high * 1.002
 
         # Phase 63: Simplified G11 Fixed Timeout (15 minutes)
         IST = pytz.timezone('Asia/Kolkata')
@@ -385,8 +360,8 @@ class FocusEngine:
                             bid = depth['bid'][0]['price'] if depth['bid'] else ltp
                             spread_pct = (ask - bid) / ltp if ltp > 0 else 0
                             
-                            if spread_pct > config.P51_G10_MAX_SPREAD_PCT:
-                                logger.warning(f"⚠️ [WIDE SPREAD] {symbol} spread {spread_pct:.4f} > {config.P51_G10_MAX_SPREAD_PCT} | Downgraded to CAUTIOUS")
+                            if spread_pct > 0.004:
+                                logger.warning(f"⚠️ [WIDE SPREAD] {symbol} spread {spread_pct:.4f} > 0.004 | Downgraded to CAUTIOUS")
                                 pending['data']['execution_mode'] = 'CAUTIOUS'
                             else:
                                 pending['data']['execution_mode'] = pending['data'].get('execution_mode', 'NORMAL')
@@ -1066,23 +1041,6 @@ class FocusEngine:
             logger.error(f"Cleanup Orders Error: {e}")
 
 
-    def update_dynamic_constraints(self, ltp, day_high, vwap):
-        t = self.active_trade
-        # Dynamic SL: Above Day High or VWAP, whichever is logical
-        # For Short: Max(DayHigh, VWAP) + 0.5% Buffer?
-        # Let's be tighter: Day High + 0.1% buffer
-        dyn_sl = day_high * 1.001
-        
-        # If Price is far below Day High, maybe trail to VWAP?
-        if ltp < vwap:
-            dyn_sl = vwap * 1.002 # Trail above VWAP if we are winning big
-            
-        t['dynamic_sl'] = round(dyn_sl, 2)
-        
-        # Dynamic TP: 1.5x VWAP Distance? or just Pivot Points?
-        # For now, let's target VWAP crossover if we are above it.
-        # If below VWAP, target previous support (mock logic for now without history)
-        t['dynamic_tp'] = round(ltp * 0.98, 2) # Arbitrary 2% scalp target for visuals
 
     def stop_focus(self, reason="STOPPED"):
         trade = self.active_trade
@@ -1099,41 +1057,6 @@ class FocusEngine:
             except Exception as e:
                 logger.error(f"[FOCUS] cleanup_orders failed on stop_focus: {e}")
 
-    def sfp_watch_loop(self, trade):
-        """
-        Monitors a stopped trade for 10 minutes.
-        If Price crosses back BELOW Entry -> SFP Alert.
-        """
-        symbol = trade['symbol']
-        entry_price = trade['entry']
-        start_time = time.time()
-        timeout = 600 # 10 Minutes
-        
-        logger.info(f"SFP Watcher Started for {symbol} (Target < {entry_price})")
-        
-        while (time.time() - start_time) < timeout:
-            try:
-                # Fetch Quote
-                data = {"symbols": symbol}
-                response = self.fyers.quotes(data=data)
-                
-                if 'd' in response:
-                    quote = response['d'][0]['v']
-                    ltp = quote.get('lp')
-                    
-                    # LOGIC: If Price breaks back BELOW Entry (Short Logic)
-                    if ltp < entry_price:
-                        logger.info(f"[WARN] SFP TRIGGERED: {symbol} is back below {entry_price}")
-                        self.send_sfp_alert(trade, ltp)
-                        return # Stop Watching
-                        
-                time.sleep(5)
-                
-            except Exception as e:
-                logger.error(f"SFP Loop Error: {e}")
-                time.sleep(5)
-                
-        logger.info(f"SFP Watch Ended for {symbol} (No Fakeout)")
 
     def send_sfp_alert(self, trade, ltp):
         if not self.telegram_bot: return

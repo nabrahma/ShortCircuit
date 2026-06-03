@@ -50,21 +50,6 @@ def validate_symbol(symbol: str) -> bool:
     
     return True
 
-def format_stock_symbol(symbol: str) -> str:
-    """
-    Convert simple stock symbol to Fyers format
-    
-    Args:
-        symbol: Stock symbol (e.g., 'SBIN', 'RELIANCE')
-        
-    Returns:
-        Fyers formatted symbol (e.g., 'NSE:SBIN-EQ')
-    """
-    if validate_symbol(symbol):
-        return symbol  # Already in correct format
-    
-    # Add NSE exchange and EQ type
-    return f'NSE:{symbol}-EQ'
 
 
 # ─── Phase 44.8 ────────────────────────────────────────────────
@@ -79,37 +64,3 @@ def _last_thursday(year: int, month: int) -> datetime:
         d -= timedelta(days=1)
     return d
 
-def get_front_month_futures(eq_symbol: str) -> str | None:
-    """
-    NSE:RELIANCE-EQ  →  NSE:RELIANCE25MARFUT
-    NSE:IDEA-EQ      →  None  (will fail REST call gracefully)
-
-    Auto-rolls within 3 calendar days of expiry.
-    Returns None on malformed input — caller handles gracefully.
-    """
-    try:
-        import pytz
-        IST = pytz.timezone("Asia/Kolkata")
-        now = datetime.now(IST)
-
-        expiry = _last_thursday(now.year, now.month)
-        days_to_expiry = (expiry.date() - now.date()).days
-
-        # Within 3 days of expiry → roll to next month
-        if days_to_expiry <= 3:
-            if now.month == 12:
-                year, month = now.year + 1, 1
-            else:
-                year, month = now.year, now.month + 1
-            expiry = _last_thursday(year, month)
-
-        month_code = expiry.strftime("%b").upper()   # MAR, APR, MAY
-        year_code  = expiry.strftime("%y")           # 25, 26
-
-        base = eq_symbol.replace("NSE:", "").replace("-EQ", "")
-        if not base:
-            return None
-        return f"NSE:{base}{year_code}{month_code}FUT"
-
-    except Exception:
-        return None

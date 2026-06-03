@@ -696,8 +696,6 @@ class FyersBrokerInterface:
                  # We need to map WS message to OrderUpdate object or similar
                  # For now, let's just update the cache used by wait_for_fill
                  from datetime import datetime
-                 class TempUpdate:
-                     def __init__(self, s): self.status = s
                  
                  # Map numeric status to string if needed, or keep as is.
                  # wait_for_fill checks for 'FILLED'. Fyers WS sends 2 for Filled.
@@ -783,19 +781,6 @@ class FyersBrokerInterface:
         except Exception as e:
             logger.error(f"_handle_trade_update error: {e}")
     
-    async def _log_order_update(self, update: OrderUpdate):
-        """Log order update to database."""
-        try:
-            await self.db.execute("""
-                UPDATE orders
-                SET state = $1,
-                    filled_qty = $2,
-                    avg_filled_price = $3,
-                    updated_at = NOW()
-                WHERE exchange_order_id = $4
-            """, update.status, update.filled_qty, update.avg_price, update.order_id)
-        except Exception as e:
-            logger.error(f"Failed to log order update: {e}")
     
     async def _websocket_keepalive(self):
         """Background task to monitor WebSocket health. (Simplified)"""
@@ -975,19 +960,11 @@ class FyersBrokerInterface:
     def _is_fresh_entry(self, entry: CacheEntry, freshness_ttl: float, now_ts: float) -> bool:
         return entry.source == CacheEntrySource.WS_TICK and (now_ts - entry.last_time) < freshness_ttl
 
-    def is_fresh(self, symbol: str, freshness_ttl: float) -> bool:
-        with self._quote_cache_lock:
-            entry = self._quote_cache.get(symbol)
-            if not entry:
-                return False
-            return self._is_fresh_entry(entry, freshness_ttl, time.time())
 
     def is_known(self, symbol: str) -> bool:
         with self._quote_cache_lock:
             return symbol in self._quote_cache
 
-    def is_truly_missing(self, symbol: str) -> bool:
-        return not self.is_known(symbol)
 
     # ================================================================
     # PRD-007: Cache Readiness & Health
@@ -1393,14 +1370,6 @@ class FyersBrokerInterface:
             except Exception as e:
                 logger.error(f"Symbol subscription failed: {e}")
     
-    async def unsubscribe_symbols(self, symbols: List[str]):
-        """Unsubscribe from symbols."""
-        if self.data_ws:
-            try:
-                self.data_ws.unsubscribe(symbols=symbols)
-                self.subscribed_symbols.difference_update(symbols)
-            except Exception as e:
-                logger.error(f"Symbol unsubscribe failed: {e}")
 
     # ===================================================================
     # REST API Wrappers with Rate Limit
@@ -1501,12 +1470,6 @@ class FyersBrokerInterface:
             if order_id in self.order_fill_events:
                 del self.order_fill_events[order_id]
 
-    async def get_order_status(self, order_id: str) -> str:
-        if order_id in self.order_status_cache:
-            age = (datetime.now(UTC) - self.order_status_cache[order_id].timestamp).total_seconds()
-            if age < 5.0:
-                return self.order_status_cache[order_id].status
-        return await self._check_order_status_rest(order_id)
 
     async def get_order_avg_price(self, order_id: str) -> float:
         """Fetch average fill price from cache or REST fallback."""
@@ -1547,41 +1510,7 @@ class FyersBrokerInterface:
         except Exception as e:
             logger.error(f"Get LTP error: {e}")
             return None
-    async def get_local_slope(self, symbol: str, window: int = 30) -> float:
-        """Phase 88: Get real-time slope from memory (0ms REST)."""
-        if self.aggregator:
-            return self.aggregator.get_vwap_slope(symbol, window)
-        return 0.0
 
-    async def get_quotes(self, symbols: List[str]) -> Dict[str, Dict]:
-        """Get quotes for multiple symbols."""
-        quotes = {}
-        missing = []
-        now = datetime.now(UTC)
-        
-        for sym in symbols:
-            if sym in self.tick_cache and self.tick_cache[sym]:
-                tick = self.tick_cache[sym][-1]
-                if (now - tick.timestamp).total_seconds() < 5.0:
-                    quotes[sym] = {'ltp': tick.ltp} # Add other fields if needed
-                    continue
-            missing.append(sym)
-            
-        if missing:
-             await self._rate_limit_wait('get_quotes')
-             try:
-                 loop = asyncio.get_event_loop()
-                 # quotes API expects comma separated string? Check SDK.
-                 # Usually "NSE:SBIN-EQ,NSE:RIL-EQ"
-                 sym_str = ",".join(missing)
-                 response = await loop.run_in_executor(None, self.rest_client.quotes, {"symbols": sym_str})
-                 if response['s'] == 'ok':
-                     for d in response['d']:
-                         quotes[d['n']] = {'ltp': d['v']['lp']}
-             except Exception as e:
-                 logger.error(f"Get quotes error: {e}")
-                 
-        return quotes
 
 
     async def _check_order_status_rest(self, order_id: str) -> str:
@@ -1630,12 +1559,6 @@ class FyersBrokerInterface:
             logger.error(f"get_funds failed: {e}")
             raise
 
-    async def get_symbol_leverage(self, symbol: str, price: float) -> float:
-        """
-        Phase 79: Fetch actual leverage for a symbol (Async).
-        """
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, self.get_symbol_leverage_sync, symbol, price)
 
     def get_symbol_leverage_sync(self, symbol: str, price: float) -> float:
         """

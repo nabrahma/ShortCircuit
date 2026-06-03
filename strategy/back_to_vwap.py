@@ -54,6 +54,10 @@ class BackToVWAPShort:
         slope_fast: float,
         slope_slow: float,
         is_decaying: bool,
+        upper_circuit: float = 0.0,
+        lower_circuit: float = 0.0,
+        spread_pct: float = 0.0,
+        is_circuit_hitter: bool = False,
     ) -> Optional[Dict[str, Any]]:
         """
         Evaluate whether all 6 BackToVWAPShort conditions hold.
@@ -63,6 +67,28 @@ class BackToVWAPShort:
         correlation by GateResultLogger upstream.
         """
         candles = df.to_dict('records')
+
+        # ── Pre-Filter: Gain, Circuit, and Spread ─────────────────────
+        min_gain = getattr(cfg, 'SCANNER_GAIN_MIN_PCT', 7.5)
+        if gain_pct < min_gain:
+            logger.debug("  [C0] %s REJECT: Gain %.1f%% < %.1f%%", symbol, gain_pct, min_gain)
+            return None
+
+        if is_circuit_hitter:
+            logger.debug("  [C0] %s REJECT: Blacklisted as Circuit Hitter", symbol)
+            return None
+
+        if upper_circuit > 0 and ltp >= upper_circuit * 0.985:
+            logger.debug("  [C0] %s REJECT: Too close to Upper Circuit (%.2f / %.2f)", symbol, ltp, upper_circuit)
+            return None
+
+        if lower_circuit > 0 and ltp <= lower_circuit * 1.005:
+            logger.debug("  [C0] %s REJECT: Too close to Lower Circuit (%.2f / %.2f)", symbol, ltp, lower_circuit)
+            return None
+
+        if spread_pct > 0.004:
+            logger.debug("  [C0] %s REJECT: Spread %.4f > 0.004", symbol, spread_pct)
+            return None
 
         # ── Condition 1: VWAP Stretch ────────────────────────────────
         sd_floor = getattr(cfg, 'STRATEGY_VWAP_SD_FLOOR', 2.5)

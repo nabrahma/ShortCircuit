@@ -495,7 +495,7 @@ class EODAnalyzer:
     async def _save_summary_db(self, date, stats, audit):
         summary_data = {
             "date": date,
-            "phase": "44.5",
+            "phase": "SingleStrategy",
             "total_trades": stats["total_trades"],
             "winners": stats["winners"],
             "losers": stats["losers"],

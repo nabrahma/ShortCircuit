@@ -227,42 +227,20 @@ class MarketContext:
         z_score = (current_v - mean_v) / std_v
         return z_score
 
-    def evaluate_g7(self, vwap_sd: float = 0.0, profile_rejection: bool = False, volume_z: float = 0.0) -> tuple[bool, str]:
+    def is_safe_trade_window(self) -> tuple[bool, str]:
         """
-        Consolidated Gate 7: Market Regime + Time Filters.
-        Updated for Phase 65: Climax Window (09:30-09:45)
+        Market Regime + Time Filters.
         Returns: (allowed, reason)
         """
-        import config
         now_ist = datetime.now(IST).time()
         
-        # 1. TIME GATE: Phase 65 AMT & Climax Window
-        if getattr(config, 'P65_AMT_ENABLED', False):
-            # Before 09:30: Hard Block (always)
-            if now_ist < time(9, 30):
-                return False, "BLOCKED [G7]: Pre-Market Noise (before 09:30)"
-
-            # 09:30 - 10:00: Climax Window (only if enabled)
-            if time(9, 30) <= now_ist < time(10, 0):
-                if getattr(config, 'G7_CLIMAX_WINDOW_ENABLED', True):
-                    # Require extreme setups during opening volatility
-                    climax_ok = vwap_sd >= config.P65_G7_CLIMAX_SD_THRESHOLD and profile_rejection
-                    vol_ok = volume_z >= config.P65_G7_VOLUME_Z_SCORE_THRESHOLD
-                    
-                    if climax_ok and vol_ok:
-                        return True, f"ALLOWED [G7]: Climax Exception (SD: {vwap_sd:.1f}, VolZ: {volume_z:.1f})"
-                    else:
-                        return False, f"BLOCKED [G7]: Opening Window (Climax needed - SD: {vwap_sd:.1f}/3.0, VZ: {volume_z:.1f}/2.0, Rej: {profile_rejection})"
-                # else: climax disabled — fall through to normal trading
-        else:
-            # Legacy 10:00 AM Gate
-            if now_ist < time(10, 0):
-                return False, "BLOCKED [G7]: Opening Volatility (before 10:00)"
+        # 1. TIME GATE: Pre-Market Noise
+        if now_ist < time(9, 30):
+            return False, "BLOCKED: Pre-Market Noise (before 09:30)"
             
         # 2. TIME GATE: EOD Cutoff
-        if config.PHASE_51_ENABLED and config.P51_G7_TIME_GATE_ENABLED:
-            if now_ist >= time(15, 10):
-                return False, "BLOCKED [G7]: EOD Cutoff (after 15:10)"
+        if now_ist >= time(15, 10):
+            return False, "BLOCKED: EOD Cutoff (after 15:10)"
 
         # 3. REGIME DETECTION: Nifty Trend
         candles = self._get_index_data_cached(self.nifty_symbol)
@@ -295,6 +273,10 @@ class MarketContext:
 
         # 4. DEFAULT: Range Day or Trend Down
         return True, "OK [G7]: Market in Range / Trend Down"
+
+    def get_trend_label(self) -> str:
+        """Returns the current regime label for ML logging."""
+        return getattr(self, 'last_regime', "UNKNOWN")
 
     # ── Phase 51: G3 Circuit Hitter Methods ────────────────────
     

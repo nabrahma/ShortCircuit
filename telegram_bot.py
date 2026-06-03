@@ -79,13 +79,8 @@ class ShortCircuitBot:
     # ════════════════════════════════════════════════════════════
     # PUBLIC API — used by other modules
     # ════════════════════════════════════════════════════════════
-    @property
-    def auto_mode(self) -> bool:
-        return self._auto_mode
     def is_auto_mode(self) -> bool:
         return self._auto_mode
-    def is_scanning_paused(self) -> bool:
-        return self._scanning_paused
     def is_editable_signal_flow_enabled(self) -> bool:
         """Runtime override takes precedence over config default."""
         if self._editable_signal_flow_override is not None:
@@ -308,76 +303,6 @@ class ShortCircuitBot:
     # ════════════════════════════════════════════════════════════
     # SIGNAL ALERTS — called by trade_manager / focus_engine
     # ════════════════════════════════════════════════════════════
-    async def send_signal_alert(self, signal: dict):
-        """
-        Send signal notification to Telegram.
-        Auto OFF → Alert with [GO] [SKIP] [Details] buttons
-        Auto ON  → Info only (order already placed by this point)
-        """
-        symbol = signal.get('symbol', 'UNKNOWN')
-        side = signal.get('side', config.TRADE_DIRECTION)  # Phase 94: Direction-aware
-        entry = signal.get('entry_price', 0)
-        sl = signal.get('stop_loss', 0)
-        target = signal.get('target', 0)
-        rr = signal.get('risk_reward', 0)
-        score = signal.get('score', 0)
-        pattern = signal.get('pattern', 'Unknown')
-        signal_id = signal.get('id', f"{symbol}_{datetime.now().strftime('%H%M%S')}")
-        side_emoji = "🟢" if side == "LONG" else "🔴"
-        mode_tag = "🤖 AUTO" if self._auto_mode else "👁️ ALERT"
-        # Phase 44.8 — confidence + volume fade in alert
-        conf     = signal.get("confidence", "")
-        fade     = signal.get("vol_fade_ratio", 0)
-        pattern_bonus  = signal.get("pattern_bonus", "None")
-        oi_dir   = signal.get("oi_direction", "unknown")
-        
-        oi_emoji = {"falling": "✅", "rising": "⚠️", "flat": "➖", "unknown": "➖"}
-        
-        # Calculate pre-trade margin utilization
-        margin_str = "N/A"
-        if self.capital_manager and entry > 0:
-            qty, _, margin_req = self.capital_manager.compute_qty(symbol, entry)
-            margin_str = f"₹{margin_req:.0f} (Qty: {qty})"
-
-        text = (
-            f"{mode_tag} | <b>{_he(symbol)}</b> {side_emoji} <b>{_he(side)}</b>\n"
-            f"\n📊 <b>Edge:</b> {conf} | Vol Fade: {fade:.0%}"
-            f"\n🕯 Pattern Bonus: {pattern_bonus}"
-            f"\n📈 Futures OI: {oi_emoji.get(oi_dir, '➖')} {oi_dir.upper()}\n\n"
-            f"Entry:    ₹{entry:.2f}\n"
-            f"Margin:   {margin_str}\n"
-            f"SL:       ₹{sl:.2f}\n"
-            f"Target:   ₹{target:.2f}\n"
-            f"R:R:      1:{rr:.1f}\n"
-            f"Score:    {score:.1f}/10\n"
-            f"Pattern:  {pattern}\n"
-        )
-        if self._auto_mode:
-            text += "\n✅ <i>Order placed automatically.</i>"
-        else:
-            text += "\n👁️ <i>Bot is in Alert-Only mode. No order placed.</i>"
-            
-        await self.send_message(text)
-    async def send_order_confirmation(self, signal: dict, order_id: str):
-        """
-        Sent after order fills. Replaces signal alert message.
-        """
-        symbol = signal.get('symbol')
-        side = signal.get('side')
-        entry = signal.get('entry_price', 0)
-        qty = signal.get('quantity', 0)
-        sl = signal.get('stop_loss', 0)
-        target = signal.get('target', 0)
-        text = (
-            f"✅ <b>ORDER FILLED</b>\n\n"
-            f"<code>{_he(symbol)}</code> {_he(side)}\n"
-            f"Entry:   ₹{entry:.2f} × {qty}\n"
-            f"SL:      ₹{sl:.2f}\n"
-            f"Target:  ₹{target:.2f}\n"
-            f"ID:      <code>{_he(order_id)}</code>\n\n"
-            f"<i>Position manager activated. Telegram alerts active.</i>"
-        )
-        await self.send_message(text)
 
     # ════════════════════════════════════════════════════════════
     # COMMAND HANDLERS
@@ -722,30 +647,9 @@ class ShortCircuitBot:
     # ════════════════════════════════════════════════════════════
     # EOD SUMMARY — Phase 44.4 Section 3
     # ════════════════════════════════════════════════════════════
-    async def send_eod_summary(self):
-        """End-of-Session snapshot."""
-        if not self.app: return
-        try:
-            total_pnl = 0.0
-            if self.capital_manager:
-                total_pnl = getattr(self.signal_manager, 'daily_pnl', 0.0)
-            
-            text = (
-                f"📊 <b>END OF SESSION SUMMARY</b>\n\n"
-                f"Gross Daily P&L: <b>₹{total_pnl:.2f}</b>\n"
-                f"{self._get_capital_block()}\n"
-                f"<i>Shutdown initiated. System idle.</i>"
-            )
-            await self.send_message(text)
-        except Exception as e:
-            logger.error(f"EOD Summary failed: {e}")
     # ════════════════════════════════════════════════════════════
     # EMERGENCY ALERTS
     # ════════════════════════════════════════════════════════════
-    async def send_emergency_alert(self, message: str):
-        await self.send_message(f"🚨 <b>EMERGENCY</b>: {_he(message)}")
-    async def send_orphan_alert(self, symbol: str, qty: int, side: str):
-        await self.send_message(f"⚠️ <b>ORPHAN</b>: <code>{_he(symbol)}</code> {_he(side)} x{qty}")
 
     async def _send_morning_briefing(self, ws_cache, market_ctx, startup_validation_passed: bool):
         """Fires once at trading loop start. Never fires more than once per session."""
@@ -856,30 +760,6 @@ class ShortCircuitBot:
             return
         if args[0] == 'on': await self._cmd_auto_on(update, context)
         elif args[0] == 'off': await self._cmd_auto_off(update, context)
-    async def _cmd_editable(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not self._is_authorized(update):
-            return
-        args = context.args
-        if not args:
-            mode = "ON" if self.is_editable_signal_flow_enabled() else "OFF"
-            await update.message.reply_text(
-                f"Editable signal flow is *{mode}*.\nUsage: `/editable on` or `/editable off`",
-                parse_mode='Markdown'
-            )
-            return
-        action = args[0].lower().strip()
-        if action == "on":
-            self._editable_signal_flow_override = True
-            await update.message.reply_text("✅ Editable signal flow set to *ON*.", parse_mode='Markdown')
-            return
-        if action == "off":
-            self._editable_signal_flow_override = False
-            await update.message.reply_text("🛑 Editable signal flow set to *OFF*.", parse_mode='Markdown')
-            return
-        await update.message.reply_text(
-            "Usage: `/editable on` or `/editable off`",
-            parse_mode='Markdown'
-        )
     # ════════════════════════════════════════════════════════════
     # COMPATIBILITY & UTILS
     # ════════════════════════════════════════════════════════════
@@ -1086,12 +966,6 @@ class ShortCircuitBot:
             )
         except Exception as e:
             logger.error(f"Failed to send error alert: {e}")
-    def wait_until_ready(self, timeout: float = 10.0) -> bool:
-        """
-        Block until the bot's event loop is initialized and ready.
-        Resolves Issue 4 (Race Condition).
-        """
-        return self._ready_event.wait(timeout)
     def start_polling(self):
         """Compatibility wrapper for running in a thread from main.py."""
         raise RuntimeError(
@@ -1100,11 +974,6 @@ class ShortCircuitBot:
     def send_validation_alert(self, signal):
         """Compat wrapper."""
         asyncio.create_task(self.send_alert(f"VALIDATION ALERT: {signal.get('symbol')} {signal.get('ltp')}"))
-    def send_multi_edge_alert(self, signal):
-        """Compat wrapper."""
-        asyncio.create_task(self.send_alert(f"MULTI-EDGE ALERT: {signal.get('symbol')} {signal.get('ltp')}"))
-    def send_startup_message(self):
-        asyncio.create_task(self.send_alert("� **ShortCircuit Bot Connected**\nSystem Online."))
     async def stop(self):
         if self._cleanup_task is not None:
             self._cleanup_task.cancel()

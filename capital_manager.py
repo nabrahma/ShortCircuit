@@ -268,28 +268,7 @@ class CapitalManager:
             'active_symbol': self._active_symbol,
         }
 
-    def can_afford(self, symbol: str, cost: float) -> dict:
-        """Legacy-compatible — kept for backward compat. Use get_slot_status() for new code."""
-        if not self.is_slot_free:
-            return {
-                'allowed': False,
-                'reason': 'CAPITAL_LOCKED',
-                'available': 0.0,
-                'required': cost,
-                'active_symbol': self._active_symbol,
-            }
-        if cost > self.buying_power:
-            return {
-                'allowed': False,
-                'reason': 'INSUFFICIENT_FUNDS',
-                'available': self.buying_power,
-                'required': cost,
-            }
-        return {'allowed': True, 'reason': 'OK', 'available': self.buying_power, 'required': cost}
 
-    def allocate(self, symbol: str, cost: float):
-        """DEPRECATED — use acquire_slot(). Kept so old code doesn't crash."""
-        logger.warning(f"⚠️ capital.allocate() called [DEPRECATED] for {symbol} — migrate to acquire_slot()")
 
     def release(self, symbol: str):
         """DEPRECATED — use release_slot(). Kept so old code doesn't crash."""

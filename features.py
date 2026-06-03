@@ -73,15 +73,6 @@ def enrich_dataframe(df: pd.DataFrame) -> None:
 # RSI
 # ─────────────────────────────────────────────────────────────────────────────
 
-def compute_rsi(df: pd.DataFrame, period: int = 14) -> float:
-    """Standard RSI calculation. Returns NaN if insufficient data."""
-    delta = df['close'].diff()
-    gain = delta.where(delta > 0, 0).rolling(window=period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-
-    rs = gain / loss
-    rsi = 100 - (100 / (1 + rs))
-    return rsi.iloc[-1]
 
 
 def compute_rsi_divergence(df: pd.DataFrame, window: int = 25) -> bool:
@@ -151,16 +142,6 @@ def compute_volume_fade_ratio(candles: list, lookback: int = 15) -> float:
     return round(current_avg / avg_prior, 3)
 
 
-def compute_rvol(df: pd.DataFrame) -> float:
-    """
-    Relative volume: current candle volume vs 20-candle average.
-    Uses 2-minute average for the "current" to smooth spikes.
-    """
-    if len(df) < 22:
-        return 1.0
-    avg_vol = df['volume'].iloc[-20:-2].mean()
-    setup_vol = df['volume'].iloc[-3:-1].mean()
-    return setup_vol / avg_vol if avg_vol > 0 else 1.0
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -281,99 +262,9 @@ def is_narrowing_highs(df: pd.DataFrame, n: int = 3) -> bool:
     return all(highs[i] < highs[i + 1] for i in range(len(highs) - 1))
 
 
-def is_at_day_high(
-    candles: list, atr: float = 0, tolerance: float = 0.005, atr_mult: float = 0.2
-) -> bool:
-    """
-    Returns True if the recent high (max of last 3 candles) is within tolerance
-    of the all-day high.
-    """
-    if len(candles) < 3:
-        return False
-
-    day_high = max(c['high'] for c in candles)
-    curr_high = max(c['high'] for c in candles[-3:])
-
-    if atr > 0 and day_high > 0:
-        atr_tol_pct = (atr * atr_mult) / day_high
-        tol = max(tolerance, atr_tol_pct)
-    else:
-        tol = tolerance
-
-    return curr_high >= day_high * (1 - tol)
 
 
-def check_time_since_high(df: pd.DataFrame, max_candles: int = 25) -> bool:
-    """
-    Returns True if the day high occurred within the last *max_candles*.
-    Prevents trading stale highs (price acceptance, not rejection).
-    """
-    if df.empty:
-        return False
-    high_idx = df['high'].idxmax()
-    last_idx = df.index[-1]
-    candles_since = last_idx - high_idx
-    return candles_since <= max_candles
 
 
-def check_kill_backdoor(
-    ltp: float, day_high: float, atr: float = 0,
-    fixed_pct: float = 0.015, atr_mult: float = 0.3
-) -> Tuple[bool, str]:
-    """
-    Returns (is_blocked, reason).
-    Blocks entry if price has already dropped too far from the high.
-    """
-    if atr > 0 and day_high > 0:
-        atr_pct = atr / day_high
-        threshold = max(fixed_pct, atr_mult * atr_pct)
-    else:
-        threshold = fixed_pct
-
-    if ltp < day_high * (1 - threshold):
-        return True, (
-            f"Kill Backdoor: ₹{ltp:.2f} is {threshold * 100:.1f}% "
-            f"below day high ₹{day_high:.2f}"
-        )
-    return False, "PASSED"
 
 
-def check_unspecified_move_audit(
-    df: pd.DataFrame,
-    surge_mult: float = 3.0,
-    fade_ratio: float = 0.6,
-) -> Tuple[bool, str]:
-    """
-    Unspecified Move Audit (RVOL Surge-and-Fade).
-    Returns (passed, message).
-    Rejects steady-trend accumulations — requires a volume spike followed by fade.
-    """
-    if len(df) < 18:
-        return True, "INSUFFICIENT_DATA"
-
-    try:
-        baseline_vol = df['volume'].iloc[-18:-3].mean()
-        if baseline_vol == 0:
-            return True, "ZERO_BASELINE"
-
-        recent_vols = df['volume'].iloc[-3:]
-        max_recent = recent_vols.max()
-        current_vol = recent_vols.iloc[-1]
-
-        surge_hit = max_recent > (baseline_vol * surge_mult)
-        if not surge_hit:
-            return False, (
-                f"Steady Trend: Peak RVOL {max_recent / baseline_vol:.1f}x "
-                f"< {surge_mult}x required"
-            )
-
-        fade_hit = current_vol < (max_recent * fade_ratio)
-        if not fade_hit:
-            return False, (
-                f"No Fade: Vol {current_vol:.0f} > "
-                f"{fade_ratio * 100:.0f}% of spike {max_recent:.0f}"
-            )
-
-        return True, "PASS"
-    except Exception as e:
-        return True, f"ERROR:{e}"

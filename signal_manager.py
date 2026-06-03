@@ -146,9 +146,7 @@ class SignalManager:
             
             # G8.1: Per-symbol cooldown (Standard)
             cooldown = self.cooldown_minutes
-            if config.PHASE_51_ENABLED:
-                cooldown = max(cooldown, config.P51_G8_COOLDOWN_ON_SIGNAL_ADD)
-                
+        
             self.last_signal_time[symbol] = now + timedelta(minutes=cooldown)
             self.stats['signals_sent'] += 1
             
@@ -165,52 +163,7 @@ class SignalManager:
             # Cooldown is only for successful executions (record_signal).
             logger.info(f"G8.3 Pending Signal tracking: {symbol} (No cooldown set)")
 
-    def record_execution_failure(
-        self,
-        symbol: str,
-        cooldown_seconds: int = 900,
-        reason: str = 'EXEC_FAILED'
-    ):
-        """
-        Phase 44.6: Sets a hard re-entry block when enter_position() returns None.
-        Different from record_signal() — this fires on FAILURE, not success.
-        The scan can still discover the symbol; only execution is blocked.
 
-        Cooldown guide:
-          FILL_TIMEOUT  → 1200s (20 min)
-          BROKER_ERROR  →  600s (10 min)
-          ZERO_QTY      →  300s ( 5 min)
-          Default       →  900s (15 min)
-        """
-        from datetime import timedelta
-        with self._lock:
-            unblock_at = datetime.now() + timedelta(seconds=cooldown_seconds)
-            self._exec_cooldowns[symbol] = {
-                'blocked_until': unblock_at,
-                'reason':        reason,
-                'set_at':        datetime.now(),
-            }
-            logger.warning(
-                f"⏳ EXEC COOLDOWN SET | {symbol} | reason={reason} | "
-                f"blocked {cooldown_seconds}s until {unblock_at.strftime('%H:%M:%S')}"
-            )
-
-    def is_exec_blocked(self, symbol: str) -> tuple:
-        """
-        Returns (blocked: bool, remaining_seconds: int, reason: str).
-        Called by focus_engine before attempting entry.
-        """
-        with self._lock:
-            cd = self._exec_cooldowns.get(symbol)
-            if not cd:
-                return False, 0, ''
-            now = datetime.now()
-            if now < cd['blocked_until']:
-                remaining = int((cd['blocked_until'] - now).total_seconds())
-                return True, remaining, cd['reason']
-            # Expired — clean up
-            del self._exec_cooldowns[symbol]
-            return False, 0, ''
     
     def record_outcome(self, symbol: str, pnl: float):
         """
@@ -248,10 +201,6 @@ class SignalManager:
             'stats': dict(self.stats)
         }
     
-    def get_signals_summary(self):
-        """Get summary of today's signals for EOD analysis."""
-        self._reset_if_new_day()
-        return self.signals_today.copy()
 
 
 # Global singleton instance
