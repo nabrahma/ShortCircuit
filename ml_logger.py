@@ -32,7 +32,7 @@ logger = logging.getLogger("MLDataLogger")
 IST = ZoneInfo("Asia/Kolkata")
 
 # Schema version - increment when changing feature set
-SCHEMA_VERSION = "1.1.0"
+SCHEMA_VERSION = "1.2.0"
 
 # Feature columns for ML training
 FEATURE_COLUMNS = [
@@ -68,19 +68,15 @@ FEATURE_COLUMNS = [
     "upper_wick_pct",   # Upper wick as % of range
     "lower_wick_pct",   # Lower wick as % of range
     
-    # DOM/Orderflow
-    "dom_ratio",        # Sell qty / Buy qty
-    "bid_ask_spread",   # Spread in %
+    # Pattern Bonus Features
+    "stretch_score",    # Score representing the degree of price extension
+    "vol_fade_ratio",   # Volume fade ratio
+    "confidence",       # Tiered strategy confidence (MEDIUM, HIGH, EXTREME)
+    "pattern_bonus",    # Any bonus narrative text
     
     # Confluence Count
     "num_confirmations", # Number of pro_conf items
     "confirmations",    # JSON list of confirmations
-    
-    # Orderflow Flags
-    "is_round_number",  # Near psychological level
-    "is_bad_high",      # Heavy sellers at high
-    "is_trapped",       # Trapped positions detected
-    "is_absorption",    # Aggression no progress
     
     # Context
     "nifty_trend",      # UP/DOWN/RANGE

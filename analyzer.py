@@ -432,6 +432,10 @@ class FyersAnalyzer:
                 "candle_body_pct": (body / total_range * 100) if total_range > 0 else 0,
                 "upper_wick_pct": (upper_wick / total_range * 100) if total_range > 0 else 0,
                 "lower_wick_pct": (lower_wick / total_range * 100) if total_range > 0 else 0,
+                "stretch_score": signal_meta.get('stretch_score', 0.0),
+                "vol_fade_ratio": signal_meta.get('vol_fade_ratio', 0.0),
+                "confidence": signal_meta.get('confidence', 'MEDIUM'),
+                "pattern_bonus": signal_meta.get('pattern_bonus', 'None'),
                 "num_confirmations": pattern_desc.count(",") + 1 if "+" in pattern_desc else 0,
                 "confirmations": pattern_desc.split(" + ")[1:] if " + " in pattern_desc else [],
                 "nifty_trend": (
