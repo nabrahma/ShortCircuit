@@ -245,11 +245,11 @@ class MarketContext:
         # 3. REGIME DETECTION: Nifty Trend
         candles = self._get_index_data_cached(self.nifty_symbol)
         if not candles:
-            return True, "ALLOWED [G7]: No index data, bypassing regime"
+            return False, "BLOCKED [G7]: No index data available"
             
         self._refresh_morning_range_if_needed()
         if not self.morning_range_valid:
-            return True, "ALLOWED [G7]: Morning range unavailable, bypassing regime"
+            return False, "BLOCKED [G7]: Morning range unavailable"
 
         current_close = candles[-1][4]
         conf = config.MARKET_REGIME_CONFIG

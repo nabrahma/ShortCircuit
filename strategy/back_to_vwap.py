@@ -91,7 +91,7 @@ class BackToVWAPShort:
             return None
 
         # ── Condition 1: VWAP Stretch ────────────────────────────────
-        sd_floor = getattr(cfg, 'STRATEGY_VWAP_SD_FLOOR', 2.5)
+        sd_floor = getattr(cfg, 'STRATEGY_VWAP_SD_FLOOR', 4.5)
         if vwap_sd < sd_floor:
             logger.debug(
                 "  [C1] %s REJECT: VWAP SD %.2f < floor %.1f",
@@ -148,20 +148,13 @@ class BackToVWAPShort:
             return None
 
         # ── Condition 5: Volume fading ───────────────────────────────
+        # PRD: No adaptive relaxation. No Spear bypass. Gate must pass on its own.
         lookback = getattr(cfg, 'STRATEGY_VOL_FADE_LOOKBACK', 15)
         max_ratio = getattr(cfg, 'STRATEGY_VOL_FADE_MAX_RATIO', 0.65)
 
         vol_fade = F.compute_volume_fade_ratio(candles, lookback=lookback)
 
-        # Adaptive relaxation when momentum is already decaying
-        if is_decaying:
-            decay_relax = getattr(cfg, 'STRATEGY_VOL_FADE_DECAY_RELAX', 0.85)
-            max_ratio = max(max_ratio, decay_relax)
-
-        # Spear of Exhaustion bypass: volume climax overrides fade check
-        spear_fired = self._check_spear_of_exhaustion(candles, lookback)
-
-        if not spear_fired and vol_fade > max_ratio:
+        if vol_fade > max_ratio:
             logger.debug(
                 "  [C5] %s REJECT: volume not fading (ratio %.3f > %.2f)",
                 symbol, vol_fade, max_ratio,
@@ -169,27 +162,22 @@ class BackToVWAPShort:
             return None
 
         # ── Condition 6: Momentum decay ──────────────────────────────
-        slope_flat_thresh = getattr(cfg, 'STRATEGY_MOMENTUM_SLOPE_FLAT_THRESHOLD', 5.0)
-
-        # Momentum is considered decaying if:
-        # (a) Fast slope is falling below slow slope (inflection), OR
-        # (b) Absolute slope is flat (< threshold)
-        momentum_decaying = (
-            is_decaying  # Already computed upstream via dual-window check
-            or abs(slope_fast) < slope_flat_thresh
-        )
+        # PRD: True price-velocity decay only. Fast slope must genuinely
+        # fall behind slow slope. No trivial flat-slope OR clause.
+        decay_ratio = getattr(cfg, 'STRATEGY_MOMENTUM_DECAY_RATIO', 0.85)
+        momentum_decaying = slope_fast < (slope_slow * decay_ratio)
 
         if not momentum_decaying:
             logger.debug(
-                "  [C6] %s REJECT: momentum not decaying (fast=%.2f, slow=%.2f)",
-                symbol, slope_fast, slope_slow,
+                "  [C6] %s REJECT: momentum not decaying (fast=%.2f, slow=%.2f, ratio=%.2f)",
+                symbol, slope_fast, slope_slow, decay_ratio,
             )
             return None
 
         # ── ALL 6 CONDITIONS PASSED ──────────────────────────────────
-        # Compute confidence tier
+        # Compute confidence tier (informational only — never influences gates)
         confidence = self._compute_confidence(
-            vwap_sd, vol_fade, spear_fired, profile_rejection,
+            vwap_sd, vol_fade, profile_rejection,
             rsi_div, price_lower_high, has_auction_fail,
         )
 
@@ -230,10 +218,14 @@ class BackToVWAPShort:
         profile_rejection: bool,
     ) -> bool:
         """
-        Returns True if the stock shows failed-auction behavior:
-        1. Profile rejection (value-back-in) from ProfileAnalyzer, OR
-        2. VAH Rejection pattern (Look Above & Fail), OR
-        3. At-day-high with narrowing highs (distribution at extreme).
+        Returns True if the stock shows failed-auction behavior.
+
+        PRD doctrine: Only two valid evidence types:
+        1. Profile rejection (value-back-in) from ProfileAnalyzer.
+        2. VAH Rejection (Look Above & Fail): price probed above VAH
+           and closed back inside value.
+
+        FORBIDDEN: Narrowing highs near day high alone is NOT auction failure.
         """
         if profile_rejection:
             return True
@@ -245,58 +237,29 @@ class BackToVWAPShort:
             if poked_above and closed_back:
                 return True
 
-        # Distribution at extreme: at day high but highs are narrowing
-        if F.is_narrowing_highs(df, n=3):
-            day_high = max(c['high'] for c in candles) if candles else 0
-            if len(candles) >= 3:
-                curr_high = max(c['high'] for c in candles[-3:])
-                if day_high > 0 and curr_high >= day_high * 0.995:
-                    return True
-
         return False
 
-    @staticmethod
-    def _check_spear_of_exhaustion(candles: list, lookback: int = 15) -> bool:
-        """
-        Spear of Exhaustion: volume climax at new high with rejection close.
-        When detected, bypasses volume-fade requirement.
-        """
-        if len(candles) < (lookback + 2):
-            return False
-
-        prior_vols = [c['volume'] for c in candles[-(lookback + 1):-1]]
-        avg_prior = sum(prior_vols) / len(prior_vols) if prior_vols else 0
-        if avg_prior == 0:
-            return False
-
-        curr = candles[-1]
-        prev = candles[-2]
-
-        climax_mult = getattr(cfg, 'STRATEGY_SPEAR_VOL_CLIMAX_MULT', 3.0)
-        is_new_high = curr['high'] > prev['high']
-        is_rejection = curr['close'] < (curr['high'] + curr['low']) / 2
-        is_climax = curr['volume'] > (avg_prior * climax_mult)
-
-        return is_new_high and is_rejection and is_climax
+    # _check_spear_of_exhaustion: DELETED per PRD.
+    # "No live gate can be skipped because another feature looks strong."
 
     @staticmethod
     def _compute_confidence(
         vwap_sd: float,
         vol_fade: float,
-        spear_fired: bool,
         profile_rejection: bool,
         rsi_div: bool,
         price_lower_high: bool,
         auction_fail: bool,
     ) -> str:
         """
-        Tiered confidence scoring.
-        EXTREME: SD ≥ 4.5 OR Spear OR 5+ confluences
-        HIGH:    SD ≥ 3.3 OR 4+ confluences
-        MEDIUM:  everything else (already passed all 6 gates)
+        Tiered confidence scoring — informational only, never influences gates.
+
+        EXTREME: SD ≥ extreme threshold AND 5+ confluences
+        HIGH:    SD ≥ high threshold OR 4+ confluences
+        MEDIUM:  everything else (already passed all 6 hard gates)
         """
-        sd_extreme = getattr(cfg, 'STRATEGY_VWAP_SD_EXTREME', 4.5)
-        sd_high = getattr(cfg, 'STRATEGY_VWAP_SD_HIGH', 3.3)
+        sd_extreme = getattr(cfg, 'STRATEGY_VWAP_SD_EXTREME', 6.0)
+        sd_high = getattr(cfg, 'STRATEGY_VWAP_SD_HIGH', 5.0)
 
         # Count confluences
         confluence = sum([
@@ -308,9 +271,7 @@ class BackToVWAPShort:
             vwap_sd > sd_high,
         ])
 
-        if spear_fired:
-            return "EXTREME"
-        if vwap_sd >= sd_extreme:
+        if vwap_sd >= sd_extreme and confluence >= 5:
             return "EXTREME"
         if vwap_sd >= sd_high or confluence >= 4:
             return "HIGH"

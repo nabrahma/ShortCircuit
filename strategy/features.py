@@ -77,23 +77,57 @@ def enrich_dataframe(df: pd.DataFrame) -> None:
 
 def compute_rsi_divergence(df: pd.DataFrame, window: int = 25) -> bool:
     """
-    Returns True if price is making higher highs but RSI is making lower highs
-    over the last *window* candles (bearish divergence).
+    Swing-based bearish RSI divergence.
+
+    Returns True only when price makes a higher (or equal) swing high
+    while RSI makes a lower swing high over the last *window* candles.
+
+    A swing high is a bar whose high is greater than both its neighbors,
+    with a minimum separation of 3 bars between swings to avoid noise.
+
+    This replaces the old endpoint-comparison approach per PRD doctrine:
+    "divergence is a relationship between comparable swings, not just
+    two arbitrary endpoints."
     """
     try:
+        if len(df) < window:
+            return False
+
+        # Compute RSI series
         delta = df['close'].diff()
         gain = delta.where(delta > 0, 0).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
         rs = gain / loss
         rsi_series = 100 - (100 / (1 + rs))
 
-        recent_rsi = rsi_series.iloc[-window:]
-        recent_price = df['close'].iloc[-window:]
+        recent_price = df['high'].iloc[-window:].values
+        recent_rsi = rsi_series.iloc[-window:].values
 
-        p_start, p_end = recent_price.iloc[0], recent_price.iloc[-1]
-        r_start, r_end = recent_rsi.iloc[0], recent_rsi.iloc[-1]
+        # Find swing highs: bar[i] > bar[i-1] AND bar[i] > bar[i+1]
+        price_swings = []  # list of (index, price_high, rsi_value)
+        for i in range(1, len(recent_price) - 1):
+            if recent_price[i] > recent_price[i - 1] and recent_price[i] > recent_price[i + 1]:
+                if not np.isnan(recent_rsi[i]):
+                    price_swings.append((i, recent_price[i], recent_rsi[i]))
 
-        return bool(p_end > p_start and r_end < r_start)
+        # Filter: enforce minimum separation of 3 bars between swings
+        filtered_swings = []
+        for swing in price_swings:
+            if not filtered_swings or (swing[0] - filtered_swings[-1][0]) >= 3:
+                filtered_swings.append(swing)
+
+        # Need at least 2 swing highs to compare
+        if len(filtered_swings) < 2:
+            return False
+
+        # Compare the last two swing highs
+        prev_swing = filtered_swings[-2]
+        curr_swing = filtered_swings[-1]
+
+        price_higher_high = curr_swing[1] >= prev_swing[1]
+        rsi_lower_high = curr_swing[2] < prev_swing[2]
+
+        return bool(price_higher_high and rsi_lower_high)
     except Exception:
         return False
 

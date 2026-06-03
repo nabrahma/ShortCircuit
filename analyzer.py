@@ -310,18 +310,10 @@ class FyersAnalyzer:
                 )
                 htf_ok, htf_msg = _htf_future.result(timeout=1.5)
         except Exception as e:
-            htf_ok, htf_msg = True, f"HTF_BYPASS:{e}"
+            htf_ok, htf_msg = False, f"G9 BLOCK: Timeout ({e})"
 
         gr.g9_pass = htf_ok
         gr.g9_value = htf_msg
-
-        # Promotion: Decay + HTF Stall → upgrade to EXTREME
-        if htf_ok and is_decaying and signal_meta.get('confidence') == 'HIGH' and vwap_sd > 2.0:
-            signal_meta['confidence'] = 'EXTREME'
-            signal_meta['pattern_bonus'] = f"{pattern_desc} + PROMOTED"
-            logger.info(
-                "⭐ [PROMOTION] %s upgraded to EXTREME (Decay + G9 Stall confirmed)", symbol
-            )
 
         if not htf_ok:
             gr.verdict = "REJECTED"

@@ -63,16 +63,14 @@ WS_TICK_FRESHNESS_TTL_SECONDS = 180.0
 # ============================================================================
 # STRATEGY: BackToVWAPShort
 # ============================================================================
-STRATEGY_VWAP_SD_FLOOR: float = 2.5       # Minimum VWAP stretch (SD) for any signal
-STRATEGY_VWAP_SD_HIGH: float = 3.3        # HIGH confidence tier threshold
-STRATEGY_VWAP_SD_EXTREME: float = 4.5     # EXTREME confidence tier threshold
+STRATEGY_VWAP_SD_FLOOR: float = 4.5       # PRD doctrine: minimum VWAP stretch (SD)
+STRATEGY_VWAP_SD_HIGH: float = 5.0        # HIGH confidence tier threshold
+STRATEGY_VWAP_SD_EXTREME: float = 6.0     # EXTREME confidence tier threshold
 STRATEGY_REQUIRE_FAILED_AUCTION: bool = True  # Hard gate: require auction failure behavior
-STRATEGY_VOL_FADE_MAX_RATIO: float = 0.65    # Volume fade ratio (< this = fading)
+STRATEGY_VOL_FADE_MAX_RATIO: float = 0.65    # Volume fade ratio (< this = fading) — absolute, no relaxation
 STRATEGY_VOL_FADE_LOOKBACK: int = 15         # Candles to look back for volume baseline
-STRATEGY_VOL_FADE_DECAY_RELAX: float = 0.85  # Relaxed fade threshold when decaying
-STRATEGY_RSI_DIVERGENCE_WINDOW: int = 25      # Window for RSI divergence check
-STRATEGY_MOMENTUM_SLOPE_FLAT_THRESHOLD: float = 5.0  # bp/min — below this = flat
-STRATEGY_SPEAR_VOL_CLIMAX_MULT: float = 3.0  # Volume climax multiplier for Spear bypass
+STRATEGY_RSI_DIVERGENCE_WINDOW: int = 25      # Window for swing-based RSI divergence check
+STRATEGY_MOMENTUM_DECAY_RATIO: float = 0.85  # Fast slope must be < slow * this ratio
 
 
 # ============================================================================
@@ -95,14 +93,7 @@ P52_SL_MOVE_AFTER_TP2: bool = True
 P52_CLEANUP_ON_STOP_FOCUS: bool = True 
 P52_HARD_STOP_RECONCILE_SECONDS: int = 30 
 
-# Discretionary Exit Brain (Phase 41.3)
-DISCRETIONARY_CONFIG = {
-    'soft_stop_pct': 0.005,
-    'bullish_exit_threshold': 3,
-    'bearish_hold_threshold': 3,
-    'min_time_before_exit_minutes': 15,
-    'momentum_extend_threshold': 5
-}
+
 
 # ============================================================================
 # 7. LOGGING & ML OVERRIDES (PHASE 70-74)
@@ -114,22 +105,9 @@ DETECTOR_LOG_PATH = "logs/detector_performance.csv"
 EMERGENCY_LOG_PATH = "logs/emergency_alerts.log"
 ORPHANED_POSITION_LOG_PATH = "logs/orphaned_positions.log"
 
-# ML Weekend Overrides (Phase 70)
+# ML Dynamic Override: DISABLED per PRD.
+# Research variants must never modify live config at runtime.
 P70_ML_DYNAMIC_OVERRIDE_ENABLED = False
-
-if P70_ML_DYNAMIC_OVERRIDE_ENABLED:
-    DYNAMIC_CONFIG_PATH = Path(f"data/ml/dynamic_config_{TRADE_DIRECTION}.json")
-    if DYNAMIC_CONFIG_PATH.exists():
-        try:
-            with open(DYNAMIC_CONFIG_PATH, 'r') as f:
-                dynamic_overrides = json.load(f)
-            import sys
-            _mod = sys.modules[__name__]
-            for key, val in dynamic_overrides.items():
-                if hasattr(_mod, key):
-                    setattr(_mod, key, val)
-        except Exception as e:
-            print(f"❌ Failed to load {DYNAMIC_CONFIG_PATH.name}: {e}")
 
 # ============================================================================
 # 8. FEATURE TOGGLES & LEGACY (PHASE 41 - PHASE 44)
@@ -138,8 +116,6 @@ if P70_ML_DYNAMIC_OVERRIDE_ENABLED:
 RVOL_VALIDITY_GATE_ENABLED = True
 ENABLE_POSITION_VERIFICATION = True
 ENABLE_BROKER_POSITION_POLLING = True
-ENABLE_DIAGNOSTIC_ANALYZER = True
-LOG_MULTI_EDGE_DETAILS = True
 POSITION_RECONCILIATION_INTERVAL = 1800
 EMERGENCY_ALERT_ENABLED = True
 RVOL_MIN_CANDLES = 15

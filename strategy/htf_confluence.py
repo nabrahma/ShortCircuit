@@ -74,7 +74,7 @@ class HTFConfluence:
         df = df_15m if df_15m is not None else self._get_htf_history(symbol, interval="15")
         
         if df is None or len(df) < 3:
-            return True, "HTF Data Insufficient — PASS (Fail-Open)"
+            return False, "G9 BLOCK: HTF Data Unavailable"
 
         # ── Step 3: Momentum Physics (Velocity/Acceleration) ─────
         try:
@@ -108,7 +108,7 @@ class HTFConfluence:
 
         except Exception as e:
             logger.debug(f"G9 Math Logic Error (non-fatal): {e}")
-            return True, "G9 ERROR — PASS"
+            return False, f"G9 BLOCK: Calculation Error ({e})"
 
         return False, f"G9 BLOCK: Sustained Trend (Move {curr_move:.2f}%)"
     
