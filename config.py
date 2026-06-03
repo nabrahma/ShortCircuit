@@ -61,34 +61,6 @@ SCANNER_PARALLEL_WORKERS = 10 # Phase 91.3: Increased from 3 to 10 for faster hi
 WS_TICK_FRESHNESS_TTL_SECONDS = 180.0
 
 # ============================================================================
-# 4. GATES HARDENING (PHASE 51 - PHASE 65)
-# ============================================================================
-PHASE_51_ENABLED = True
-
-# G1: Constraints & Time-Since-High
-P51_G1_KILL_BACKDOOR = True
-P51_G1_KILL_BACKDOOR_FIXED_PCT: float = 0.015 
-P51_G1_KILL_BACKDOOR_ATR_MULT:  float = 0.3   
-P51_G1_KILL_BACKDOOR_USE_ATR:   bool  = True  
-
-# G4: Momentum & Slope
-P51_G4_RVOL_THRESHOLD = 5.0
-P51_G4_SLOPE_MIN = 3.0  # Unit: bp/min (recalibrated 2026-03-10)
-
-# G5: Exhaustion & Lookbacks
-P51_G5_GATE_B_USE_ALLDAY_HIGH = True
-P51_G5_GATE_B_FIXED_TOLERANCE = 0.005
-P51_G5_GATE_B_ATR_MULT = 0.2        
-P55_G5_GATE_B_DAY_HIGH_TOLERANCE = 0.003
-P55_G5_VOL_FADE_LOOKBACK = 15 
-P51_G5_ATR_EXTREME_STRETCH_MULT = 3.5
-P51_G5_GATE_E_LATE_SESSION_EXTREME_ONLY = False
-
-# G6: RSI & Confluence
-P55_G6_RSI_DIVERGENCE_WINDOW: int = 25
-RSI_GATE_ENABLED: bool = False     # Phase 98.4: Toggle RSI pre-filter on/off (disabled for now)
-RSI_GATE_THRESHOLD: float = 60.0  # Phase 98.2: Early RSI pre-filter (was 65 — lowered, too strict)
-# ============================================================================
 # STRATEGY: BackToVWAPShort
 # ============================================================================
 STRATEGY_VWAP_SD_FLOOR: float = 2.5       # Minimum VWAP stretch (SD) for any signal
@@ -102,63 +74,6 @@ STRATEGY_RSI_DIVERGENCE_WINDOW: int = 25      # Window for RSI divergence check
 STRATEGY_MOMENTUM_SLOPE_FLAT_THRESHOLD: float = 5.0  # bp/min — below this = flat
 STRATEGY_SPEAR_VOL_CLIMAX_MULT: float = 3.0  # Volume climax multiplier for Spear bypass
 
-# G7: Regime & Timing
-P51_G7_TIME_GATE_ENABLED = True   # Enables EOD cutoff logic
-MARKET_REGIME_CONFIG = {
-    'strong_trend_threshold': 0.015,
-    'extreme_regime_buffer': 0.005
-}
-
-# G8: Risk Management (Updated to Unlimited)
-P51_G8_SIGNAL_COOLDOWN_MINUTES = 45 
-P51_G8_COOLDOWN_ON_SIGNAL_ADD = True 
-
-# G9 & G10: HTF & Spread
-P61_G9_MATH_LOGIC_ENABLED = True
-P61_G9_BYPASS_SD_THRESHOLD = 3.0
-P61_G9_ACCEL_REJECT_THRESHOLD = 2.0
-P61_G9_STALL_PASS_THRESHOLD = 1.0
-P51_G10_MAX_SPREAD_PCT = 0.004
-
-# G11-G12: Validation
-P51_G11_MIN_REMAINING_MINUTES = 15
-P51_G12_INVALIDATION_BUFFER_PCT = 0.002
-P58_G12_USE_CANDLE_CLOSE = True
-
-# ============================================================================
-# 5. MEAN REVERSION PHYSICS (PHASE 57 - PHASE 66)
-# ============================================================================
-P57_G4_SLOPE_DECAY_ENABLED = True
-P57_G4_DIVERGENCE_SD = 1.5
-P57_G5_Z_EXTREME_THRESHOLD = 3.3
-P57_G5_Z_FADE_RELAXATION = 0.95
-P60_G4_STRUCTURAL_FALLBACK_GAIN = 10.0
-P60_G5_SPEAR_VOL_CLIMAX_MULT = 3.0
-P66_G4_DECAY_SD_THRESHOLD = 2.0
-
-# Phase 65: AMT & Opening Climax
-P65_AMT_ENABLED = True
-G7_CLIMAX_WINDOW_ENABLED = False  # Phase 98.5: Toggle climax window. False = normal trading from 09:30
-P65_G7_CLIMAX_WINDOW_START = "09:30"
-P65_G7_SAFE_TRADE_START = "10:00"
-P65_G7_CLIMAX_SD_THRESHOLD = 2.5   # Phase 92: Lowered 3.0 → 2.5 to catch KOPRAN-type decaying setups in climax window
-P65_G7_VOLUME_Z_SCORE_THRESHOLD = 2.0
-
-P65_G1_NET_GAIN_THRESHOLD = 7.5
-P65_G1_NORMAL_THRESHOLD = 9.0    
-P65_G1_AMT_REQUIRED_BELOW_9 = True
-P65_G1_TIME_SINCE_HIGH_CANDLES = 25
-
-# Phase 86: Adaptive Momentum Decay — No longer uses 120s timer
-# Murphy: Momentum divergence IS the confirmation.
-P66_ADAPTIVE_G1_ENABLED: bool = True
-P66_G1_ROTATION_THRESHOLD_PCT: float = 0.030 
-# P66_G4_DECAY_CONFIRMATION_SEC: int = 120 (Deprecated in Phase 86)
-
-# Phase 90.7: Adaptive Volume Fade (Absorption Threshold)
-P90_G5_DECAY_VOL_RELAXATION = 0.85
-
-
 
 # ============================================================================
 # PHASE 79: LEVERAGE GUARD (G14)
@@ -169,8 +84,8 @@ P79_G14_MIN_LEVERAGE = 1.1  # Reject if leverage < 1.1 (Allows all non-1x stocks
 # ============================================================================
 # 6. EXIT ENGINE & RISK MULTIPLIERS
 # ============================================================================
-P51_SL_ATR_MULTIPLIER = 0.5
-P51_SL_MIN_TICK_BUFFER = 3
+SL_ATR_MULTIPLIER = 0.5
+SL_MIN_TICK_BUFFER = 3
 
 # Phase 78: Single TP Multipliers (No Partials)
 P78_SINGLE_TP_ATR_MULT_DEFAULT = 1.0
@@ -272,3 +187,18 @@ P81_TELEGRAM_STOP_CONFIRM_TIMEOUT = 30
 # ============================================================================
 P82_LOCAL_CANDLES_ENABLED = True
 P82_MAX_LOCAL_CANDLES = 500
+
+# ============================================================================
+# RESTORED MISSING PHASE CONSTANTS (Fixes runtime crashes)
+# ============================================================================
+
+MARKET_REGIME_CONFIG = {
+    'strong_trend_threshold': 0.015
+}
+
+P61_G9_BYPASS_SD_THRESHOLD = 5.0
+P61_G9_ACCEL_REJECT_THRESHOLD = 0.5
+P61_G9_STALL_PASS_THRESHOLD = 0.1
+
+P58_G12_USE_CANDLE_CLOSE = False
+P65_AMT_ENABLED = True
