@@ -63,7 +63,7 @@ WS_TICK_FRESHNESS_TTL_SECONDS = 180.0
 # ============================================================================
 # STRATEGY: BackToVWAPShort
 # ============================================================================
-STRATEGY_VWAP_SD_FLOOR: float = 4.5       # PRD doctrine: minimum VWAP stretch (SD)
+STRATEGY_VWAP_SD_FLOOR: float = 3.3       # Lowered from 4.5 — allows moderately stretched setups
 STRATEGY_VWAP_SD_HIGH: float = 5.0        # HIGH confidence tier threshold
 STRATEGY_VWAP_SD_EXTREME: float = 6.0     # EXTREME confidence tier threshold
 STRATEGY_REQUIRE_FAILED_AUCTION: bool = True  # Hard gate: require auction failure behavior
