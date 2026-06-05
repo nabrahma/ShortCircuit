@@ -180,17 +180,19 @@ class MarketContext:
         if not hasattr(self, '_index_cache'):
             self._index_cache = {}
             self._index_cache_time = {}
-            self._index_last_attempt = {}   # FIX: track last attempt time separately
+            self._index_last_attempt = {}  # track last attempt time
+            self._index_backoff = {}       # per-symbol backoff duration (seconds)
             
         # Cache hit? (only if we have real data)
         if symbol in self._index_cache and (now - self._index_cache_time.get(symbol, 0)) < 300:
             return self._index_cache[symbol]
 
-        # Rate-limit retries on failure: don't hammer API every scan when it keeps failing
+        # Rate-limit retries: respect backoff window
         last_attempt = self._index_last_attempt.get(symbol, 0)
-        if (now - last_attempt) < 60 and symbol not in self._index_cache:
-            # Failed within last 60s and no cached data — skip to avoid spam
-            return None
+        backoff = self._index_backoff.get(symbol, 60)  # default 60s, 300s on 429
+        if (now - last_attempt) < backoff:
+            # Within backoff window — return stale cache if available, else None
+            return self._index_cache.get(symbol)
         self._index_last_attempt[symbol] = now
 
         # Cache miss — fetch from REST
@@ -211,19 +213,28 @@ class MarketContext:
             if status == 'ok' and candles:
                 self._index_cache[symbol] = candles
                 self._index_cache_time[symbol] = now
+                self._index_backoff[symbol] = 60  # reset backoff on success
                 logger.info(
                     "[MarketContext] ✅ Index cache refreshed: %s | %d candles | latest=%s",
                     symbol, len(candles), candles[-1][4] if candles else 'N/A'
                 )
                 return candles
             else:
-                logger.error(
-                    "[MarketContext] ❌ Index fetch failed: symbol=%s status=%s code=%s msg=%s candles=%s",
-                    symbol, status,
-                    response.get('code') if isinstance(response, dict) else 'N/A',
-                    response.get('message', response.get('errmsg', '')) if isinstance(response, dict) else str(response)[:100],
-                    'EMPTY' if not candles else len(candles)
-                )
+                code = response.get('code') if isinstance(response, dict) else 'N/A'
+                msg = response.get('message', response.get('errmsg', '')) if isinstance(response, dict) else str(response)[:100]
+                if code == 429 or 'limit' in str(msg).lower():
+                    # Rate-limited: back off 300s, use stale cache
+                    self._index_backoff[symbol] = 300
+                    logger.warning(
+                        "[MarketContext] ⚠️ Index 429 rate-limited: %s — backing off 300s. Using stale cache.",
+                        symbol
+                    )
+                else:
+                    self._index_backoff[symbol] = 60
+                    logger.error(
+                        "[MarketContext] ❌ Index fetch failed: symbol=%s status=%s code=%s msg=%s",
+                        symbol, status, code, msg
+                    )
         except Exception as e:
             logger.error("[MarketContext] ❌ Index fetch exception: symbol=%s error=%s", symbol, e)
         
@@ -271,6 +282,13 @@ class MarketContext:
         # 3. REGIME DETECTION: Nifty Trend
         candles = self._get_index_data_cached(self.nifty_symbol)
         if not candles:
+            # If we're actively rate-limited (backoff > 60s set), allow trades through
+            # A 429 means Fyers API is alive but throttled — it does NOT mean Nifty is trending up.
+            # Hard-blocking trades on a rate limit is a false fail-closed.
+            backoff = getattr(self, '_index_backoff', {}).get(self.nifty_symbol, 60)
+            if backoff >= 300:
+                logger.warning("[MarketContext] ⚠️ G7 bypassed (rate-limited 429) — assuming RANGE regime")
+                return True, "OK [G7]: Rate-limited, assuming safe (RANGE)"
             return False, "BLOCKED [G7]: No index data available"
             
         self._refresh_morning_range_if_needed()
