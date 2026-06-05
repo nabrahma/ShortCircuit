@@ -180,12 +180,20 @@ class MarketContext:
         if not hasattr(self, '_index_cache'):
             self._index_cache = {}
             self._index_cache_time = {}
+            self._index_last_attempt = {}   # FIX: track last attempt time separately
             
-        # Cache hit?
+        # Cache hit? (only if we have real data)
         if symbol in self._index_cache and (now - self._index_cache_time.get(symbol, 0)) < 300:
             return self._index_cache[symbol]
-            
-        # Cache miss
+
+        # Rate-limit retries on failure: don't hammer API every scan when it keeps failing
+        last_attempt = self._index_last_attempt.get(symbol, 0)
+        if (now - last_attempt) < 60 and symbol not in self._index_cache:
+            # Failed within last 60s and no cached data — skip to avoid spam
+            return None
+        self._index_last_attempt[symbol] = now
+
+        # Cache miss — fetch from REST
         today = datetime.now(IST).strftime("%Y-%m-%d")
         data = {
             "symbol": symbol,
@@ -198,14 +206,32 @@ class MarketContext:
         
         try:
             response = self.fyers.history(data=data)
-            if response.get('s') == 'ok' and response.get('candles'):
-                self._index_cache[symbol] = response['candles']
+            status = response.get('s') if isinstance(response, dict) else 'INVALID'
+            candles = response.get('candles') if isinstance(response, dict) else None
+            if status == 'ok' and candles:
+                self._index_cache[symbol] = candles
                 self._index_cache_time[symbol] = now
-                return response['candles']
+                logger.info(
+                    "[MarketContext] ✅ Index cache refreshed: %s | %d candles | latest=%s",
+                    symbol, len(candles), candles[-1][4] if candles else 'N/A'
+                )
+                return candles
+            else:
+                logger.error(
+                    "[MarketContext] ❌ Index fetch failed: symbol=%s status=%s code=%s msg=%s candles=%s",
+                    symbol, status,
+                    response.get('code') if isinstance(response, dict) else 'N/A',
+                    response.get('message', response.get('errmsg', '')) if isinstance(response, dict) else str(response)[:100],
+                    'EMPTY' if not candles else len(candles)
+                )
         except Exception as e:
-            logger.error(f"Failed to fetch index data for {symbol}: {e}")
+            logger.error("[MarketContext] ❌ Index fetch exception: symbol=%s error=%s", symbol, e)
         
-        return self._index_cache.get(symbol) # Fallback to expired cache if API fails
+        # Fallback to expired cache if API fails (stale is better than nothing)
+        stale = self._index_cache.get(symbol)
+        if stale:
+            logger.warning("[MarketContext] Using stale index cache for %s (%d candles)", symbol, len(stale))
+        return stale
 
     def get_volume_z_score(self, df: pd.DataFrame) -> float:
         """
