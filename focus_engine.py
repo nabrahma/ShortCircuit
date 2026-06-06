@@ -659,10 +659,13 @@ class FocusEngine:
         is_long = direction == 'LONG'
 
         # Soft SL: opposite side from entry
+        # Provide fallback if DISCRETIONARY_CONFIG was removed
+        soft_stop_pct = getattr(config, 'DISCRETIONARY_CONFIG', {}).get('soft_stop_pct', 0.015)
+
         if is_long:
-            soft_sl = entry_price * (1 - config.DISCRETIONARY_CONFIG['soft_stop_pct'])
+            soft_sl = entry_price * (1 - soft_stop_pct)
         else:
-            soft_sl = entry_price * (1 + config.DISCRETIONARY_CONFIG['soft_stop_pct'])
+            soft_sl = entry_price * (1 + soft_stop_pct)
 
         # Phase 52: Compute TP levels from OrderManager
         tps = {}
