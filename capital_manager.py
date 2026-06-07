@@ -160,36 +160,37 @@ class CapitalManager:
     # Sizing
     # ─────────────────────────────────────────────────────────────────────────
 
-    def compute_qty(self, symbol: str, ltp: float) -> tuple:
+    def compute_qty(self, symbol: str, ltp: float, dynamic_leverage: float = None) -> tuple:
         """
         Compute maximum qty for FULL margin utilization.
 
-        Uses real Fyers margin (not virtual/hardcoded).
+        Uses real Fyers margin (not virtual/hardcoded) and actual leverage for the symbol.
         Applies 2% safety buffer to avoid Fyers code -50.
 
         Returns: (qty: int, cost: float, margin_required: float)
-
-        Example on ₹1,700 account:
-          LTFOODS @ ₹407 → buying_power=₹8,500
-          raw=20.88 → qty=20 → cost=₹8,140 → margin_req=₹1,628
-          utilization = 1628/1700 = 95.8%
         """
         if ltp <= 0 or self._real_margin <= 0:
             return 0, 0.0, 0.0
 
+        if dynamic_leverage is None:
+            dynamic_leverage = self.leverage
+
         safety_cap = self._real_margin * 0.98   # 2% safety buffer
-        raw_qty = self.buying_power / ltp
+        
+        # Calculate buying power based on true dynamic leverage
+        true_buying_power = self._real_margin * dynamic_leverage
+        raw_qty = true_buying_power / ltp
         qty = int(floor(raw_qty))
 
         # Walk down until margin fits within safety cap
         while qty > 0:
             cost = qty * ltp
-            margin_req = cost / self.leverage
+            margin_req = cost / dynamic_leverage
             if margin_req <= safety_cap:
                 utilization = (margin_req / self._real_margin) * 100
                 logger.info(
                     f"💰 SIZING {symbol} | real_margin=₹{self._real_margin:.2f} "
-                    f"buying_power=₹{self.buying_power:.2f} | ltp=₹{ltp:.2f} "
+                    f"buying_power=₹{true_buying_power:.2f} (Lev: {dynamic_leverage}x) | ltp=₹{ltp:.2f} "
                     f"raw={raw_qty:.2f} → qty={qty} | cost=₹{cost:.2f} "
                     f"margin_req=₹{margin_req:.2f} | utilization={utilization:.1f}%"
                 )

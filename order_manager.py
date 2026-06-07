@@ -534,7 +534,12 @@ class OrderManager:
 
 
             if self.capital:
-                qty, required_capital, margin_req = self.capital.compute_qty(symbol, ltp)
+                # Phase 88.1: Fetch the true leverage previously cached by the scanner
+                dynamic_leverage = 5.0
+                if hasattr(self.broker, '_leverage_cache'):
+                    dynamic_leverage = self.broker._leverage_cache.get(symbol, 5.0)
+
+                qty, required_capital, margin_req = self.capital.compute_qty(symbol, ltp, dynamic_leverage)
             else:
                 # Fallback if capital manager not injected
                 buying_power = 9000.0
