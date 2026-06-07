@@ -42,6 +42,7 @@ desktop.ini
 # ── Debug/Verify Scripts (not production code) ────────────────
 verification/
 simulate/
+scratch/
 # Also ignore the generated report if generic
 terminal_log.md
 md/*
