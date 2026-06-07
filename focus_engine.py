@@ -677,13 +677,22 @@ class FocusEngine:
 
         # TP default: 1.0% in the correct direction
         tp_default = entry_price * 1.01 if is_long else entry_price * 0.99
+        tp_2 = tps.get('tp', tp_default)
+
+        # Phase 98: Hybrid VWAP 50% Scale-out Target (Midpoint)
+        # We find the exact midpoint between entry_price and the VWAP target
+        tick = position_data.get('tick_size', 0.05)
+        tp_1_raw = entry_price + (tp_2 - entry_price) / 2.0
+        tp_1 = round(round(tp_1_raw / tick) * tick, 2)
 
         self.active_trade = {
             'symbol':          symbol,
             'entry':           entry_price,
             'sl':              sl_price,
             'soft_sl':         soft_sl,
-            'tp':              tps.get('tp', tp_default),
+            'tp':              tp_2,       # Final VWAP target
+            'tp_1':            tp_1,       # 50% Scale-out target
+            'tp_1_hit':        False,      # State tracker for partial exit
             'status':          'OPEN',
             'highest_profit':  -999,
             'message_id':      message_id,
@@ -989,7 +998,34 @@ class FocusEngine:
                             self._event_loop
                         )
                 
-                # ── PHASE 78: SINGLE TP ENGINE ────────────────────────────
+                # ── PHASE 98: HYBRID VWAP 50% SCALE-OUT (TP 1) ────────────────────
+                if not t.get('tp_1_hit'):
+                    _tp1_hit = (ltp >= t['tp_1']) if _trade_dir == 'LONG' else (ltp <= t['tp_1'])
+                    if _tp1_hit:
+                        logger.info(f"🎯 [TP-1 HIT] {symbol} hit midpoint ₹{t['tp_1']:.2f} — scaling out 50%")
+                        t['tp_1_hit'] = True
+                        if self.order_manager and self._event_loop:
+                            exit_qty = t['remaining_qty'] // 2
+                            if exit_qty > 0:
+                                # 1. Partial Exit
+                                asyncio.run_coroutine_threadsafe(
+                                    self.order_manager.partial_exit(symbol, exit_qty, "TP_1_HIT"),
+                                    self._event_loop
+                                )
+                                t['remaining_qty'] -= exit_qty
+                                # 2. Move SL to Break-Even for remaining qty
+                                asyncio.run_coroutine_threadsafe(
+                                    self.order_manager.move_hard_stop(symbol, t['entry'], new_qty=t['remaining_qty']),
+                                    self._event_loop
+                                )
+                            else:
+                                logger.info(f"[TP-1] Only 1 qty remains, ignoring partial exit, moving SL to BE.")
+                                asyncio.run_coroutine_threadsafe(
+                                    self.order_manager.move_hard_stop(symbol, t['entry']),
+                                    self._event_loop
+                                )
+
+                # ── PHASE 78: SINGLE TP ENGINE (FINAL TP 2) ────────────────────────
                 # Phase 94: Direction-aware TP comparison
                 _tp_hit = (ltp >= t['tp']) if _trade_dir == 'LONG' else (ltp <= t['tp'])
                 if _tp_hit:

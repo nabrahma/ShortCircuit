@@ -975,12 +975,90 @@ class OrderManager:
 
 
 
-    async def move_hard_stop(self, symbol: str, new_stop_price: float) -> bool:
+    async def partial_exit(self, symbol: str, exit_qty: int, reason: str) -> bool:
+        """
+        Closes a portion of the active position.
+        Updates internal qty and DB qty.
+        Does NOT cancel the SL (that is handled externally by move_hard_stop resizing).
+        """
+        try:
+            pos = self.active_positions.get(symbol)
+            if not pos or pos['status'] != 'OPEN':
+                logger.warning(f"[PARTIAL_EXIT] {symbol} not OPEN or doesn't exist.")
+                return False
+
+            if exit_qty <= 0 or exit_qty >= pos['qty']:
+                logger.warning(f"[PARTIAL_EXIT] Invalid exit_qty {exit_qty} for total {pos.get('qty')}")
+                return False
+
+            logger.info(f"🔻 [PARTIAL_EXIT] Closing {exit_qty} shares of {symbol} ({reason})")
+
+            exit_side = 'BUY' if pos['side'] == 'SHORT' else 'SELL'
+            exit_id = await self.broker.place_order(
+                symbol=symbol,
+                side=exit_side,
+                qty=exit_qty,
+                order_type='MARKET'
+            )
+
+            if not exit_id:
+                logger.error(f"❌ [PARTIAL_EXIT] Placement failed for {symbol}")
+                return False
+
+            # Wait for fill
+            filled = await self.broker.wait_for_fill(exit_id, timeout=10.0)
+            if filled:
+                logger.info(f"✅ Partial Exit Filled: {symbol} ({exit_qty} qty)")
+            else:
+                logger.warning(f"⚠️ Partial Exit fill not confirmed via WS for {symbol} — checking REST fallback")
+
+            # Try to get exit price for DB logic
+            exit_price = 0.0
+            pnl = 0.0
+            try:
+                exit_price = await self.broker.get_order_avg_price(exit_id)
+                if exit_price > 0:
+                    entry_price = pos.get('entry_price', 0)
+                    if pos['side'] == 'SHORT':
+                        pnl = (entry_price - exit_price) * exit_qty
+                    else:
+                        pnl = (exit_price - entry_price) * exit_qty
+            except Exception as e:
+                logger.warning(f"[PARTIAL_EXIT] Could not fetch avg price: {e}")
+
+            # Update DB
+            if self.db:
+                try:
+                    await self.db.execute(
+                        "UPDATE positions SET qty = qty - $1 WHERE symbol = $2 AND session_date = CURRENT_DATE AND state = 'OPEN'",
+                        exit_qty, symbol
+                    )
+                except Exception as db_err:
+                    logger.error(f"[PARTIAL_EXIT] DB qty update failed: {db_err}")
+
+            # Update internal state
+            pos['qty'] -= exit_qty
+
+            if self.telegram:
+                pnl_str = f"+₹{pnl:.2f}" if pnl >= 0 else f"-₹{abs(pnl):.2f}"
+                await self.telegram.send_alert(
+                    f"✂️ **PARTIAL CLOSE**: `{symbol}` ({reason})\n"
+                    f"Qty: {exit_qty} | Exit: ₹{exit_price:.2f} | PnL: {pnl_str}"
+                )
+
+            return True
+
+        except Exception as e:
+            logger.error(f"❌ [PARTIAL_EXIT] Exception for {symbol}: {e}")
+            return False
+
+    async def move_hard_stop(self, symbol: str, new_stop_price: float, new_qty: Optional[int] = None) -> bool:
         """
         Phase 97.2: Move the broker-side SL-M order to a new stop price (e.g. for BE activation).
-        Strategy: Modify the existing SL-M order to the new stop price.
+        Optionally resizes the SL order if new_qty is provided (for partial exits).
+        Strategy: Modify the existing SL-M order to the new stop price and/or qty.
         Falls back to cancel+replace if modify is not supported.
-        Returns True if broker SL is now at new_stop_price, False otherwise.
+        Returns True if broker SL is now modified, False otherwise.
         """
         try:
             pos = self.active_positions.get(symbol)
@@ -999,7 +1077,7 @@ class OrderManager:
                 logger.error(f"[MOVE_SL] No rest_client for {symbol}")
                 return False
 
-            # Get current SL order details to preserve qty
+            # Get current SL order details to preserve qty if new_qty is not provided
             orderbook = await loop.run_in_executor(None, rest.orderbook)
             if not isinstance(orderbook, dict) or orderbook.get('s') != 'ok':
                 logger.error(f"[MOVE_SL] Orderbook fetch failed for {symbol}")
@@ -1015,7 +1093,7 @@ class OrderManager:
                 logger.warning(f"[MOVE_SL] SL order {sl_id} not found as pending for {symbol} — may already be filled")
                 return False
 
-            qty = current_sl_order.get('qty', pos.get('qty', 0))
+            qty = new_qty if new_qty is not None else current_sl_order.get('qty', pos.get('qty', 0))
             direction = pos.get('side', 'SHORT')
 
             # For SHORT: SL is a BUY order above entry. Limit = stop * 1.005 (safety buffer)
