@@ -144,17 +144,21 @@ class OrderManager:
             return self._round_sl_to_tick(sl_price, 'SELL', tick)
 
     def compute_take_profits(self, entry: float, signal: dict) -> dict:
-        """Phase 97.2: Fixed 1% Take Profit Target. Remove ATR dependency."""
+        """Dynamic VWAP Target (VWAP Mean Reversion Strategy)."""
         direction = config.TRADE_DIRECTION
         
-        # Phase 97.2: Use fixed 1% price move for TP
-        # (1% price move * 5x leverage = 5% profit)
-        tp_pct = 0.01 
+        # Pull VWAP from the signal dictionary (injected by analyzer.py)
+        # If VWAP is missing for some reason, fallback to 1% fixed target.
+        vwap = signal.get('vwap')
         
-        if direction == 'LONG':
-            tp = entry * (1 + tp_pct)
+        if vwap is not None and vwap > 0:
+            tp = vwap
         else:
-            tp = entry * (1 - tp_pct)
+            tp_pct = 0.01 
+            if direction == 'LONG':
+                tp = entry * (1 + tp_pct)
+            else:
+                tp = entry * (1 - tp_pct)
             
         # Round to tick size
         tick = signal.get('tick_size', 0.05)

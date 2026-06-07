@@ -765,6 +765,25 @@ class FocusEngine:
                             self._event_loop
                         )
 
+                # ── CRITICAL: TIME-BASED STOP (Mean Reversion Expiration) ───
+                if hasattr(config, 'MAX_HOLD_TIME_MINUTES') and self.order_manager:
+                    om_pos = self.order_manager.active_positions.get(symbol)
+                    if om_pos and om_pos.get('status') == 'OPEN' and 'entry_time' in om_pos:
+                        hold_duration = (datetime.datetime.now() - om_pos['entry_time']).total_seconds() / 60.0
+                        if hold_duration >= config.MAX_HOLD_TIME_MINUTES:
+                            logger.warning(f"⏰ [TIME_STOP] {symbol} held for {hold_duration:.1f} mins > {config.MAX_HOLD_TIME_MINUTES} mins limit. Exiting.")
+                            if self._event_loop:
+                                future = asyncio.run_coroutine_threadsafe(
+                                    self.order_manager.safe_exit(symbol, "TIME_STOP"),
+                                    self._event_loop
+                                )
+                                try:
+                                    future.result(timeout=15)
+                                except Exception as ts_err:
+                                    logger.error(f"[TIME_STOP] safe_exit failed for {symbol}: {ts_err}")
+                            self.stop_focus("TIME_STOP")
+                            return
+
                 # ── CRITICAL: EOD SQUARE-OFF (15:10) ────────────────
                 now = datetime.datetime.now()
                 if now.hour == 15 and now.minute >= 10:

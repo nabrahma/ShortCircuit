@@ -40,6 +40,7 @@ TRADE_DIRECTION = 'SHORT'  # 'SHORT' or 'LONG'
 # Timing (IST)
 SQUARE_OFF_TIME = "15:10" 
 VALIDATION_TIMEOUT_MINUTES = 15 
+MAX_HOLD_TIME_MINUTES = 45
 
 # ============================================================================
 # 3. SCANNER & G5 STRETCH CONSTANTS

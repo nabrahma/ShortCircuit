@@ -399,6 +399,9 @@ class FyersAnalyzer:
             oi_direction=signal_meta.get('oi_direction', 'unknown'),
         )
 
+        # Calculate VWAP for both ML logging and TP targeting
+        vwap = df['vwap'].iloc[-1] if 'vwap' in df.columns else ltp
+
         # ML Data Logging
         obs_id = None
         try:
@@ -410,7 +413,6 @@ class FyersAnalyzer:
             upper_wick = prev_candle['high'] - max(prev_candle['open'], prev_candle['close'])
             lower_wick = min(prev_candle['open'], prev_candle['close']) - prev_candle['low']
 
-            vwap = df['vwap'].iloc[-1] if 'vwap' in df.columns else ltp
             vwap_dist = ((ltp - vwap) / vwap) * 100 if vwap > 0 else 0
 
             vol_avg = df['volume'].iloc[-20:].mean() if len(df) > 20 else df['volume'].mean()
@@ -444,7 +446,7 @@ class FyersAnalyzer:
                 ),
                 "atr": atr,
                 "sl_price": sl_price,
-                "tp_price": ltp * 0.99,
+                "tp_price": vwap, # Update TP price in ML logs to reflect VWAP target
                 "direction": getattr(config, "TRADE_DIRECTION", "SHORT"),
             }
 
@@ -465,6 +467,7 @@ class FyersAnalyzer:
             'signal_high': setup_high,
             'tick_size': signal_meta.get('tick_size', 0.05),
             'atr': atr,
+            'vwap': vwap,
             'meta': meta_str,
             'obs_id': obs_id,
         }
