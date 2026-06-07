@@ -774,8 +774,14 @@ class FocusEngine:
                             self._event_loop
                         )
 
+                # ── PHASE 99: MANUAL OVERRIDE CHECK ──
+                manual_override = False
+                if self.order_manager:
+                    pos = self.order_manager.active_positions.get(symbol, {})
+                    manual_override = pos.get('manual_override', False)
+
                 # ── CRITICAL: TIME-BASED STOP (Mean Reversion Expiration) ───
-                if hasattr(config, 'MAX_HOLD_TIME_MINUTES') and self.order_manager:
+                if not manual_override and hasattr(config, 'MAX_HOLD_TIME_MINUTES') and self.order_manager:
                     om_pos = self.order_manager.active_positions.get(symbol)
                     if om_pos and om_pos.get('status') == 'OPEN' and 'entry_time' in om_pos:
                         hold_duration = (datetime.datetime.now() - om_pos['entry_time']).total_seconds() / 60.0
@@ -954,7 +960,7 @@ class FocusEngine:
                 # Phase 94: Direction-aware comparison
                 _trade_dir = t.get('direction', 'SHORT')
                 _be_hit = (ltp >= t['be_trigger']) if _trade_dir == 'LONG' else (ltp <= t['be_trigger'])
-                if not t.get('be_activated', False) and _be_hit:
+                if not manual_override and not t.get('be_activated', False) and _be_hit:
                     new_sl = t['be_sl']
                     old_sl = t['sl']
                     t['sl'] = new_sl
@@ -999,7 +1005,7 @@ class FocusEngine:
                         )
                 
                 # ── PHASE 98: HYBRID VWAP 50% SCALE-OUT (TP 1) ────────────────────
-                if not t.get('tp_1_hit'):
+                if not manual_override and not t.get('tp_1_hit'):
                     _tp1_hit = (ltp >= t['tp_1']) if _trade_dir == 'LONG' else (ltp <= t['tp_1'])
                     if _tp1_hit:
                         logger.info(f"🎯 [TP-1 HIT] {symbol} hit midpoint ₹{t['tp_1']:.2f} — scaling out 50%")
@@ -1027,26 +1033,27 @@ class FocusEngine:
 
                 # ── PHASE 78: SINGLE TP ENGINE (FINAL TP 2) ────────────────────────
                 # Phase 94: Direction-aware TP comparison
-                _tp_hit = (ltp >= t['tp']) if _trade_dir == 'LONG' else (ltp <= t['tp'])
-                if _tp_hit:
-                    logger.info(f"🎯 [TP] {symbol} hit ₹{t['tp']:.2f} — closing 100% ({t['remaining_qty']} shares)")
-                    if self.order_manager and self._event_loop:
-                        future = asyncio.run_coroutine_threadsafe(
-                            self.order_manager.safe_exit(symbol, "TP_HIT"),
-                            self._event_loop
-                        )
-                        # Wait for safe_exit to complete (max 30s) to ensure capital is released
-                        try:
-                            result = future.result(timeout=30)
-                            logger.info(f"[TP] safe_exit completed for {symbol}: success={result}")
-                        except Exception as tp_exit_err:
-                            logger.error(f"[TP] safe_exit failed/timed out for {symbol}: {tp_exit_err}")
-                    self.stop_focus("TP_HIT")
-                    return
+                if not manual_override:
+                    _tp_hit = (ltp >= t['tp']) if _trade_dir == 'LONG' else (ltp <= t['tp'])
+                    if _tp_hit:
+                        logger.info(f"🎯 [TP] {symbol} hit ₹{t['tp']:.2f} — closing 100% ({t['remaining_qty']} shares)")
+                        if self.order_manager and self._event_loop:
+                            future = asyncio.run_coroutine_threadsafe(
+                                self.order_manager.safe_exit(symbol, "TP_HIT"),
+                                self._event_loop
+                            )
+                            # Wait for safe_exit to complete (max 30s) to ensure capital is released
+                            try:
+                                result = future.result(timeout=30)
+                                logger.info(f"[TP] safe_exit completed for {symbol}: success={result}")
+                            except Exception as tp_exit_err:
+                                logger.error(f"[TP] safe_exit failed/timed out for {symbol}: {tp_exit_err}")
+                        self.stop_focus("TP_HIT")
+                        return
 
                 # ── SOFT STOP (existing logic — keep for non-partial-exit fallback) ──
                 partial_enabled = False  # Phase 93: Partial exit not currently active
-                if not partial_enabled and self.discretionary_engine and self.order_manager:
+                if not manual_override and not partial_enabled and self.discretionary_engine and self.order_manager:
                     soft_sl = t['soft_sl']
                     # Phase 94: Direction-aware soft stop
                     _soft_hit = (ltp <= soft_sl) if _trade_dir == 'LONG' else (ltp >= soft_sl)

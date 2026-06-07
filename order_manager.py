@@ -339,6 +339,30 @@ class OrderManager:
                 if not isinstance(orderbook, dict) or orderbook.get('s') != 'ok':
                     return False
 
+                # ── PHASE 99: MANUAL OVERRIDE DETECTION ("Driver's Seat") ──
+                pending_orders = [o for o in orderbook.get('orderBook', []) if o.get('symbol') == symbol and o.get('status') == FYERS_ORDER_STATUS_PENDING]
+                manual_override_detected = False
+                
+                for o in pending_orders:
+                    # 1. Did the user place a new Limit/Market target order?
+                    if str(o.get('id')) != str(sl_id):
+                        manual_override_detected = True
+                        break
+                    
+                    # 2. Did the user drag the Stop Loss line manually?
+                    if str(o.get('id')) == str(sl_id):
+                        broker_sl = float(o.get('stopPrice', 0))
+                        internal_sl = pos.get('stop_loss', 0)
+                        if internal_sl > 0 and abs(broker_sl - internal_sl) > 0.06:
+                            manual_override_detected = True
+                            break
+
+                if manual_override_detected and not pos.get('manual_override'):
+                    pos['manual_override'] = True
+                    logger.warning(f"⚠️ [MANUAL OVERRIDE] Detected for {symbol}. Bot is backing off.")
+                    if self.telegram:
+                        await self.telegram.send_alert(f"⚠️ **MANUAL OVERRIDE DETECTED**: `{symbol}`\nBot is backing off. You are now in the driver's seat.")
+
                 for order in orderbook.get('orderBook', []):
                     if str(order.get('id')) != str(sl_id):
                         continue
