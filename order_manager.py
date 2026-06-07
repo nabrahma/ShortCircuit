@@ -702,6 +702,8 @@ class OrderManager:
                             'entry_price': ltp,
                             'entry_id':  entry_id   # Phase 93: Pass order ID for dedup
                         })
+                        if getattr(self, 'trade_manager', None) and getattr(self.trade_manager, 'reconciliation_engine', None):
+                            self.trade_manager.reconciliation_engine.mark_dirty()
                     except Exception as db_err:
                         # Non-fatal to execution, but important
                         logger.error(f"❌ [ENTRY-DB] Failed to log entry for {symbol}: {db_err}")
