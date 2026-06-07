@@ -585,13 +585,35 @@ class OrderManager:
             )
 
             try:
-                # ── Step 1: Place Entry Order ─────────────────────────────
-                entry_id = await self.broker.place_order(
-                    symbol=symbol,
-                    side=side,
-                    qty=qty,
-                    order_type='MARKET'
-                )
+                # ── Step 1: Place Entry Order (with 4x Fallback) ──────────
+                entry_id = None
+                try:
+                    entry_id = await self.broker.place_order(
+                        symbol=symbol,
+                        side=side,
+                        qty=qty,
+                        order_type='MARKET'
+                    )
+                except Exception as e:
+                    err_str = str(e).lower()
+                    is_margin_err = 'margin' in err_str or 'insufficient' in err_str or 'shortfall' in err_str
+                    if is_margin_err and dynamic_leverage >= 5.0 and self.capital:
+                        logger.warning(f"⚠️ Margin rejection at {dynamic_leverage}x for {symbol}. Attempting 4.0x fallback...")
+                        qty, required_capital, margin_req = self.capital.compute_qty(symbol, ltp, 4.0)
+                        
+                        if qty > 0:
+                            entry_id = await self.broker.place_order(
+                                symbol=symbol,
+                                side=side,
+                                qty=qty,
+                                order_type='MARKET'
+                            )
+                            logger.info(f"✅ Fallback to 4.0x succeeded for {symbol}! (New Qty: {qty})")
+                        else:
+                            raise Exception("Fallback to 4.0x resulted in 0 qty (Insufficient Capital)")
+                    else:
+                        raise e # Rethrow if not a margin error, or if already at 4x
+
                 logger.info(f"✅ Entry Placed: {entry_id} | {symbol} {side} ×{qty}")
 
                 if self.telegram and hasattr(self.telegram, 'send_alert'):
