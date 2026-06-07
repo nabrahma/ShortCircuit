@@ -186,8 +186,8 @@ Signal finalized by Analyzer
   → Trigger: candle low breaks signal_low
   → Invalidation: price > signal_high * 1.002
   → Timeout: 15 minutes (G11)
-  → Capital slot check (CapitalManager)
-  → OrderManager.enter_position()
+  → Capital slot check (CapitalManager: resolves 4x vs 5x dynamic leverage)
+  → OrderManager.enter_position() (Graceful Degradation fallback to 4.0x if 5x margin rejected)
   → WebSocket fill confirmation (15s timeout, REST fallback)
   → Hard stop placement (SL-M above exhaustion high)
   → Active monitoring begins
@@ -196,11 +196,15 @@ Signal finalized by Analyzer
 ### Exit Lifecycle
 
 ```text
-TP Hit:
+TP Hit (Midpoint TP1):
+  → Partial exit (50% size)
+  → Adjust remaining SL to Break-Even (BE)
+
+TP Hit (Final TP2):
   → Cancel protective stop
   → Exit order (market)
   → Fill confirmation
-  → DB close + ML outcome label
+  → DB close + ML outcome label (includes final leverage state)
   → Capital release
 
 SL Hit:
@@ -236,11 +240,14 @@ Capital manager responsibilities:
 - Read Fyers funds
 - Parse multiple response shapes
 - Derive real margin
-- Apply intraday leverage assumptions
+- Apply dynamic intraday leverage assumptions (5.0x primary, auto-scales to 4.0x fallback on rejection)
 - Reserve one active slot
 - Prevent concurrent entries
 - Release only after confirmed close
 - Resync after fills and exits
+
+### Driver's Seat (Manual Override)
+If the operator manually changes a TP or SL directly on the broker during an active trade, the bot detects the structural change via the WebSocket, immediately engages `manual_override = True`, disables the 45-minute time-based stop, and ceases automatic management of the Stop Loss, cleanly handing over the "Driver's Seat" to the human operator without exiting the trade.
 
 ---
 

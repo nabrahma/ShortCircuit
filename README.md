@@ -130,11 +130,11 @@ Entry lifecycle:
 ```text
 Signal detected by the Brain (strategy/)
   -> Telegram alert / ML observation / gate audit
-  -> Pending validation (Focus Engine)
-  -> Candle close breaks trigger
-  -> Capital slot check
-  -> Entry order
-  -> WebSocket fill confirmation or REST verification fallback
+  → Pending validation (Focus Engine)
+  → Candle close breaks trigger
+  → Capital slot check (Dynamic 4x/5x Leverage)
+  → Entry order (Graceful Margin Fallback)
+  → WebSocket fill confirmation or REST verification fallback
   -> Broker stop placement
   -> Active focus monitor
 ```
@@ -142,19 +142,29 @@ Signal detected by the Brain (strategy/)
 Exit lifecycle:
 
 ```text
-TP hit
-  -> cancel/coordinate protective stop
-  -> exit order
-  -> fill confirmation
-  -> DB close
-  -> ML outcome
-  -> capital release
+TP1 Hit (Midpoint):
+  → partial exit (50%)
+  → coordinate protective stop to Break-Even (BE)
+
+TP2 Hit (Final VWAP Target):
+  → cancel/coordinate protective stop
+  → exit order
+  → fill confirmation
+  → DB close
+  → ML outcome (includes final leverage state)
+  → capital release
 
 SL hit
-  -> order WebSocket fill event
-  -> broker position sync
-  -> internal state close
-  -> capital release
+  → order WebSocket fill event
+  → broker position sync
+  → internal state close
+  → capital release
+
+Manual Override ("Driver's Seat")
+  → bot detects user-side modifications to TP/SL via broker WebSocket
+  → flags `manual_override = True`
+  → instantly disables 45-min time-based exit timer
+  → ceases automatic stop-loss adjustments (bot backs off)
 ```
 
 The system defaults to one open position. This is not a limitation. It is a risk boundary. Capital, state, reconciliation, and Telegram control are all simpler and more robust when the live system protects one thesis at a time.
@@ -170,7 +180,7 @@ Capital manager responsibilities:
 - read Fyers funds
 - parse multiple response shapes
 - derive real margin
-- apply intraday leverage assumptions
+- apply dynamic intraday leverage assumptions (auto-scales 5x down to 4x on margin rejection)
 - reserve one active slot
 - prevent concurrent entries
 - release only after confirmed close
