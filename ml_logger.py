@@ -249,6 +249,7 @@ class MLDataLogger:
             "atr": features.get("atr", 0),
             "sl_price": features.get("sl_price", 0),
             "tp_price": features.get("tp_price", 0),
+            "leverage": features.get("leverage", 5.0),
             
             "oi": features.get("oi", 0),
             "oi_change_pct": features.get("oi_change_pct", 0),

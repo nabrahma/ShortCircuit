@@ -585,6 +585,8 @@ class OrderManager:
             )
 
             try:
+                final_leverage = dynamic_leverage
+
                 # ── Step 1: Place Entry Order (with 4x Fallback) ──────────
                 entry_id = None
                 try:
@@ -608,13 +610,14 @@ class OrderManager:
                                 qty=qty,
                                 order_type='MARKET'
                             )
+                            final_leverage = 4.0
                             logger.info(f"✅ Fallback to 4.0x succeeded for {symbol}! (New Qty: {qty})")
                         else:
                             raise Exception("Fallback to 4.0x resulted in 0 qty (Insufficient Capital)")
                     else:
                         raise e # Rethrow if not a margin error, or if already at 4x
 
-                logger.info(f"✅ Entry Placed: {entry_id} | {symbol} {side} ×{qty}")
+                logger.info(f"✅ Entry Placed: {entry_id} | {symbol} {side} ×{qty} (Lev: {final_leverage}x)")
 
                 if self.telegram and hasattr(self.telegram, 'send_alert'):
                     await self.telegram.send_alert(
@@ -622,6 +625,7 @@ class OrderManager:
                         f"Symbol: `{symbol}` {side}\n"
                         f"Qty: {qty} × ₹{ltp:.2f}\n"
                         f"Cost: ₹{required_capital:.2f}\n"
+                        f"Lev: {final_leverage}x\n"
                         f"Order ID: `{entry_id}`"
                     )
 
@@ -742,7 +746,8 @@ class OrderManager:
                     'stop_loss':  stop_price,
                     'obs_id':     signal.get('obs_id'),  # Phase 71: ML Link
                     # Phase 51: G13 Targets for trade_manager monitoring
-                    'tp_targets': self.compute_take_profits(ltp, signal)
+                    'tp_targets': self.compute_take_profits(ltp, signal),
+                    'leverage':   final_leverage
                 }
 
                 self.active_positions[symbol] = pos_state
@@ -755,7 +760,8 @@ class OrderManager:
                             'direction': side,   # Use 'SELL'/'BUY' from line 490, not 'SHORT'
                             'qty':       qty,
                             'entry_price': ltp,
-                            'entry_id':  entry_id   # Phase 93: Pass order ID for dedup
+                            'entry_id':  entry_id,   # Phase 93: Pass order ID for dedup
+                            'leverage':  final_leverage
                         })
                         if getattr(self, 'trade_manager', None) and getattr(self.trade_manager, 'reconciliation_engine', None):
                             self.trade_manager.reconciliation_engine.mark_dirty()

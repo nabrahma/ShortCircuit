@@ -448,6 +448,7 @@ class FyersAnalyzer:
                 "sl_price": sl_price,
                 "tp_price": vwap, # Update TP price in ML logs to reflect VWAP target
                 "direction": getattr(config, "TRADE_DIRECTION", "SHORT"),
+                "leverage": candidate.get("leverage", 5.0),
             }
 
             obs_id = ml_logger.log_observation(symbol, ltp, features)
@@ -470,6 +471,7 @@ class FyersAnalyzer:
             'vwap': vwap,
             'meta': meta_str,
             'obs_id': obs_id,
+            'leverage': candidate.get("leverage", 5.0),
         }
 
         # Quality fields

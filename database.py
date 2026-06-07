@@ -164,21 +164,21 @@ class DatabaseManager:
                 await conn.execute("""
                     INSERT INTO orders (
                         symbol, side, order_type, qty, price, state, 
-                        session_date, created_by, exchange_order_id
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                        session_date, created_by, exchange_order_id, leverage
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                     ON CONFLICT (exchange_order_id) DO NOTHING
                 """, data.get('symbol'), data.get('direction', 'BUY'), 'MARKET', data.get('qty'), 
                      data.get('entry_price'), 'FILLED', datetime.date.today(), 'BOT',
-                     data.get('exchange_order_id', data.get('entry_id', 'N/A')))
+                     data.get('exchange_order_id', data.get('entry_id', 'N/A')), data.get('leverage', 5.0))
                 
                 # 2. Log Position
                 await conn.execute("""
                     INSERT INTO positions (
-                        symbol, qty, entry_price, state, session_date, source, opened_at
-                    ) VALUES ($1, $2, $3, $4, $5, $6, NOW())
+                        symbol, qty, entry_price, state, session_date, source, opened_at, leverage
+                    ) VALUES ($1, $2, $3, $4, $5, $6, NOW(), $7)
                     ON CONFLICT DO NOTHING
                 """, data.get('symbol'), data.get('qty'), data.get('entry_price'), 
-                     'OPEN', datetime.date.today(), 'SIGNAL')
+                     'OPEN', datetime.date.today(), 'SIGNAL', data.get('leverage', 5.0))
 
     async def log_trade_exit(self, symbol: str, exit_data: dict):
         """
