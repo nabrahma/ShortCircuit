@@ -172,6 +172,7 @@ P82_MAX_LOCAL_CANDLES = 500
 MARKET_REGIME_CONFIG = {
     'strong_trend_threshold': 0.015
 }
+ENABLE_MARKET_REGIME_FILTER = False  # Set to False to disable the Nifty 50 trend block
 
 P61_G9_BYPASS_SD_THRESHOLD = 5.0
 P61_G9_ACCEL_REJECT_THRESHOLD = 0.5

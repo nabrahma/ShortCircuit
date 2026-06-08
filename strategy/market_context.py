@@ -279,6 +279,9 @@ class MarketContext:
         if now_ist >= time(15, 10):
             return False, "BLOCKED: EOD Cutoff (after 15:10)"
 
+        if getattr(config, 'ENABLE_MARKET_REGIME_FILTER', True) is False:
+            return True, "OK [G7]: Market Regime Filter Disabled"
+
         # 3. REGIME DETECTION: Nifty Trend
         candles = self._get_index_data_cached(self.nifty_symbol)
         if not candles:
