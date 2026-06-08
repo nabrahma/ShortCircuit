@@ -369,8 +369,17 @@ class ShortCircuitBot:
         # Scan metadata
         scan_time = self._scan_metadata.get('last_scan_time')
         scan_count = self._scan_metadata.get('candidate_count', 0)
+        scan_names = self._scan_metadata.get('candidate_names', [])
         if scan_time:
-            lines.append(f"Last Scan: {scan_time.strftime('%H:%M:%S')} ({scan_count} candidates)")
+            if scan_count > 0 and scan_names:
+                # Limit the display to max 10 symbols to prevent massive message spam
+                display_names = scan_names[:10]
+                names_str = ", ".join(display_names)
+                if len(scan_names) > 10:
+                    names_str += "..."
+                lines.append(f"Last Scan: {scan_time.strftime('%H:%M:%S')} ({scan_count} candidates: {names_str})")
+            else:
+                lines.append(f"Last Scan: {scan_time.strftime('%H:%M:%S')} ({scan_count} candidates)")
         return '\n'.join(lines) + '\n' if lines else ""
         return '\n'.join(lines) + '\n' if lines else ""
     # ════════════════════════════════════════════════════════════

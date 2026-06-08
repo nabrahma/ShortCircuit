@@ -449,6 +449,7 @@ async def _trading_loop(shutdown_event: asyncio.Event, ctx: RuntimeContext):
             ctx.bot._scan_metadata = {
                 "last_scan_time": datetime.now(),
                 "candidate_count": len(candidates) if candidates else 0,
+                "candidate_names": [c["symbol"] for c in candidates] if candidates else []
             }
             
             # Phase 89.6: Parallelized Analysis
