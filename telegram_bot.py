@@ -591,12 +591,77 @@ class ShortCircuitBot:
             "<b>/mode buy|sell</b>\n"
             "↳ Switch between LONG (buy) and SHORT (sell) mode.\n\n"
             "<b>/status</b>\n"
-            "↳ System health & capital snapshot.\n\n"
+            "↳ System health &amp; capital snapshot.\n\n"
+            "<b>/health</b>\n"
+            "↳ Broker WebSocket &amp; cache health dashboard.\n\n"
             "<b>/stop</b>\n"
             "↳ Emergency bot shutdown (requires confirmation).\n\n"
             "<i>Your bot is now in Minimalist Mode.</i>",
             parse_mode='HTML'
         )
+
+    async def _cmd_health(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """/health — PRD-WS Phase 4: Full broker WebSocket health dashboard."""
+        if not self._is_authorized(update):
+            return
+
+        broker = None
+        if self.order_manager and hasattr(self.order_manager, 'broker'):
+            broker = self.order_manager.broker
+
+        if not broker or not hasattr(broker, 'get_health_report'):
+            await update.message.reply_text("❓ Broker not available.")
+            return
+
+        try:
+            r = broker.get_health_report()
+
+            state = r.get('health_state', 'UNKNOWN')
+            state_icons = {
+                'READY': '✅', 'RECOVERED': '✅', 'DEGRADED': '⚠️',
+                'CRITICAL': '🟠', 'SEVERE_DEGRADED': '🔴',
+                'REPRIME_PENDING': '🔄', 'FULL_RECONNECT_PENDING': '⚡',
+                'HYBRID_REST_MODE': '🛑', 'UNRECOVERABLE': '⛔',
+                'PRIMING': '⏳', 'CONNECTING': '🔌', 'UNINITIALIZED': '❓',
+            }
+            icon = state_icons.get(state, '❓')
+
+            dws = "✅ Connected" if r.get('data_ws_connected') else "❌ Disconnected"
+            ows = "✅ Connected" if r.get('order_ws_connected') else "❌ Disconnected"
+            dws_age = r.get('data_ws_last_event_age')
+            dws_age_str = f" (last {dws_age:.0f}s ago)" if dws_age is not None else ""
+
+            fresh_pct = r.get('fresh_pct', 0)
+            fresh_icon = "✅" if fresh_pct >= 85 else ("⚠️" if fresh_pct >= 50 else "🔴")
+
+            text = (
+                f"🩺 <b>Broker Health Report</b>\n\n"
+                f"State:         {icon} <b>{_he(state)}</b> ({r.get('time_in_state_secs', 0):.0f}s)\n\n"
+                f"━━━━━ WEBSOCKETS ━━━━━\n"
+                f"Data WS:       {_he(dws)}{_he(dws_age_str)}\n"
+                f"  Reconnects:  {r.get('data_ws_reconnects', 0)}\n"
+                f"Order WS:      {_he(ows)}\n"
+                f"  Reconnects:  {r.get('order_ws_reconnects', 0)}\n\n"
+                f"━━━━━ CACHE ━━━━━\n"
+                f"Fresh:  {fresh_icon} {r.get('fresh_count', 0)}/{r.get('total_subscribed', 0)} ({fresh_pct:.1f}%)\n"
+                f"Stale:         {r.get('stale_count', 0)}\n"
+                f"Seeded (REST): {r.get('seeded_count', 0)}\n"
+                f"Missing:       {r.get('missing_count', 0)}\n"
+                f"Age P50/P95:   {r.get('age_p50', 0):.1f}s / {r.get('age_p95', 0):.1f}s\n\n"
+                f"━━━━━ RECOVERY ━━━━━\n"
+                f"Reprime attempts:  {r.get('total_reprime_attempts', 0)}\n"
+                f"Reconnects:        {r.get('total_reconnect_attempts', 0)}\n"
+                f"Consec. failures:  {r.get('consecutive_reprime_fails', 0)}\n\n"
+                f"━━━━━ SESSION ━━━━━\n"
+                f"Time degraded:     {r.get('session_degraded_secs', 0):.0f}s\n"
+                f"Capital timeouts:  {r.get('capital_sync_timeouts', 0)}\n"
+                f"Reconcile t/outs:  {r.get('reconcile_timeouts', 0)}\n"
+                f"\n<i>As of {datetime.now().strftime('%H:%M:%S')}</i>"
+            )
+            await update.message.reply_text(text, parse_mode='HTML')
+        except Exception as e:
+            logger.error(f"/health command error: {e}")
+            await update.message.reply_text(f"❌ Health report error: {_he(str(e))}")
 
     async def _cmd_stop(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """/stop — Request bot termination with confirmation."""
@@ -761,6 +826,7 @@ class ShortCircuitBot:
         self.app.add_handler(CommandHandler("status", self._cmd_status))
         self.app.add_handler(CommandHandler("help", self._cmd_help))
         self.app.add_handler(CommandHandler("stop", self._cmd_stop))
+        self.app.add_handler(CommandHandler("health", self._cmd_health))  # PRD-WS Phase 4
         self.app.add_handler(CallbackQueryHandler(self._handle_callback))
     async def _cmd_auto(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         args = context.args

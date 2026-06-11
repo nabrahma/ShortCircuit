@@ -109,6 +109,35 @@ class CacheEntrySource(Enum):
     REST_SEED = "rest"
 
 
+class BrokerHealthState(Enum):
+    """
+    Phase PRD-WS: Formal broker health state machine.
+    Single authority for all health classification.
+    """
+    UNINITIALIZED          = "UNINITIALIZED"
+    CONNECTING             = "CONNECTING"
+    PRIMING                = "PRIMING"
+    READY                  = "READY"
+    DEGRADED               = "DEGRADED"
+    CRITICAL               = "CRITICAL"
+    SEVERE_DEGRADED        = "SEVERE_DEGRADED"
+    REPRIME_PENDING        = "REPRIME_PENDING"
+    FULL_RECONNECT_PENDING = "FULL_RECONNECT_PENDING"
+    HYBRID_REST_MODE       = "HYBRID_REST_MODE"
+    RECOVERED              = "RECOVERED"
+    UNRECOVERABLE          = "UNRECOVERABLE"
+
+
+@dataclass
+class WSHealth:
+    """Per-socket health tracking — data WS and order WS tracked independently."""
+    connected:         bool  = False
+    last_event_time:   float = 0.0
+    reconnect_count:   int   = 0
+    last_close_reason: str   = ""
+    last_error:        str   = ""
+
+
 @dataclass
 class CacheEntry:
     last_price: float
@@ -362,8 +391,9 @@ class FyersBrokerInterface:
         self._ws_subscribed_symbols: list[str] = []
         self._ws_subscribed_symbols_set: set[str] = set()
 
-        # PRD-007: Cache reliability state machine
-        self._cache_state: str = "UNINITIALIZED"  # UNINITIALIZED | PRIMING | READY | DEGRADED
+        # PRD-007: Cache reliability state machine (now backed by BrokerHealthState enum)
+        self._health_state: BrokerHealthState = BrokerHealthState.UNINITIALIZED
+        self._cache_state: str = "UNINITIALIZED"  # legacy compat property (derived from _health_state)
         self._cache_ready_event = threading.Event()  # Set when readiness threshold first crossed
         self._subscribed_count: int = 0
         self._prime_start_ts: float = 0.0
@@ -374,6 +404,20 @@ class FyersBrokerInterface:
         self._consecutive_reprime_failures: int = 0
         self._sub_ack = threading.Event()  # BUG-02: blocks until Fyers confirms subscription
         self._ws_cache_stop = False
+
+        # PRD-WS Phase 1: Independent per-socket health tracking
+        self._data_ws_health:  WSHealth = WSHealth()
+        self._order_ws_health: WSHealth = WSHealth()
+
+        # PRD-WS Phase 4: Session-level recovery telemetry
+        self._total_reprime_attempts:        int   = 0
+        self._total_reconnect_attempts:      int   = 0
+        self._capital_sync_timeout_count:    int   = 0
+        self._reconcile_timeout_count:       int   = 0
+        self._session_degraded_seconds:      float = 0.0
+        self._degraded_state_entered_at:     float = 0.0  # epoch when last entered a non-READY state
+        self._last_cached_funds:             dict  = {}   # Phase 4: last known good funds
+        self._health_state_entered_at:       float = time.time()
 
         # PRD-3: Telegram hook for WS cache alerts
         # Set via broker.set_telegram(bot) from main.py after both are constructed
@@ -386,6 +430,92 @@ class FyersBrokerInterface:
         
         # Background tasks
         self.tasks = []
+
+    # ── Phase PRD-WS: State Transition Helper ─────────────────────────
+    def _transition_health_state(self, new_state: BrokerHealthState, reason: str = ""):
+        """
+        Single canonical method for all health state transitions.
+        Logs every transition exactly once with timing context.
+        """
+        old_state = self._health_state
+        if old_state == new_state:
+            return
+        now = time.time()
+        elapsed = now - self._health_state_entered_at
+        self._health_state = new_state
+        self._cache_state = new_state.value   # keep legacy string compat
+        self._health_state_entered_at = now
+
+        # Accumulate degraded time when leaving a non-READY state
+        non_ready = {BrokerHealthState.DEGRADED, BrokerHealthState.CRITICAL,
+                     BrokerHealthState.SEVERE_DEGRADED, BrokerHealthState.REPRIME_PENDING,
+                     BrokerHealthState.FULL_RECONNECT_PENDING, BrokerHealthState.HYBRID_REST_MODE}
+        if old_state in non_ready:
+            self._session_degraded_seconds += elapsed
+
+        reason_str = f" | reason={reason}" if reason else ""
+        logger.info(
+            f"[WS] STATE TRANSITION: {old_state.value} → {new_state.value} "
+            f"(elapsed={elapsed:.1f}s{reason_str})"
+        )
+
+    def _classify_health(self, fresh_pct: float) -> BrokerHealthState:
+        """Deterministic health classification from fresh WS percentage alone."""
+        if fresh_pct >= 0.85:
+            return BrokerHealthState.READY
+        elif fresh_pct >= 0.50:
+            return BrokerHealthState.DEGRADED
+        elif fresh_pct >= 0.05:
+            return BrokerHealthState.CRITICAL
+        else:
+            return BrokerHealthState.SEVERE_DEGRADED
+
+    def get_health_state(self) -> BrokerHealthState:
+        """Returns the current formal health state."""
+        return self._health_state
+
+    def get_health_report(self) -> dict:
+        """
+        Phase PRD-WS: Returns complete broker health telemetry.
+        Used by /health Telegram command and internal diagnostics.
+        """
+        snap = self.cache_health_snapshot()
+        now = time.time()
+        total = max(snap['total'], 1)
+        fresh_pct = snap['fresh'] / total
+        time_in_state = now - self._health_state_entered_at
+        return {
+            # State
+            'health_state':           self._health_state.value,
+            'time_in_state_secs':     round(time_in_state, 1),
+            # Data socket
+            'data_ws_connected':      self._data_ws_health.connected,
+            'data_ws_reconnects':     self._data_ws_health.reconnect_count,
+            'data_ws_last_event_age': round(now - self._data_ws_health.last_event_time, 1) if self._data_ws_health.last_event_time else None,
+            # Order socket
+            'order_ws_connected':     self._order_ws_health.connected,
+            'order_ws_reconnects':    self._order_ws_health.reconnect_count,
+            # Cache
+            'fresh_count':            snap['fresh'],
+            'known_count':            snap['populated'],
+            'seeded_count':           snap['seeded'],
+            'stale_count':            snap['stale'],
+            'missing_count':          snap['missing'],
+            'total_subscribed':       snap['total'],
+            'fresh_pct':              round(fresh_pct * 100, 1),
+            'age_p50':                snap['age_p50'],
+            'age_p95':                snap['age_p95'],
+            'age_p99':                snap['age_p99'],
+            # Recovery counters
+            'total_reprime_attempts':     self._total_reprime_attempts,
+            'total_reconnect_attempts':   self._total_reconnect_attempts,
+            'consecutive_reprime_fails':  self._consecutive_reprime_failures,
+            # Session metrics
+            'session_degraded_secs':      round(self._session_degraded_seconds, 1),
+            'capital_sync_timeouts':      self._capital_sync_timeout_count,
+            'reconcile_timeouts':         self._reconcile_timeout_count,
+        }
+
         
     def get_local_candles(self, symbol: str, n: int = 100) -> List[Candle]:
         """Exposes aggregated local candles to the Analyzer."""
@@ -394,6 +524,7 @@ class FyersBrokerInterface:
     async def initialize(self):
         logger.info("Initializing Fyers Broker Interface...")
         self._loop = asyncio.get_running_loop()
+        self._transition_health_state(BrokerHealthState.CONNECTING, "broker startup")
 
         # Step 1: REST API — FATAL if fails
         try:
@@ -418,6 +549,7 @@ class FyersBrokerInterface:
         self.tasks.append(asyncio.create_task(self._cache_cleanup()))
 
         logger.info("✅ Broker interface initialized successfully")
+
 
     async def _init_data_websocket(self):
         """Initialize Fyers v3 Data WebSocket."""
@@ -512,6 +644,8 @@ class FyersBrokerInterface:
         logger.info("✅ Data WebSocket connected")
         self.ws_connected = True
         self.data_ws_connected = True
+        self._data_ws_health.connected = True
+        self._data_ws_health.last_event_time = time.time()
 
         # Subscribe to all watched symbols immediately on connect
         if self.subscribed_symbols:
@@ -524,6 +658,8 @@ class FyersBrokerInterface:
         """Called by Fyers SDK when Order WebSocket opens."""
         logger.info("✅ Order WebSocket connected")
         self.order_ws_connected = True
+        self._order_ws_health.connected = True
+        self._order_ws_health.last_event_time = time.time()
         # Subscribe to all order/position events
         if self.order_ws:
             self.order_ws.subscribe(data_type="OnOrders,OnTrades,OnPositions,OnGeneral")
@@ -533,16 +669,25 @@ class FyersBrokerInterface:
         logger.warning(f"Data WebSocket closed: {message}")
         self.ws_connected = False
         self.data_ws_connected = False
+        self._data_ws_health.connected = False
+        self._data_ws_health.last_close_reason = str(message)[:200]
+        self._data_ws_health.reconnect_count += 1
 
     def _on_order_ws_close(self, message):
         logger.warning(f"Order WebSocket closed: {message}")
         self.order_ws_connected = False
+        self._order_ws_health.connected = False
+        self._order_ws_health.last_close_reason = str(message)[:200]
+        self._order_ws_health.reconnect_count += 1
 
     def _on_data_ws_error(self, message):
         logger.error(f"Data WebSocket error: {message}")
+        self._data_ws_health.last_error = str(message)[:200]
 
     def _on_order_ws_error(self, message):
         logger.error(f"Order WebSocket error: {message}")
+        self._order_ws_health.last_error = str(message)[:200]
+
 
     def _handle_position_update(self, message: dict):
         logger.debug(f"Position update: {message}")
@@ -821,7 +966,7 @@ class FyersBrokerInterface:
         self._ws_subscribed_symbols = symbols
         self._ws_subscribed_symbols_set = set(symbols)
         self._subscribed_count = len(symbols)
-        self._cache_state = "PRIMING"
+        self._transition_health_state(BrokerHealthState.PRIMING, "subscribe_scanner_universe")
         self._cache_ready_event.clear()
         self._prime_start_ts = time.time()
         self._reprime_requested = False
@@ -988,7 +1133,8 @@ class FyersBrokerInterface:
         and transitions state to READY once threshold is crossed.
         Must be called under _quote_cache_lock.
         """
-        if self._cache_state != "PRIMING" or self._subscribed_count == 0:
+        if self._health_state not in (BrokerHealthState.PRIMING, BrokerHealthState.REPRIME_PENDING) \
+                or self._subscribed_count == 0:
             return
 
         import config as _cfg
@@ -1005,7 +1151,8 @@ class FyersBrokerInterface:
         threshold = self._get_readiness_threshold()
 
         if fresh_pct >= threshold or known_pct >= 0.90:
-            self._cache_state = "READY"
+            self._transition_health_state(BrokerHealthState.READY,
+                                          f"fresh={fresh_pct:.1%} known={known_pct:.1%}")
             self._cache_ready_event.set()
             elapsed = now - self._prime_start_ts
             reason = (
@@ -1020,8 +1167,21 @@ class FyersBrokerInterface:
             )
 
     def is_cache_ready(self) -> bool:
-        """Returns True if cache is in READY state (crossed readiness threshold)."""
-        return self._cache_state == "READY"
+        """Returns True if cache is in READY or RECOVERED state (safe to scan)."""
+        return self._health_state in (BrokerHealthState.READY, BrokerHealthState.RECOVERED,
+                                      BrokerHealthState.DEGRADED, BrokerHealthState.CRITICAL,
+                                      BrokerHealthState.HYBRID_REST_MODE)
+
+    def is_cache_severely_degraded(self) -> bool:
+        """Returns True when fresh% < 5% AND degradation has persisted > 30s."""
+        return (
+            self._health_state in (BrokerHealthState.SEVERE_DEGRADED,
+                                   BrokerHealthState.REPRIME_PENDING,
+                                   BrokerHealthState.FULL_RECONNECT_PENDING,
+                                   BrokerHealthState.HYBRID_REST_MODE,
+                                   BrokerHealthState.UNRECOVERABLE)
+            and (time.time() - self._severe_degraded_since) >= 30
+        )
 
     def wait_for_cache_ready(self, timeout_sec: float = 45.0) -> bool:
         """
@@ -1091,6 +1251,39 @@ class FyersBrokerInterface:
             'state':     self._cache_state,
         }
 
+    # ── Phase PRD-WS: Freshness Validation Helper ──────────────────────────────
+
+    def _wait_for_freshness_recovery(self, timeout_secs: float = 60.0) -> bool:
+        """
+        Phase PRD-WS 2: Polls cache health every 5s until fresh_pct >= threshold.
+        Used to validate reprime/reconnect actually restored live data flow.
+        Returns True if freshness was restored within timeout, False otherwise.
+        """
+        import config as _cfg
+        freshness_ttl = _cfg.WS_TICK_FRESHNESS_TTL_SECONDS
+        threshold = self._get_readiness_threshold()
+        deadline = time.time() + timeout_secs
+        while time.time() < deadline:
+            time.sleep(5)
+            with self._quote_cache_lock:
+                now = time.time()
+                total = max(self._subscribed_count, 1)
+                fresh = sum(
+                    1 for e in self._quote_cache.values()
+                    if self._is_fresh_entry(e, freshness_ttl, now)
+                )
+                fresh_pct = fresh / total
+            if fresh_pct >= threshold:
+                logger.info(
+                    f"[WS] Freshness recovery confirmed: {fresh_pct:.1%} >= {threshold:.0%} threshold"
+                )
+                return True
+        logger.warning(
+            f"[WS] Freshness recovery FAILED after {timeout_secs:.0f}s — fresh still below threshold"
+        )
+        return False
+
+    # ──────────────────────────────────────────────────────────────────────────────────────
     def _trigger_reprime(self):
         """Unsubscribe all, wait, then re-subscribe. Escalates to full reconnect after 3 failures."""
         if self._reprime_requested:
@@ -1106,11 +1299,17 @@ class FyersBrokerInterface:
         self._reprime_requested = True
         self._last_reprime_time = now
         self._consecutive_reprime_failures += 1
-        self._cache_state = "PRIMING"
+        self._total_reprime_attempts += 1
+        self._transition_health_state(BrokerHealthState.REPRIME_PENDING,
+                                      f"attempt #{self._consecutive_reprime_failures}")
         self._cache_ready_event.clear()
 
         logger.warning(
             f"[WS Cache] Re-prime #{self._consecutive_reprime_failures} triggered"
+        )
+        self._send_telegram_alert_async(
+            f"🔄 *WS Cache REPRIME #{self._consecutive_reprime_failures}*\n"
+            f"Auto-recovery attempt starting now."
         )
 
         # Escalate to full reconnect after 3 consecutive failures
@@ -1119,10 +1318,18 @@ class FyersBrokerInterface:
                 "[WS Cache] 3 consecutive re-prime failures — escalating to FULL RECONNECT"
             )
             self._consecutive_reprime_failures = 0
+            self._transition_health_state(BrokerHealthState.FULL_RECONNECT_PENDING,
+                                          "3 reprime failures")
             try:
                 self._do_full_ws_reconnect()
             except Exception as e:
                 logger.critical(f"[WS Cache] Full reconnect failed: {e}")
+                self._transition_health_state(BrokerHealthState.UNRECOVERABLE,
+                                              f"reconnect exception: {e}")
+                self._send_telegram_alert_async(
+                    f"⛔ *WS Cache UNRECOVERABLE*\n\n3 recovery attempts all failed.\n"
+                    f"Bot keeps running on REST data. Consider manual restart."
+                )
             finally:
                 self._reprime_requested = False
             return
@@ -1145,14 +1352,29 @@ class FyersBrokerInterface:
             # Step 3: Re-subscribe
             if self._ws_subscribed_symbols:
                 self.subscribe_scanner_universe(self._ws_subscribed_symbols)
+
+            # Phase PRD-WS 2: Validate freshness was actually restored
+            recovered = self._wait_for_freshness_recovery(timeout_secs=60)
+            if recovered:
+                self._consecutive_reprime_failures = max(0, self._consecutive_reprime_failures - 1)
+                self._transition_health_state(BrokerHealthState.RECOVERED, "reprime success")
+                self._send_telegram_alert_async(
+                    f"✅ *WS Cache RECOVERED* (reprime)\nFreshness restored."
+                )
+            else:
+                logger.warning("[WS Cache] Reprime completed but freshness not restored")
         except Exception as e:
             logger.error(f"[WS Cache] Re-prime failed: {e}")
         finally:
             self._reprime_requested = False
 
     def _do_full_ws_reconnect(self):
-        """Nuclear option — full socket teardown + rebuild from scratch."""
+        """Nuclear option — full socket teardown + rebuild + freshness validation."""
+        self._total_reconnect_attempts += 1
         logger.critical("[WS Cache] ⚡ FULL RECONNECT — tearing down socket")
+        self._send_telegram_alert_async(
+            f"⚡ *WS FULL RECONNECT* — tearing down and rebuilding socket. Attempt #{self._total_reconnect_attempts}."
+        )
         try:
             if self._ws_subscribed_symbols and self.data_ws:
                 self.data_ws.unsubscribe(
@@ -1175,21 +1397,52 @@ class FyersBrokerInterface:
                 time.sleep(2)
             if self._ws_subscribed_symbols:
                 self.subscribe_scanner_universe(self._ws_subscribed_symbols)
-                logger.info("[WS Cache] ✅ Full reconnect succeeded")
+                # Phase PRD-WS 2: Hard freshness validation after reconnect
+                recovered = self._wait_for_freshness_recovery(timeout_secs=90)
+                if recovered:
+                    logger.info("[WS Cache] ✅ Full reconnect succeeded — freshness validated")
+                    self._transition_health_state(BrokerHealthState.RECOVERED,
+                                                  "full reconnect freshness validated")
+                    self._send_telegram_alert_async(
+                        f"✅ *WS RECONNECT SUCCESS*\nFreshness validated after full reconnect."
+                    )
+                else:
+                    logger.critical("[WS Cache] Full reconnect did not restore freshness — entering HYBRID REST MODE")
+                    self._transition_health_state(BrokerHealthState.HYBRID_REST_MODE,
+                                                  "reconnect freshness not restored")
+                    self._send_telegram_alert_async(
+                        f"🛑 *HYBRID REST MODE*\n\nFull WS reconnect failed to restore freshness.\n"
+                        f"Bot keeps scanning and trading using REST fallback. No positions blocked."
+                    )
             else:
                 logger.critical("[WS Cache] ❌ No symbols to re-subscribe after reconnect")
         except Exception as e:
             logger.critical(f"[WS Cache] Full reconnect exception: {e}")
+            raise
+
+    def _send_telegram_alert_async(self, message: str):
+        """Helper: fire-and-forget Telegram alert from a background thread."""
+        now = time.time()
+        if not self._telegram_bot:
+            return
+        if now - self._last_degraded_telegram_alert < 120:
+            return
+        self._last_degraded_telegram_alert = now
+        try:
+            asyncio.run_coroutine_threadsafe(
+                self._telegram_bot.send_util_alert(message),
+                self._loop
+            )
+        except Exception:
+            pass
 
     def _run_cache_health_monitor(self):
         """
         Background daemon thread. Runs every 30s.
-        PRD-3 Fix: Added _severe_degraded_since tracking so that
-        fresh% < 5% (even when known% >= 90% from REST seed) triggers
-        recovery after 30s instead of being trapped in DEGRADED forever.
+        PRD-WS: Formal state machine using BrokerHealthState enum.
+        Primary degradation signal is fresh_pct from WS ticks only.
+        REST-seeded entries never count as fresh.
         """
-        consecutive_critical = 0
-
         while self._health_monitor_running:
             if getattr(self, '_ws_cache_stop', False):
                 logger.info("[BROKER] Health monitor stopping on _ws_cache_stop flag.")
@@ -1198,158 +1451,100 @@ class FyersBrokerInterface:
             time.sleep(30)
             try:
                 snap = self.cache_health_snapshot()
-                total        = max(snap['total'], 1)
-                fresh_pct    = snap['fresh'] / total
-                # PRD-3 FIX: Do NOT use known_pct to determine DEGRADED/CRITICAL.
-                # known_pct counts REST-seeded entries which remain "known" even
-                # when the WS is completely dead — causing infinite DEGRADED trap.
-                # Health is determined solely by fresh_pct (WS ticks within TTL).
+                total     = max(snap['total'], 1)
+                fresh_pct = snap['fresh'] / total
                 known_pct = (snap['fresh'] + snap['stale'] + snap.get('seeded', 0)) / total
 
-                # ── Status Classification (PRD-3 Fixed) ──────────────────────
-                if fresh_pct >= 0.85:
-                    status = "HEALTHY"
-                    consecutive_critical = 0
-                    # Recovery: reset severe-degraded tracking
-                    if self._severe_degraded_since > 0:
-                        elapsed = time.time() - self._severe_degraded_since
-                        logger.info(
-                            f"[WS Cache] ✅ RECOVERED — fresh={fresh_pct:.1%} | "
-                            f"was degraded for {elapsed:.0f}s | returning to TIER 1 WS_CACHE"
-                        )
-                        if self._telegram_bot:
-                            try:
-                                import asyncio
-                                asyncio.run_coroutine_threadsafe(
-                                    self._telegram_bot.send_util_alert(
-                                        f"✅ *WS Cache RECOVERED*\n\n"
-                                        f"Fresh: {snap['fresh']}/{snap['total']} ({fresh_pct:.1%})\n"
-                                        f"Was degraded for {elapsed:.0f}s — returning to TIER 1 WS_CACHE"
-                                    ),
-                                    self._loop
-                                )
-                            except Exception:
-                                pass
-                        self._severe_degraded_since = 0.0
-                        self._degraded_scan_count = 0
-                    if self._consecutive_reprime_failures > 0:
-                        logger.info("[WS Cache] ✅ Cache recovered — resetting re-prime failure counter")
+                # ── Classify health ─────────────────────────────────────────────────
+                classified = self._classify_health(fresh_pct)
+                current    = self._health_state
+
+                # Only transition if not in a recovery/terminal state being managed externally
+                recovery_states = {
+                    BrokerHealthState.REPRIME_PENDING,
+                    BrokerHealthState.FULL_RECONNECT_PENDING,
+                    BrokerHealthState.UNRECOVERABLE,
+                }
+
+                if current not in recovery_states:
+                    if classified == BrokerHealthState.READY:
+                        # RECOVERY: returning to healthy
+                        if current not in (BrokerHealthState.READY, BrokerHealthState.UNINITIALIZED,
+                                           BrokerHealthState.CONNECTING, BrokerHealthState.PRIMING):
+                            elapsed_degraded = time.time() - self._severe_degraded_since if self._severe_degraded_since else 0
+                            self._transition_health_state(BrokerHealthState.READY,
+                                                          f"fresh={fresh_pct:.1%} recovered")
+                            self._severe_degraded_since = 0.0
+                            self._degraded_scan_count = 0
+                            self._consecutive_reprime_failures = 0
+                            self._send_telegram_alert_async(
+                                f"✅ *WS Cache RECOVERED*\n"
+                                f"Fresh: {snap['fresh']}/{snap['total']} ({fresh_pct:.1%})\n"
+                                f"Was degraded for {elapsed_degraded:.0f}s — returning to TIER 1 WS_CACHE"
+                            )
+                        else:
+                            # Normal READY, no state change needed (already READY)
+                            if current != BrokerHealthState.READY:
+                                self._transition_health_state(BrokerHealthState.READY,
+                                                              f"fresh={fresh_pct:.1%}")
                         self._consecutive_reprime_failures = 0
 
-                elif fresh_pct >= 0.50:
-                    # Genuinely degraded but not critical — no action, just log
-                    status = "DEGRADED"
-                    consecutive_critical = 0
-                    # Only track severe degradation for < 5%
-                    if self._severe_degraded_since > 0:
-                        self._severe_degraded_since = 0.0   # recovered from severe
+                    elif classified in (BrokerHealthState.DEGRADED, BrokerHealthState.CRITICAL):
+                        if self._severe_degraded_since > 0:
+                            self._severe_degraded_since = 0.0  # recovered from severe
+                        if current not in (BrokerHealthState.DEGRADED, BrokerHealthState.CRITICAL):
+                            self._transition_health_state(classified, f"fresh={fresh_pct:.1%}")
 
-                else:
-                    # fresh_pct < 50%
-                    # PRD-3 FIX: Was incorrectly classified as DEGRADED when known_pct >= 90%.
-                    # Now we check fresh_pct alone.
-                    if fresh_pct < 0.05:
-                        # Severe: < 5% fresh — this is the failure mode from 13:17:27
-                        status = "SEVERE_DEGRADED"
-                        consecutive_critical += 1
+                    else:  # SEVERE_DEGRADED
                         if self._severe_degraded_since == 0.0:
                             self._severe_degraded_since = time.time()
-                            logger.critical(
-                                f"[WS Cache] ⚠️ SEVERE DEGRADATION DETECTED — "
-                                f"fresh={fresh_pct:.1%} ({snap['fresh']}/{snap['total']}) | "
-                                f"known={known_pct:.1%} (mostly REST-seeded, WS is likely dead) | "
-                                f"monitoring for 30s before recovery attempt"
+                            self._transition_health_state(BrokerHealthState.SEVERE_DEGRADED,
+                                                          f"fresh={fresh_pct:.1%} < 5%")
+                            self._send_telegram_alert_async(
+                                f"⚠️ *WS Cache SEVERELY DEGRADED*\n\n"
+                                f"Fresh: {snap['fresh']}/{snap['total']} ({fresh_pct:.1%})\n"
+                                f"WS appears to have stopped pushing ticks.\n"
+                                f"Auto-recovery will begin in 30s if not resolved."
                             )
-                            # First Telegram alert
-                            now = time.time()
-                            if self._telegram_bot and (now - self._last_degraded_telegram_alert) > 120:
-                                self._last_degraded_telegram_alert = now
-                                try:
-                                    import asyncio
-                                    asyncio.run_coroutine_threadsafe(
-                                        self._telegram_bot.send_util_alert(
-                                            f"⚠️ *WS Cache SEVERELY DEGRADED*\n\n"
-                                            f"Fresh: {snap['fresh']}/{snap['total']} ({fresh_pct:.1%})\n"
-                                            f"WS appears to have stopped pushing ticks.\n"
-                                            f"Auto-recovery will begin in 30s if not resolved."
-                                        ),
-                                        self._loop
-                                    )
-                                except Exception:
-                                    pass
-                    else:
-                        # 5–50% fresh: CRITICAL but not severe
-                        status = "CRITICAL"
-                        consecutive_critical += 1
 
-                # ── Log Health Line ───────────────────────────────────────────
+                # ── Canonical health log line ─────────────────────────────────────────────
                 logger.info(
                     f"[WS Cache] CACHE HEALTH | Fresh: {snap['fresh']}/{snap['total']} ({fresh_pct:.1%}) "
                     f"| Stale: {snap['stale']} | Seeded: {snap.get('seeded', 0)} | Missing: {snap['missing']} "
                     f"| Age P50: {snap['age_p50']:.1f}s P95: {snap['age_p95']:.1f}s "
-                    f"| Known: {known_pct:.1%} | State: {snap['state']} | Status: {status}"
+                    f"| Known: {known_pct:.1%} | State: {self._health_state.value} | Status: {classified.value}"
                 )
 
-                # ── Recovery Trigger ──────────────────────────────────────────
-                # PRD-3 FIX: SEVERE_DEGRADED (< 5% fresh) after 30s triggers reprime.
-                # Previously only CRITICAL (< 50% AND known < 90%) triggered — never fired.
-                if self._severe_degraded_since > 0:
+                # ── Recovery trigger ───────────────────────────────────────────────────
+                if self._severe_degraded_since > 0 and current not in recovery_states:
                     elapsed_severe = time.time() - self._severe_degraded_since
                     if elapsed_severe >= 30:
                         logger.critical(
                             f"[WS Cache] 🔄 SEVERE DEGRADED for {elapsed_severe:.0f}s "
                             f"(fresh={fresh_pct:.1%}) — triggering auto-recovery"
                         )
-                        now = time.time()
-                        if self._telegram_bot and (now - self._last_degraded_telegram_alert) > 120:
-                            self._last_degraded_telegram_alert = now
-                            attempt_num = self._consecutive_reprime_failures + 1
-                            try:
-                                import asyncio
-                                asyncio.run_coroutine_threadsafe(
-                                    self._telegram_bot.send_util_alert(
-                                        f"🔄 *WS Cache DEGRADED — Auto-Recovery*\n\n"
-                                        f"Fresh: {snap['fresh']}/{snap['total']} ({fresh_pct:.1%})\n"
-                                        f"Degraded for {elapsed_severe:.0f}s\n"
-                                        f"Attempt {attempt_num}/3"
-                                    ),
-                                    self._loop
-                                )
-                            except Exception:
-                                pass
                         self._trigger_reprime()
 
-                # Old CRITICAL path (kept for 5–50% fresh range)
-                elif status == "CRITICAL" and consecutive_critical >= 2:
-                    logger.critical(
-                        f"[WS Cache] CACHE CRITICAL FOR 60s — Fresh only {fresh_pct:.1%}. Triggering re-prime."
-                    )
-                    self._trigger_reprime()
-                    consecutive_critical = 0
+                # Old CRITICAL path (5-50% fresh, 2 consecutive cycles)
+                elif classified == BrokerHealthState.CRITICAL:
+                    if not hasattr(self, '_consecutive_critical_count'):
+                        self._consecutive_critical_count = 0
+                    self._consecutive_critical_count += 1
+                    if self._consecutive_critical_count >= 2:
+                        logger.critical(
+                            f"[WS Cache] CACHE CRITICAL FOR 60s — Fresh only {fresh_pct:.1%}. Triggering re-prime."
+                        )
+                        self._trigger_reprime()
+                        self._consecutive_critical_count = 0
+                else:
+                    self._consecutive_critical_count = 0
 
-                # ── Unrecoverable Banner ──────────────────────────────────────
-                if self._consecutive_reprime_failures >= 3 and self._severe_degraded_since > 0:
+                # ── UNRECOVERABLE banner ─────────────────────────────────────
+                if self._health_state == BrokerHealthState.UNRECOVERABLE:
                     logger.critical(
-                        "[WS Cache] ⛔ UNRECOVERABLE after 3 attempts — "
-                        "continuing in HYBRID mode for session remainder. "
-                        "Consider manual restart."
+                        "[WS Cache] ⛔ UNRECOVERABLE — "
+                        "running on REST fallback for session remainder. Manual restart recommended."
                     )
-                    now = time.time()
-                    if self._telegram_bot and (now - self._last_degraded_telegram_alert) > 300:
-                        self._last_degraded_telegram_alert = now
-                        try:
-                            import asyncio
-                            asyncio.run_coroutine_threadsafe(
-                                self._telegram_bot.send_util_alert(
-                                    f"⛔ *WS Cache UNRECOVERABLE*\n\n"
-                                    f"3 recovery attempts all failed.\n"
-                                    f"Bot is running on stale REST data (slow scans).\n"
-                                    f"⚠️ Consider manual restart."
-                                ),
-                                self._loop
-                            )
-                        except Exception:
-                            pass
 
             except Exception as e:
                 logger.error(f"[WS Cache] Health monitor error: {e}")
@@ -1531,31 +1726,47 @@ class FyersBrokerInterface:
     async def get_funds(self) -> dict:
         """
         Fetch available margin from Fyers /funds endpoint.
-        Called by CapitalManager.sync() at startup, post-fill, post-close.
         Phase 93: Rate-limit aware — backs off 180s after a -429 response.
+        Phase PRD-WS 4: Hard 15s timeout — returns cached value on timeout, never blocks runtime.
         """
         # Rate-limit cooldown check
         if hasattr(self, '_funds_rate_limited_until'):
             now = datetime.now(UTC)
             if now < self._funds_rate_limited_until:
                 remaining = (self._funds_rate_limited_until - now).total_seconds()
+                if self._last_cached_funds:
+                    logger.warning(f"[RATE-LIMIT] Fyers funds rate-limited ({remaining:.0f}s left). Using cached value.")
+                    return {**self._last_cached_funds, 'cached': True}
                 raise ValueError(f"Fyers funds API rate-limited, retry in {remaining:.0f}s")
 
-        try:
+        async def _fetch():
             loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(None, self.rest_client.funds)
+            return await loop.run_in_executor(None, self.rest_client.funds)
+
+        try:
+            response = await asyncio.wait_for(_fetch(), timeout=15.0)
             if response and response.get('s') == 'ok':
+                self._last_cached_funds = response  # cache for fallback
                 return response
             # Check for rate limit response
             if response and response.get('code') == -429:
                 self._funds_rate_limited_until = datetime.now(UTC) + timedelta(seconds=180)
-                logger.warning(f"[RATE-LIMIT] Fyers funds API returned -429. Backing off for 180s.")
+                logger.warning("[RATE-LIMIT] Fyers funds API returned -429. Backing off for 180s.")
             raise ValueError(f"Fyers funds API error: {response}")
+        except asyncio.TimeoutError:
+            self._capital_sync_timeout_count += 1
+            logger.warning(
+                f"[CAPITAL] get_funds timed out (15s). Timeout #{self._capital_sync_timeout_count}. "
+                f"Using cached value."
+            )
+            if self._last_cached_funds:
+                return {**self._last_cached_funds, 'cached': True}
+            raise
         except Exception as e:
             # Also detect rate limit in the error message
             if '-429' in str(e) or 'Request limit' in str(e):
                 self._funds_rate_limited_until = datetime.now(UTC) + timedelta(seconds=180)
-                logger.warning(f"[RATE-LIMIT] Fyers funds API rate-limited. Backing off for 180s.")
+                logger.warning("[RATE-LIMIT] Fyers funds API rate-limited. Backing off for 180s.")
             logger.error(f"get_funds failed: {e}")
             raise
 
@@ -1631,7 +1842,10 @@ class FyersBrokerInterface:
             return 5.0
 
     async def get_all_positions(self) -> List[Dict]:
-        """Get all open positions (Cache first)."""
+        """
+        Get all open positions (WS cache first, REST fallback).
+        Phase PRD-WS 4: Hard 10s timeout on REST fallback to never block reconciliation.
+        """
         positions = []
         for symbol, pos_update in self.position_cache.items():
             age = (datetime.now(UTC) - pos_update.timestamp).total_seconds()
@@ -1643,16 +1857,25 @@ class FyersBrokerInterface:
                     'unrealized_profit': getattr(pos_update, 'unrealized_pnl', 0),
                     'realized_profit': getattr(pos_update, 'realized_pnl', 0)
                 })
-        
+
         if not positions:
             await self._rate_limit_wait('get_positions')
             try:
-                loop = asyncio.get_event_loop()
-                response = await loop.run_in_executor(None, self.rest_client.positions)
+                async def _fetch_positions():
+                    loop = asyncio.get_event_loop()
+                    return await loop.run_in_executor(None, self.rest_client.positions)
+
+                response = await asyncio.wait_for(_fetch_positions(), timeout=10.0)
                 if response['s'] == 'ok':
                     for pos in response.get('netPositions', []):
                         if pos.get('netQty', 0) != 0:
                             positions.append(pos)
+            except asyncio.TimeoutError:
+                self._reconcile_timeout_count += 1
+                logger.warning(
+                    f"[RECONCILE] get_all_positions timed out (10s). "
+                    f"Timeout #{self._reconcile_timeout_count}. Returning empty list."
+                )
             except Exception as e:
                 logger.error(f"Get all positions error: {e}")
         return positions
