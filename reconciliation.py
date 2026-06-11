@@ -42,6 +42,7 @@ class ReconciliationEngine:
         self._shutdown_event:    asyncio.Event = None
         self._last_rest_sync:    float = 0.0
         self._recently_closed:   dict = {}  # Phase 98.1: symbol → close_timestamp (grace period)
+        self._recently_modified: dict = {}  # symbol → timestamp (grace period for entry/partial exit)
         self._orphan_grace_secs: float = 30.0  # Ignore orphans for 30s after internal close
         # ─────────────────────────────────────────────────────────────
 
@@ -62,6 +63,15 @@ class ReconciliationEngine:
         self._recently_closed[symbol] = time.time()
         logger.debug(f"[RECONCILE] {symbol} marked recently closed — grace period active")
         logger.debug("🔁 Reconciliation marked dirty.")
+
+    def mark_recently_modified(self, symbol: str):
+        """
+        Record that a position was just entered or partially exited.
+        Suppresses orphan/mismatch spam during DB ↔ broker sync lag.
+        """
+        import time
+        self._recently_modified[symbol] = time.time()
+        logger.debug(f"[RECONCILE] {symbol} marked recently modified — grace period active")
     # ──────────────────────────────────────────────────────────────────
 
     async def start(self):
@@ -183,13 +193,34 @@ class ReconciliationEngine:
                         f"closed {time.time() - closed_at:.1f}s ago (grace={self._orphan_grace_secs}s)"
                     )
                     continue
+                # Also suppress if recently modified (just entered / partial exit)
+                modified_at = self._recently_modified.get(symbol, 0)
+                if time.time() - modified_at < self._orphan_grace_secs:
+                    logger.debug(
+                        f"[RECONCILE] Suppressed orphan for {symbol} — "
+                        f"modified {time.time() - modified_at:.1f}s ago (grace={self._orphan_grace_secs}s)"
+                    )
+                    continue
                 # Clean up expired grace entries
                 self._recently_closed = {
                     s: t for s, t in self._recently_closed.items()
                     if time.time() - t < self._orphan_grace_secs
                 }
+                self._recently_modified = {
+                    s: t for s, t in self._recently_modified.items()
+                    if time.time() - t < self._orphan_grace_secs
+                }
                 orphans.append({'symbol': symbol, 'qty': b_qty})
             elif db_positions[symbol] != b_qty_abs:
+                # Suppress mismatch if recently modified (partial exit in progress)
+                import time
+                modified_at = self._recently_modified.get(symbol, 0)
+                if time.time() - modified_at < self._orphan_grace_secs:
+                    logger.debug(
+                        f"[RECONCILE] Suppressed mismatch for {symbol} — "
+                        f"modified {time.time() - modified_at:.1f}s ago"
+                    )
+                    continue
                 mismatched.append({
                     'symbol': symbol,
                     'db_qty': db_positions[symbol],

@@ -765,6 +765,7 @@ class OrderManager:
                         })
                         if getattr(self, 'trade_manager', None) and getattr(self.trade_manager, 'reconciliation_engine', None):
                             self.trade_manager.reconciliation_engine.mark_dirty()
+                            self.trade_manager.reconciliation_engine.mark_recently_modified(symbol)
                     except Exception as db_err:
                         # Non-fatal to execution, but important
                         logger.error(f"❌ [ENTRY-DB] Failed to log entry for {symbol}: {db_err}")
@@ -1040,12 +1041,19 @@ class OrderManager:
         """
         try:
             pos = self.active_positions.get(symbol)
-            if not pos or pos['status'] != 'OPEN':
-                logger.warning(f"[PARTIAL_EXIT] {symbol} not OPEN or doesn't exist.")
+            if not pos or pos.get('status') != 'OPEN':
+                logger.warning(f"[PARTIAL_EXIT] {symbol} not OPEN or doesn't exist — skipping stale request.")
                 return False
 
             if exit_qty <= 0 or exit_qty >= pos['qty']:
                 logger.warning(f"[PARTIAL_EXIT] Invalid exit_qty {exit_qty} for total {pos.get('qty')}")
+                return False
+
+            # Re-check position is still OPEN right before placing the order
+            # (guards against race with safe_exit closing the position while we were queued)
+            pos2 = self.active_positions.get(symbol)
+            if not pos2 or pos2.get('status') != 'OPEN':
+                logger.warning(f"[PARTIAL_EXIT] {symbol} closed while queued — aborting.")
                 return False
 
             logger.info(f"🔻 [PARTIAL_EXIT] Closing {exit_qty} shares of {symbol} ({reason})")
@@ -1096,6 +1104,9 @@ class OrderManager:
             # Update internal state
             pos['qty'] -= exit_qty
 
+            if getattr(self, 'trade_manager', None) and getattr(self.trade_manager, 'reconciliation_engine', None):
+                self.trade_manager.reconciliation_engine.mark_recently_modified(symbol)
+
             if self.telegram:
                 pnl_str = f"+₹{pnl:.2f}" if pnl >= 0 else f"-₹{abs(pnl):.2f}"
                 await self.telegram.send_alert(
@@ -1119,8 +1130,8 @@ class OrderManager:
         """
         try:
             pos = self.active_positions.get(symbol)
-            if not pos:
-                logger.warning(f"[MOVE_SL] {symbol} not in active_positions")
+            if not pos or pos.get('status') != 'OPEN':
+                logger.warning(f"[MOVE_SL] {symbol} not OPEN or not in active_positions — skipping stale request.")
                 return False
 
             sl_id = pos.get('sl_id') or self.hard_stops.get(symbol)
