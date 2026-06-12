@@ -1615,8 +1615,14 @@ class FyersBrokerInterface:
                 data['stopPrice'] = trigger_price
 
             loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(None, self.rest_client.place_order, data)
-            
+            async def _place():
+                return await loop.run_in_executor(None, self.rest_client.place_order, data)
+                
+            try:
+                response = await asyncio.wait_for(_place(), timeout=3.0)
+            except asyncio.TimeoutError:
+                raise Exception("Fyers API place_order timeout (3s)")
+                
             if response['s'] == 'ok':
                 order_id = response['id']
                 self.order_fill_events[order_id] = asyncio.Event()
@@ -1633,7 +1639,16 @@ class FyersBrokerInterface:
         try:
             loop = asyncio.get_event_loop()
             data = {"id": order_id}
-            response = await loop.run_in_executor(None, self.rest_client.cancel_order, data)
+            
+            async def _cancel():
+                return await loop.run_in_executor(None, self.rest_client.cancel_order, data)
+                
+            try:
+                response = await asyncio.wait_for(_cancel(), timeout=3.0)
+            except asyncio.TimeoutError:
+                logger.warning(f"Fyers API cancel_order timeout for {order_id}")
+                return False
+
             if response['s'] == 'ok':
                 logger.info(f"Order cancelled: {order_id}")
                 return True

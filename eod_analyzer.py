@@ -313,8 +313,8 @@ class EODAnalyzer:
                     COALESCE(current_price, entry_price) AS exit_price,
                     COALESCE(realized_pnl, 0) AS pnl,
                     CASE
-                        WHEN entry_price > 0
-                        THEN ROUND((COALESCE(realized_pnl, 0) / entry_price) * 100, 2)
+                        WHEN entry_price > 0 AND qty > 0
+                        THEN ROUND((COALESCE(realized_pnl, 0) / (entry_price * qty)) * 100, 2)
                         ELSE NULL
                     END AS pnl_pct,
                     state AS status
@@ -333,8 +333,8 @@ class EODAnalyzer:
                 COALESCE(current_price, entry_price) AS exit_price,
                 COALESCE(realized_pnl, 0) AS pnl,
                 CASE
-                    WHEN entry_price > 0
-                    THEN ROUND((COALESCE(realized_pnl, 0) / entry_price) * 100, 2)
+                    WHEN entry_price > 0 AND qty > 0
+                    THEN ROUND((COALESCE(realized_pnl, 0) / (entry_price * qty)) * 100, 2)
                     ELSE NULL
                 END AS pnl_pct,
                 state AS status

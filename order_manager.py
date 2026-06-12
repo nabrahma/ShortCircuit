@@ -177,7 +177,14 @@ class OrderManager:
             rest = getattr(self.broker, 'rest_client', None)
             if not rest:
                 return None
-            orderbook = await loop.run_in_executor(None, rest.orderbook)
+            async def _fetch_ob():
+                return await loop.run_in_executor(None, rest.orderbook)
+            try:
+                orderbook = await asyncio.wait_for(_fetch_ob(), timeout=3.0)
+            except asyncio.TimeoutError:
+                logger.warning(f"REST verify orderbook timeout for {order_id}")
+                return None
+            
             if not isinstance(orderbook, dict) or orderbook.get('s') != 'ok':
                 return None
             for order in orderbook.get('orderBook', []):
@@ -329,12 +336,19 @@ class OrderManager:
             try:
                 orderbook = None
                 rest_client = getattr(self.broker, 'rest_client', None)
-                if rest_client and hasattr(rest_client, 'orderbook'):
-                    loop = asyncio.get_event_loop()
-                    orderbook = await loop.run_in_executor(None, rest_client.orderbook)
-                elif hasattr(self.broker, 'orderbook'):
-                    loop = asyncio.get_event_loop()
-                    orderbook = await loop.run_in_executor(None, self.broker.orderbook)
+                loop = asyncio.get_event_loop()
+                
+                async def _fetch():
+                    if rest_client and hasattr(rest_client, 'orderbook'):
+                        return await loop.run_in_executor(None, rest_client.orderbook)
+                    elif hasattr(self.broker, 'orderbook'):
+                        return await loop.run_in_executor(None, self.broker.orderbook)
+                    return None
+
+                try:
+                    orderbook = await asyncio.wait_for(_fetch(), timeout=3.0)
+                except asyncio.TimeoutError:
+                    return False
 
                 if not isinstance(orderbook, dict) or orderbook.get('s') != 'ok':
                     return False
