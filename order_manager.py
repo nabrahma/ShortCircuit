@@ -612,7 +612,7 @@ class OrderManager:
                     )
                 except Exception as e:
                     err_str = str(e).lower()
-                    is_margin_err = 'margin' in err_str or 'insufficient' in err_str or 'shortfall' in err_str
+                    is_margin_err = 'margin' in err_str or 'insufficient' in err_str or 'shortfall' in err_str or '-99' in err_str
                     if is_margin_err and dynamic_leverage >= 5.0 and self.capital:
                         logger.warning(f"⚠️ Margin rejection at {dynamic_leverage}x for {symbol}. Attempting 4.0x fallback...")
                         qty, required_capital, margin_req = self.capital.compute_qty(symbol, ltp, 4.0)
