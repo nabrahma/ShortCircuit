@@ -55,8 +55,8 @@ class ShortCircuitBot:
         self.capital_manager = capital_manager
         self.focus_engine = focus_engine
         # ── Auto-Trade Gate ───────────────────────────────────
-        # CRITICAL: Always False on boot. /auto on to enable.
-        self._auto_mode: bool = False
+        # CRITICAL: Always True on boot because of Telegram ban.
+        self._auto_mode: bool = True
         self._auto_on_queued: bool = False
         self._morning_brief_sent: bool = False
         # ── Telegram App ──────────────────────────────────────
@@ -75,7 +75,7 @@ class ShortCircuitBot:
         self._signal_msg_index: dict = {}
         self._signal_msg_index_lock = asyncio.Lock()
         
-        logger.info(f"🤖 Telegram Bot initialized | Auto Mode: OFF")
+        logger.info(f"🤖 Telegram Bot initialized | Auto Mode: ON")
     # ════════════════════════════════════════════════════════════
     # PUBLIC API — used by other modules
     # ════════════════════════════════════════════════════════════
