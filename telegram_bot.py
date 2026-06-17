@@ -74,6 +74,7 @@ class ShortCircuitBot:
         self._editable_signal_flow_override: Optional[bool] = None
         self._signal_msg_index: dict = {}
         self._signal_msg_index_lock = asyncio.Lock()
+        self._scan_metadata: dict = {}
         
         logger.info(f"🤖 Telegram Bot initialized | Auto Mode: ON")
     # ════════════════════════════════════════════════════════════
