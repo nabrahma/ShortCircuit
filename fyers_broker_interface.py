@@ -22,6 +22,8 @@ import asyncio
 import logging
 import config
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 import json
 from pathlib import Path
 from collections import deque, defaultdict
@@ -323,6 +325,18 @@ class FyersBrokerInterface:
             token=access_token,
             log_path="logs/fyers_rest"
         )
+        
+        # Inject custom HTTPAdapter to fix urllib3 connection pool overflow
+        if hasattr(self.rest_client, 'session') and self.rest_client.session is not None:
+            retry_strategy = Retry(
+                total=3,
+                backoff_factor=1,
+                status_forcelist=[429, 500, 502, 503, 504],
+                allowed_methods=["HEAD", "GET", "OPTIONS"]
+            )
+            adapter = HTTPAdapter(pool_connections=50, pool_maxsize=50, max_retries=retry_strategy)
+            self.rest_client.session.mount("http://", adapter)
+            self.rest_client.session.mount("https://", adapter)
         
         # WebSocket clients
         self.data_ws = None  # Market data WebSocket
