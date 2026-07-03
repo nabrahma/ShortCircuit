@@ -65,30 +65,18 @@ STRATEGY_VOL_FADE_LOOKBACK: int = 15         # Candles to look back for volume b
 STRATEGY_RSI_DIVERGENCE_WINDOW: int = 25      # Window for swing-based RSI divergence check
 STRATEGY_MOMENTUM_DECAY_RATIO: float = 0.85  # Fast slope must be < slow * this ratio
 
-
-# ============================================================================
-# PHASE 79: LEVERAGE GUARD (G14)
-# ============================================================================
-
 # ============================================================================
 # 6. EXIT ENGINE & RISK MULTIPLIERS
 # ============================================================================
 SL_ATR_MULTIPLIER = 0.5
 SL_MIN_TICK_BUFFER = 3
 
-# Phase 78: Single TP Multipliers (No Partials)
 P52_CLEANUP_ON_STOP_FOCUS: bool = True 
 
-
-
 # ============================================================================
-# 7. LOGGING & ML OVERRIDES (PHASE 70-74)
+# 7. LOGGING (PHASE 70-74)
 # ============================================================================
-# Logging Paths
 LOG_FILE = "logs/bot.log"
-
-# ML Dynamic Override: DISABLED per PRD.
-# Research variants must never modify live config at runtime.
 
 # ============================================================================
 # 8. FEATURE TOGGLES & LEGACY (PHASE 41 - PHASE 44)
@@ -100,9 +88,6 @@ RVOL_MIN_CANDLES = 15
 # Phase 44.4: Telegram UX
 ETF_CLUSTER_DEDUP_ENABLED = True
 ETF_CLUSTER_KEYWORDS = ["SILVER"]
-
-
-
 
 # Legacy & Backward Compatibility
 TRADING_ENABLED = False 
