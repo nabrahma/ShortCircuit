@@ -137,8 +137,16 @@ def compute_rsi_divergence(df: pd.DataFrame, window: int = 25) -> bool:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def compute_atr(df: pd.DataFrame, period: int = 14) -> float:
-    """Average True Range. Returns 1.0 as fallback on error."""
+    """
+    Average True Range.
+
+    IMPORTANT: Returns float('nan') on error or insufficient data.
+    Callers MUST guard with: `if not np.isfinite(atr) or atr <= 0: ...`
+    DO NOT use a sentinel like 1.0 — it feeds the stop-loss engine.
+    """
     try:
+        if len(df) < period + 1:
+            return float('nan')
         high = df['high']
         low = df['low']
         close = df['close']
@@ -150,29 +158,41 @@ def compute_atr(df: pd.DataFrame, period: int = 14) -> float:
 
         tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
         atr = tr.rolling(window=period).mean()
-        return atr.iloc[-1]
+        result = atr.iloc[-1]
+        if not isinstance(result, float) or not np.isfinite(result):
+            return float('nan')
+        return float(result)
     except Exception:
-        return 1.0
+        return float('nan')
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Volume
 # ─────────────────────────────────────────────────────────────────────────────
 
-def compute_volume_fade_ratio(candles: list, lookback: int = 15) -> float:
+def compute_volume_fade_ratio(candles: list, lookback: int = 15, drop_forming: bool = True) -> float:
     """
-    Ratio of current volume (avg of last 2 candles) to prior average.
+    Ratio of current volume (avg of last 2 COMPLETED candles) to prior average.
     < 0.65 = fading (exhaustion). > 1.0 = acceleration.
+
+    FIXED:
+    - drop_forming=True drops the last (developing) candle so its partial
+      volume doesn't create a false 'fading' signal early in the bar's life.
+    - Prior and current windows are now disjoint (bar -2 was previously
+      double-counted in both, biasing the ratio toward 1.0).
     """
-    if len(candles) < (lookback + 2):
+    data = candles[:-1] if drop_forming else candles   # completed bars only
+    if len(data) < lookback + 2:
         return 1.0
 
-    prior_vols = [c['volume'] for c in candles[-(lookback + 1):-1]]
+    # Prior window: lookback bars, strictly before the last 2 completed bars
+    prior_vols = [c['volume'] for c in data[-(lookback + 2):-2]]
     avg_prior = sum(prior_vols) / len(prior_vols) if prior_vols else 0
     if avg_prior == 0:
         return 1.0
 
-    current_avg = sum(c['volume'] for c in candles[-2:]) / 2
+    # Current: last 2 COMPLETED bars (disjoint from prior window)
+    current_avg = sum(c['volume'] for c in data[-2:]) / 2
     return round(current_avg / avg_prior, 3)
 
 

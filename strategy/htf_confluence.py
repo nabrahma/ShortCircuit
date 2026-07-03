@@ -4,6 +4,7 @@ Math-First Architecture (Phase 61.1)
 Based on Leung & Li: "Optimal Mean Reversion" and Momentum Physics.
 """
 import logging
+import time as _time
 import datetime
 import pandas as pd
 import config
@@ -25,10 +26,15 @@ class HTFConfluence:
         today = datetime.date.today().strftime("%Y-%m-%d")
         
         now = _time.time()
+        if not hasattr(self, '_htf_cache'):
+            self._htf_cache = {}
+            self._htf_cache_t = {}
         if not hasattr(self, '_last_range_fetch_time'):
             self._last_range_fetch_time = 0.0
-        if now - self._last_range_fetch_time < 600:  # Phase 91: Increased TTL to 600s to prevent 429 rate limits
-            return None
+        cache_key = symbol
+        if cache_key in self._htf_cache and (now - self._htf_cache_t.get(cache_key, 0)) < 600:
+            # Phase 91: TTL not expired — return the cached DataFrame, NOT None
+            return self._htf_cache[cache_key]
         self._last_range_fetch_time = now
         
         data = {
@@ -48,13 +54,16 @@ class HTFConfluence:
                 # Phase 91: Guard against malformed responses
                 if 'c' not in df.columns or len(df) < 3:
                     logger.warning(f"G9: HTF data malformed for {symbol} — skipping")
-                    return None
+                    return self._htf_cache.get(cache_key)  # stale is better than nothing
                 df['t'] = pd.to_datetime(df['t'], unit='s')
+                self._htf_cache[cache_key] = df
+                self._htf_cache_t[cache_key] = now
                 return df
         except Exception as e:
             logger.error(f"HTF data fetch failed for {symbol}: {e}")
         
-        return None
+        # On failure: return stale cache if we have it — beats returning None
+        return self._htf_cache.get(cache_key)
     
     def check_trend_exhaustion(self, symbol, df_15m=None, vwap_sd: float = 0.0):
         """

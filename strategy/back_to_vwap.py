@@ -161,11 +161,18 @@ class BackToVWAPShort:
             )
             return None
 
-        # ── Condition 6: Momentum decay ──────────────────────────────
+        # ── Condition 6: Momentum decay (sign-safe) ──────────────────
         # PRD: True price-velocity decay only. Fast slope must genuinely
         # fall behind slow slope. No trivial flat-slope OR clause.
+        # FIXED: slope_fast < slope_slow * 0.85 inverts semantics when slope_slow <= 0.
         decay_ratio = getattr(cfg, 'STRATEGY_MOMENTUM_DECAY_RATIO', 0.85)
-        momentum_decaying = slope_fast < (slope_slow * decay_ratio)
+        min_slow = getattr(cfg, 'STRATEGY_MIN_SLOW_SLOPE_BPS', 0.0)
+        if slope_slow > min_slow:
+            # Genuine decay off a real up-slope: fast is losing speed vs slow
+            momentum_decaying = slope_fast < slope_slow * decay_ratio
+        else:
+            # Premise broken (slow already flat or rolling over): accept continued roll-over only
+            momentum_decaying = slope_fast <= slope_slow
 
         if not momentum_decaying:
             logger.debug(
@@ -181,11 +188,12 @@ class BackToVWAPShort:
             rsi_div, price_lower_high, has_auction_fail,
         )
 
-        # Pattern detection for enrichment
+        # Pattern detection for enrichment — preserve raw label, NO overwrite
         vah_for_pattern = vah if isinstance(vah, (int, float)) else None
         pattern, vol_z = F.detect_pattern(df, vah=vah_for_pattern)
-        if pattern == "NORMAL":
-            pattern = "EXHAUSTION_FADE"
+        # REMOVED: if pattern == "NORMAL": pattern = "EXHAUSTION_FADE"
+        # Reason: overwriting NORMAL with a fake pattern label corrupts ML logs
+        # and influences the daily-target throttle via confidence scoring.
 
         stretch_score = F.compute_stretch_score(
             gain_pct, getattr(cfg, 'SCANNER_GAIN_MIN_PCT', 7.5)

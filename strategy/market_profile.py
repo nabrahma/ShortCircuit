@@ -9,46 +9,59 @@ class ProfileAnalyzer:
     def __init__(self):
         pass
         
-    def calculate_dalton_value_area(self, df, bins=20, va_pct=0.70):
+    def calculate_dalton_value_area(self, df, bins=30, va_pct=0.70):
         """
-        Dalton Value Area Algorithm:
-        1. Segment price range into 20 horizontal bins
-        2. Identify Point of Control (POC)
-        3. Expand from POC until 70% Volume is captured
+        Dalton Value Area Algorithm (contiguous adjacent expansion):
+        1. Segment price range into bins (using close prices, price-ordered)
+        2. Identify Point of Control (POC) = highest volume bin
+        3. Expand adjacently from POC until 70% of volume is captured
+
+        FIXED: Previous version sorted by global volume rank (non-contiguous).
+        This version expands one adjacent bin at a time, guaranteeing a
+        mathematically valid, contiguous Value Area.
         """
-        if df is None or df.empty: return None
-        
+        if df is None or df.empty:
+            return None
+
         try:
-            # 1. Segment price range into 20 horizontal bins
-            df = df.copy()
-            df['bin'] = pd.cut(df['close'], bins=bins)
-            v_profile = df.groupby('bin', observed=True)['volume'].sum()
-            
-            # 2. Identify Point of Control (POC)
-            poc_bin = v_profile.idxmax()
-            total_v, va_v = v_profile.sum(), v_profile[poc_bin]
-            
-            # 3. Expand from POC until 70% Volume is captured
-            # Dalton Rule: Compare up/down bins and pick highest volume in each step
-            va_bins = [poc_bin]
-            sorted_bins = v_profile.sort_values(ascending=False).index.tolist()
-            for b in sorted_bins:
-                if va_v >= total_v * va_pct: break
-                if b not in va_bins:
-                    va_bins.append(b)
-                    va_v += v_profile[b]
-                    
-            # 4. Extract VAH and VAL boundaries
-            vah = max([b.right for b in va_bins])
-            val = min([b.left for b in va_bins])
-            
+            d = df.copy()
+            d['bin'] = pd.cut(d['close'], bins=bins)
+            # observed=False keeps all bins including empties, sort_index ensures price order
+            vp = d.groupby('bin', observed=False)['volume'].sum().sort_index()
+            vols = vp.values.astype(float)
+            total = vols.sum()
+            if total <= 0:
+                return None
+
+            # POC = highest volume bin index
+            poc = int(np.argmax(vols))
+            lo = hi = poc
+            acc = vols[poc]
+            limit = total * va_pct
+
+            # Adjacent expansion: always pick the higher-volume neighbor
+            while acc < limit and (lo > 0 or hi < len(vols) - 1):
+                up = vols[hi + 1] if hi < len(vols) - 1 else -1.0
+                dn = vols[lo - 1] if lo > 0 else -1.0
+                if up >= dn:
+                    hi += 1
+                    acc += up
+                else:
+                    lo -= 1
+                    acc += dn
+
+            iv = vp.index
+            vah = float(iv[hi].right)
+            val = float(iv[lo].left)
+            poc_price = float(iv[poc].mid)
+
             return {
-                'poc': float(poc_bin.mid),
-                'vah': float(vah),
-                'val': float(val),
-                'vpoc': float(poc_bin.mid), # compatibility
-                'vvah': float(vah),          # compatibility
-                'vval': float(val)           # compatibility
+                'poc':  poc_price,
+                'vah':  vah,
+                'val':  val,
+                'vpoc': poc_price,  # compatibility
+                'vvah': vah,         # compatibility
+                'vval': val,         # compatibility
             }
         except Exception as e:
             logger.error(f"Dalton Profile Calc Error: {e}")
@@ -98,13 +111,14 @@ class ProfileAnalyzer:
             poc_idx = np.argmax(counts)
             poc_price = (bin_edges[poc_idx] + bin_edges[poc_idx+1]) / 2
             
-            # Value Area Algorithm: Start at POC and expand out
+            # Value Area Algorithm: Start at POC and expand adjacently
             current_total = counts[poc_idx]
             up_idx = poc_idx + 1
             dn_idx = poc_idx - 1
-            
-            low_bound = dn_idx
-            high_bound = up_idx
+
+            # FIXED: initialize bounds to poc_idx, not to the pre-incremented indices
+            low_bound = poc_idx
+            high_bound = poc_idx
             
             while current_total < limit:
                 can_go_up = up_idx < len(counts)

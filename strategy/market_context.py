@@ -280,19 +280,37 @@ class MarketContext:
             return False, "BLOCKED: EOD Cutoff (after 15:10)"
 
         if getattr(config, 'ENABLE_MARKET_REGIME_FILTER', True) is False:
+            # FIXED: still compute and update the regime label for ML logging,
+            # even though the filter is disabled as a gate.
+            candles_for_label = self._get_index_data_cached(self.nifty_symbol)
+            if candles_for_label and self.morning_range_valid:
+                current_close = candles_for_label[-1][4]
+                conf = config.MARKET_REGIME_CONFIG
+                move_pct = (current_close - self._morning_high) / self._morning_high
+                new_regime = "RANGE"
+                if move_pct > conf['strong_trend_threshold']:
+                    new_regime = "TREND_UP"
+                elif move_pct < -0.005:
+                    new_regime = "TREND_DOWN"
+                if new_regime != self.last_regime:
+                    self.last_regime = new_regime
+                    self.regime_change_time = datetime.now()
+                    logger.info(f"📊 REGIME UPDATE (filter disabled): {new_regime} | Move: {move_pct:.2%}")
             return True, "OK [G7]: Market Regime Filter Disabled"
 
         # 3. REGIME DETECTION: Nifty Trend
         candles = self._get_index_data_cached(self.nifty_symbol)
-        if not candles:
-            # If we're actively rate-limited (backoff > 60s set), allow trades through
-            # A 429 means Fyers API is alive but throttled — it does NOT mean Nifty is trending up.
-            # Hard-blocking trades on a rate limit is a false fail-closed.
-            backoff = getattr(self, '_index_backoff', {}).get(self.nifty_symbol, 60)
-            if backoff >= 300:
-                logger.warning("[MarketContext] ⚠️ G7 bypassed (rate-limited 429) — assuming RANGE regime")
-                return True, "OK [G7]: Rate-limited, assuming safe (RANGE)"
-            return False, "BLOCKED [G7]: No index data available"
+        cache_age = _time.time() - self._index_cache_time.get(self.nifty_symbol, 0)
+        if not candles or cache_age > 900:
+            # FIXED: fail-closed — block NEW entries when index data is unavailable/stale.
+            # A false block = a few missed trades (bounded, recoverable).
+            # A false allow during a hard Nifty trend = unbounded tail risk.
+            # NOTE: This never force-closes existing positions.
+            logger.warning(
+                "[MarketContext] ⚠️ G7 FAIL-CLOSED: index data unavailable or stale (%.0fs old). Blocking new entries.",
+                cache_age if candles else 0.0
+            )
+            return False, "BLOCKED [G7]: Index data unavailable/stale — fail closed for new shorts"
             
         self._refresh_morning_range_if_needed()
         if not self.morning_range_valid:
