@@ -22,15 +22,11 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 # 2. CORE TRADING CONFIG (CRITICAL)
 # ============================================================================
 # Session Safety
-AUTO_MODE = False          # NEVER change this to True. Enable via Telegram /auto only.
-AUTO_MODE_DEFAULT = False 
 MAX_SESSION_LOSS_INR = 500  # Max cumulative intra-day loss before bot halts (Phase 69)
 DAILY_TARGET_INR = -1       # Set to -1 for Dynamic 5% Mode (Automatic calculation)
                             # Or set a fixed amount like ₹75 to override.
                             # When hit: only EXTREME or MAX_CONVICTION signals allowed.
 INTRADAY_LEVERAGE = 5.0    # Fixed 5× leverage (NSE standard requirement)
-MIN_LEVERAGE = 3.0         # Minimum leverage allowed for a stock to pass the scanner
-CAPITAL_PER_TRADE = 9000   # OFFLINE FALLBACK ONLY (Buying power for 1800 margin)
 
 # Phase 94: Trade Direction Switch
 # Controls whether bot enters SHORT (SELL) or LONG (BUY) positions.
@@ -38,8 +34,6 @@ CAPITAL_PER_TRADE = 9000   # OFFLINE FALLBACK ONLY (Buying power for 1800 margin
 TRADE_DIRECTION = 'SHORT'  # 'SHORT' or 'LONG'
 
 # Timing (IST)
-SQUARE_OFF_TIME = "15:10" 
-VALIDATION_TIMEOUT_MINUTES = 15 
 MAX_HOLD_TIME_MINUTES = 45
 
 # ============================================================================
@@ -53,8 +47,6 @@ SCANNER_MIN_LTP:      float = 40.0   # Filter sub-₹40 manipulation vehicles
 CANDLE_BODY_RATIO_MIN: float = 0.382   # Phase 91.3: Scientific threshold (Fibonacci 0.382) for "clean" bodies
 
 # G5 Stretch Thresholds
-G5_STRETCH_LOW_PCT:  float = 7.5   # Synchronized with Scanner Min
-G5_STRETCH_HIGH_PCT: float = 14.5
 DAY_GAIN_PCT_THRESHOLD = 7.5       # Duplicate alias used in legacy paths
 
 # Operations
@@ -77,8 +69,6 @@ STRATEGY_MOMENTUM_DECAY_RATIO: float = 0.85  # Fast slope must be < slow * this 
 # ============================================================================
 # PHASE 79: LEVERAGE GUARD (G14)
 # ============================================================================
-P79_G14_LEVERAGE_GUARD_ENABLED = True
-P79_G14_MIN_LEVERAGE = 1.1  # Reject if leverage < 1.1 (Allows all non-1x stocks)
 
 # ============================================================================
 # 6. EXIT ENGINE & RISK MULTIPLIERS
@@ -87,12 +77,7 @@ SL_ATR_MULTIPLIER = 0.5
 SL_MIN_TICK_BUFFER = 3
 
 # Phase 78: Single TP Multipliers (No Partials)
-P78_SINGLE_TP_ATR_MULT_DEFAULT = 1.0
-P78_SINGLE_TP_ATR_MULT_LOW_GAIN = 0.5
-P52_BREAKEVEN_AFTER_TP1: bool = True   
-P52_SL_MOVE_AFTER_TP2: bool = True     
 P52_CLEANUP_ON_STOP_FOCUS: bool = True 
-P52_HARD_STOP_RECONCILE_SECONDS: int = 30 
 
 
 
@@ -101,24 +86,15 @@ P52_HARD_STOP_RECONCILE_SECONDS: int = 30
 # ============================================================================
 # Logging Paths
 LOG_FILE = "logs/bot.log"
-SIGNAL_LOG_PATH = "logs/signals.csv"
-DETECTOR_LOG_PATH = "logs/detector_performance.csv"
-EMERGENCY_LOG_PATH = "logs/emergency_alerts.log"
-ORPHANED_POSITION_LOG_PATH = "logs/orphaned_positions.log"
 
 # ML Dynamic Override: DISABLED per PRD.
 # Research variants must never modify live config at runtime.
-P70_ML_DYNAMIC_OVERRIDE_ENABLED = False
 
 # ============================================================================
 # 8. FEATURE TOGGLES & LEGACY (PHASE 41 - PHASE 44)
 # ============================================================================
 
 RVOL_VALIDITY_GATE_ENABLED = True
-ENABLE_POSITION_VERIFICATION = True
-ENABLE_BROKER_POSITION_POLLING = True
-POSITION_RECONCILIATION_INTERVAL = 1800
-EMERGENCY_ALERT_ENABLED = True
 RVOL_MIN_CANDLES = 15
 
 # Phase 44.4: Telegram UX
@@ -129,10 +105,7 @@ ETF_CLUSTER_KEYWORDS = ["SILVER"]
 
 
 # Legacy & Backward Compatibility
-CAPITAL = 1800              # OFFLINE FALLBACK ONLY (Real Margin)
-CONFIDENCE_THRESHOLD = "MEDIUM" 
 TRADING_ENABLED = False 
-RECOVERY_FILE_PATH = "data/recovery.json"
 
 MARKET_SESSION_CONFIG = {
     'allow_postmarket_sleep': True,
@@ -156,8 +129,6 @@ def minutes_since_market_open() -> float:
 # Phase 81: Telegram Hardening & Menu
 P81_TELEGRAM_MENU_ENABLED        = True
 P81_TELEGRAM_RATE_LIMIT_HZ       = 2
-P81_TELEGRAM_BUFFER_WINDOW_SEC   = 2.0
-P81_TELEGRAM_STOP_CONFIRM_TIMEOUT = 30
 
 # ============================================================================
 # PHASE 82: LOCAL CANDLE ENGINE
