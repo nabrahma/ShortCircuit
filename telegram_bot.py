@@ -55,8 +55,7 @@ class ShortCircuitBot:
         self.capital_manager = capital_manager
         self.focus_engine = focus_engine
         # ── Auto-Trade Gate ───────────────────────────────────
-        # CRITICAL: Always True on boot because of Telegram ban.
-        self._auto_mode: bool = True
+        self._auto_mode: bool = config_settings.get('AUTO_MODE', True)
         self._auto_on_queued: bool = False
         self._morning_brief_sent: bool = False
         # ── Telegram App ──────────────────────────────────────

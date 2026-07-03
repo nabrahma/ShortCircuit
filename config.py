@@ -22,6 +22,7 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 # 2. CORE TRADING CONFIG (CRITICAL)
 # ============================================================================
 # Session Safety
+AUTO_MODE = True            # Controls if the bot auto-executes trades (can be toggled via Telegram)
 MAX_SESSION_LOSS_INR = 500  # Max cumulative intra-day loss before bot halts (Phase 69)
 DAILY_TARGET_INR = -1       # Set to -1 for Dynamic 5% Mode (Automatic calculation)
                             # Or set a fixed amount like ₹75 to override.
