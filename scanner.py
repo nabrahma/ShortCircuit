@@ -3,6 +3,7 @@ import logging
 from fyers_connect import FyersConnect
 import time
 import config
+from rest_limiter import rest_limiter
 
 logger = logging.getLogger(__name__)
 
@@ -128,8 +129,7 @@ class FyersScanner:
                     "range_to":   today.strftime("%Y-%m-%d"),
                     "cont_flag": "1"
                 }
-                import time
-                time.sleep(0.25) # Pace REST history calls to stay within 10 req/sec limit
+                rest_limiter.acquire()  # Global rate limiter — respect 10 req/sec Fyers limit
                 response = self.fyers.history(data=data)
                 candles = response.get('candles', [])
 

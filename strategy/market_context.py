@@ -22,8 +22,9 @@ class MarketContext:
     # Phase 41.3.3: Centralized Symbol Handling
     NIFTY_SYMBOL = NIFTY_50
     
-    def __init__(self, fyers, morning_high=None, morning_low=None):
+    def __init__(self, fyers, morning_high=None, morning_low=None, broker=None):
         self.fyers = fyers
+        self.broker = broker  # Optional WS cache reference (Issue 1 fix)
         self.regime = "UNKNOWN"
         self.msg = "Initializing..."
         
@@ -82,6 +83,8 @@ class MarketContext:
         }
 
         try:
+            from rest_limiter import rest_limiter
+            rest_limiter.acquire()
             response = self.fyers.history(data=data)
         except Exception as e:
             logger.critical(f"[MarketContext] Morning range REST fetch exception: {e}")
@@ -173,29 +176,52 @@ class MarketContext:
     # ── Phase 61: G7 Consolidation & Caching ────────────────────
     
     def _get_index_data_cached(self, symbol=None):
-        """Fetch index candles with a 5-minute TTL cache."""
-        if symbol is None: symbol = self.nifty_symbol
+        """Fetch index data.
         
+        Primary path: Read LTP from the live WebSocket cache (zero REST calls).
+        Fallback path: Fetch 5-minute candles from the REST History API if the
+        broker/WS cache is unavailable.
+        """
+        if symbol is None:
+            symbol = self.nifty_symbol
+
         now = _time.time()
+
+        # ── Primary: Read directly from live WS cache (no REST call) ──────
+        if self.broker is not None:
+            try:
+                snap = self.broker.get_quote_cache_snapshot()
+                entry = snap.get(symbol)
+                if entry and entry.get('ltp', 0) > 0:
+                    ltp = entry['ltp']
+                    # Synthesize a 1-element candle list: [epoch, o, h, l, close, vol]
+                    # Consumers only use candles[-1][4] (close price)
+                    synthetic_candle = [now, ltp, ltp, ltp, ltp, entry.get('volume', 0)]
+                    logger.debug(
+                        "[MarketContext] Index %s from WS cache: LTP=%.2f", symbol, ltp
+                    )
+                    return [synthetic_candle]
+            except Exception as e:
+                logger.warning("[MarketContext] WS cache read failed for %s: %s", symbol, e)
+
+        # ── Fallback: REST History API ─────────────────────────────────────
         if not hasattr(self, '_index_cache'):
             self._index_cache = {}
             self._index_cache_time = {}
-            self._index_last_attempt = {}  # track last attempt time
-            self._index_backoff = {}       # per-symbol backoff duration (seconds)
-            
-        # Cache hit? (only if we have real data)
+            self._index_last_attempt = {}
+            self._index_backoff = {}
+
+        # Cache hit?
         if symbol in self._index_cache and (now - self._index_cache_time.get(symbol, 0)) < 300:
             return self._index_cache[symbol]
 
-        # Rate-limit retries: respect backoff window
+        # Respect backoff window after a 429
         last_attempt = self._index_last_attempt.get(symbol, 0)
-        backoff = self._index_backoff.get(symbol, 60)  # default 60s, 300s on 429
+        backoff = self._index_backoff.get(symbol, 60)
         if (now - last_attempt) < backoff:
-            # Within backoff window — return stale cache if available, else None
             return self._index_cache.get(symbol)
         self._index_last_attempt[symbol] = now
 
-        # Cache miss — fetch from REST
         today = datetime.now(IST).strftime("%Y-%m-%d")
         data = {
             "symbol": symbol,
@@ -205,15 +231,17 @@ class MarketContext:
             "range_to": today,
             "cont_flag": "1"
         }
-        
+
         try:
+            from rest_limiter import rest_limiter
+            rest_limiter.acquire()
             response = self.fyers.history(data=data)
             status = response.get('s') if isinstance(response, dict) else 'INVALID'
             candles = response.get('candles') if isinstance(response, dict) else None
             if status == 'ok' and candles:
                 self._index_cache[symbol] = candles
                 self._index_cache_time[symbol] = now
-                self._index_backoff[symbol] = 60  # reset backoff on success
+                self._index_backoff[symbol] = 60
                 logger.info(
                     "[MarketContext] ✅ Index cache refreshed: %s | %d candles | latest=%s",
                     symbol, len(candles), candles[-1][4] if candles else 'N/A'
@@ -223,7 +251,6 @@ class MarketContext:
                 code = response.get('code') if isinstance(response, dict) else 'N/A'
                 msg = response.get('message', response.get('errmsg', '')) if isinstance(response, dict) else str(response)[:100]
                 if code == 429 or 'limit' in str(msg).lower():
-                    # Rate-limited: back off 300s, use stale cache
                     self._index_backoff[symbol] = 300
                     logger.warning(
                         "[MarketContext] ⚠️ Index 429 rate-limited: %s — backing off 300s. Using stale cache.",
@@ -237,8 +264,7 @@ class MarketContext:
                     )
         except Exception as e:
             logger.error("[MarketContext] ❌ Index fetch exception: symbol=%s error=%s", symbol, e)
-        
-        # Fallback to expired cache if API fails (stale is better than nothing)
+
         stale = self._index_cache.get(symbol)
         if stale:
             logger.warning("[MarketContext] Using stale index cache for %s (%d candles)", symbol, len(stale))

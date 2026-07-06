@@ -267,6 +267,11 @@ async def _initialize_runtime() -> RuntimeContext:
             len(filtered_symbols)
         )
 
+        # Force NIFTY50 index into the WS subscription for MarketContext (Issue 1 fix)
+        from symbols import NIFTY_50
+        if NIFTY_50 not in filtered_symbols:
+            filtered_symbols.append(NIFTY_50)
+
         # 3b. Subscribe to WS — sets state=PRIMING, starts health monitor thread
         broker.subscribe_scanner_universe(filtered_symbols)
         logger.info(f"[Phase 44.7] WS subscription dispatched for {len(filtered_symbols)} symbols")

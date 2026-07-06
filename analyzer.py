@@ -68,7 +68,7 @@ class FyersAnalyzer:
     def __init__(self, fyers, broker=None, morning_high=None, morning_low=None):
         self.fyers = fyers
         self.broker = broker
-        self.market_context = MarketContext(fyers, morning_high, morning_low)
+        self.market_context = MarketContext(fyers, morning_high, morning_low, broker=broker)
         self.signal_manager = get_signal_manager()
         self.htf_confluence = HTFConfluence(fyers)
         self.profile_analyzer = ProfileAnalyzer()

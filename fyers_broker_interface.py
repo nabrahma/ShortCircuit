@@ -33,6 +33,7 @@ from enum import Enum
 from typing import Optional, Dict, List, Any, Callable, Set
 import time
 import threading
+from rest_limiter import rest_limiter
 
 logger = logging.getLogger(__name__)
 
@@ -1079,8 +1080,8 @@ class FyersBrokerInterface:
         for i in range(0, len(symbols), batch_size):
             batch = symbols[i:i + batch_size]
             try:
-                # Pace REST calls to stay under 5 req/sec (Fyers Quotes API limit)
-                time.sleep(0.25)
+                # Acquire global rate limiter token before each REST call
+                rest_limiter.acquire()
                 response = self.rest_client.quotes(data={"symbols": ",".join(batch)})
             except Exception as e:
                 logger.warning("[WS Cache] REST seed batch %s failed: %s", i // batch_size, e)
@@ -1589,25 +1590,10 @@ class FyersBrokerInterface:
     # ===================================================================
     
     async def _rate_limit_wait(self, endpoint: str):
-        """Enforce rate limits."""
-        if endpoint not in self.rate_limits:
-            return
-        
-        limit, window = self.rate_limits[endpoint]
-        now = datetime.now(UTC).timestamp()
-        
-        # Clean old
-        while self.api_calls[endpoint] and self.api_calls[endpoint][0] < now - window:
-            self.api_calls[endpoint].popleft()
-        
-        if len(self.api_calls[endpoint]) >= limit:
-            oldest = self.api_calls[endpoint][0]
-            sleep_time = window - (now - oldest)
-            if sleep_time > 0:
-                logger.warning(f"Rate limit {endpoint}: sleeping {sleep_time:.2f}s")
-                await asyncio.sleep(sleep_time)
-        
-        self.api_calls[endpoint].append(now)
+        """Enforce global rate limits using the token bucket."""
+        import asyncio
+        from rest_limiter import rest_limiter
+        await asyncio.to_thread(rest_limiter.acquire)
 
     async def place_order(self, symbol: str, side: str, qty: int, order_type: str = 'MARKET', price: float = 0, trigger_price: float = 0) -> str:
         """Place order via REST API."""
