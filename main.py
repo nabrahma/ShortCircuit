@@ -255,9 +255,10 @@ async def _initialize_runtime() -> RuntimeContext:
         min_ltp = getattr(config, 'SCANNER_MIN_LTP', 40.0)
         filtered_symbols = []
         
+        snapshot = broker.get_quote_cache_snapshot()
         for sym in scanner_symbols:
-            quote = broker.get_latest_quote(sym)
-            if quote and quote.volume >= min_vol and quote.last_price >= min_ltp:
+            quote = snapshot.get(sym)
+            if quote and quote.get('volume', 0) >= min_vol and quote.get('ltp', 0) >= min_ltp:
                 filtered_symbols.append(sym)
                 
         logger.info(
