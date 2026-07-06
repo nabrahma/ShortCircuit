@@ -128,6 +128,8 @@ class FyersScanner:
                     "range_to":   today.strftime("%Y-%m-%d"),
                     "cont_flag": "1"
                 }
+                import time
+                time.sleep(0.25) # Pace REST history calls to stay within 10 req/sec limit
                 response = self.fyers.history(data=data)
                 candles = response.get('candles', [])
 

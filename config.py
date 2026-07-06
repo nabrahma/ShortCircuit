@@ -51,7 +51,7 @@ CANDLE_BODY_RATIO_MIN: float = 0.382   # Phase 91.3: Scientific threshold (Fibon
 DAY_GAIN_PCT_THRESHOLD = 7.5       # Duplicate alias used in legacy paths
 
 # Operations
-SCANNER_PARALLEL_WORKERS = 10 # Phase 91.3: Increased from 3 to 10 for faster history fetching
+SCANNER_PARALLEL_WORKERS = 3 # Reverted to 3 to prevent Fyers 429 Rate Limits
 WS_TICK_FRESHNESS_TTL_SECONDS = 180.0
 
 # ============================================================================
