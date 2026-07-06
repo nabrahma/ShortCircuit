@@ -249,10 +249,26 @@ async def _initialize_runtime() -> RuntimeContext:
                 seeded,
                 len(scanner_symbols),
             )
+            
+        # 3a. Pre-Filter Stage: Drop illiquid penny stocks using REST data
+        min_vol = getattr(config, 'SCANNER_MIN_VOLUME', 333333)
+        min_ltp = getattr(config, 'SCANNER_MIN_LTP', 40.0)
+        filtered_symbols = []
+        
+        for sym in scanner_symbols:
+            quote = broker.get_latest_quote(sym)
+            if quote and quote.volume >= min_vol and quote.last_price >= min_ltp:
+                filtered_symbols.append(sym)
+                
+        logger.info(
+            "[Pre-Filter] Dropped %d illiquid symbols. Passing %d symbols to WebSocket.",
+            len(scanner_symbols) - len(filtered_symbols),
+            len(filtered_symbols)
+        )
 
-        # 3. Subscribe to WS — sets state=PRIMING, starts health monitor thread
-        broker.subscribe_scanner_universe(scanner_symbols)
-        logger.info(f"[Phase 44.7] WS subscription dispatched for {len(scanner_symbols)} symbols")
+        # 3b. Subscribe to WS — sets state=PRIMING, starts health monitor thread
+        broker.subscribe_scanner_universe(filtered_symbols)
+        logger.info(f"[Phase 44.7] WS subscription dispatched for {len(filtered_symbols)} symbols")
     else:
         logger.warning("[Phase 44.7] Failed to load NSE symbols for WS cache priming")
 

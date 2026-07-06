@@ -996,6 +996,8 @@ class FyersBrokerInterface:
             batch = symbols[i:i + batch_size]
             try:
                 if self.data_ws:
+                    # Pace WS subscriptions to prevent Fyers server drops on heavy volume days
+                    time.sleep(0.5)
                     self.data_ws.subscribe(
                         symbols=batch,
                         data_type="SymbolUpdate"
@@ -1077,6 +1079,8 @@ class FyersBrokerInterface:
         for i in range(0, len(symbols), batch_size):
             batch = symbols[i:i + batch_size]
             try:
+                # Pace REST calls to stay under 5 req/sec (Fyers Quotes API limit)
+                time.sleep(0.25)
                 response = self.rest_client.quotes(data={"symbols": ",".join(batch)})
             except Exception as e:
                 logger.warning("[WS Cache] REST seed batch %s failed: %s", i // batch_size, e)
