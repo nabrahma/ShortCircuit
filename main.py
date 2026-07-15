@@ -52,10 +52,12 @@ def _configure_logging() -> None:
     if log_dir:
         os.makedirs(log_dir, exist_ok=True)
         
-    file_handler = logging.handlers.RotatingFileHandler(
+    # Use TimedRotatingFileHandler for daily segmented logs
+    file_handler = logging.handlers.TimedRotatingFileHandler(
         config.LOG_FILE,
-        maxBytes=10 * 1024 * 1024,
-        backupCount=5,
+        when="midnight",
+        interval=1,
+        backupCount=14,  # Keep two weeks of daily logs
         encoding="utf-8",
     )
     file_handler.setFormatter(log_formatter)
@@ -64,10 +66,16 @@ def _configure_logging() -> None:
     console_handler.setFormatter(log_formatter)
 
     logging.basicConfig(
-        level=logging.INFO,
+        level=logging.DEBUG,
         handlers=[file_handler, console_handler],
         force=True,
     )
+    
+    # Silence extremely noisy third-party network libraries in DEBUG mode
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
+    logging.getLogger("websockets").setLevel(logging.WARNING)
+    logging.getLogger("fyers_apiv3").setLevel(logging.WARNING)
+    logging.getLogger("asyncio").setLevel(logging.INFO)
     
 
 def _install_signal_handlers(loop: asyncio.AbstractEventLoop, shutdown_event: asyncio.Event):
