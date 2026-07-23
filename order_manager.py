@@ -697,11 +697,23 @@ class OrderManager:
                 )
 
                 try:
+                    # Calculate safe limit price (2% buffer) to satisfy Fyers type=3 requirements
+                    # BUY SL (covering a short): limit price > stop price
+                    # SELL SL (covering a long): limit price < stop price
+                    buffer_pct = 0.02
+                    if sl_side == 'BUY':
+                        limit_price = stop_price * (1 + buffer_pct)
+                    else:
+                        limit_price = stop_price * (1 - buffer_pct)
+                    
+                    limit_price = round(round(limit_price / tick) * tick, 2)
+
                     sl_id = await self.broker.place_order(
                         symbol=symbol,
                         side=sl_side,
                         qty=qty,
-                        order_type='SL_MARKET',
+                        order_type='SL_LIMIT',
+                        price=limit_price,
                         trigger_price=stop_price
                     )
                 except Exception as sl_exc:

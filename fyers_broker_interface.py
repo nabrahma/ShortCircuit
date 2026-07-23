@@ -1617,6 +1617,10 @@ class FyersBrokerInterface:
             elif order_type == 'SL_MARKET':
                 data['type'] = 4  # Fyers type 4 = SL-Market (trigger only, guaranteed fill)
                 data['stopPrice'] = trigger_price
+            elif order_type == 'SL_LIMIT':
+                data['type'] = 3  # Fyers type 3 = SL-Limit
+                data['stopPrice'] = trigger_price
+                data['limitPrice'] = price
 
             loop = asyncio.get_event_loop()
             async def _place():
