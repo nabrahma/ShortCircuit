@@ -117,9 +117,9 @@ class BackToVWAPShort:
         curr_close = df.iloc[-1]['close']
         # Allow price below VAH ONLY if we have a confirmed profile rejection
         # (Look Above & Fail / value-back-in).
-        if curr_close <= vah and not profile_rejection:
+        if curr_close < vah and not profile_rejection:
             logger.debug(
-                "  [C2] %s REJECT: price %.2f ≤ VAH %.2f (no profile rejection)",
+                "  [C2] %s REJECT: price %.2f < VAH %.2f (no profile rejection)",
                 symbol, curr_close, vah,
             )
             return None
@@ -138,7 +138,7 @@ class BackToVWAPShort:
         rsi_div = F.compute_rsi_divergence(
             df, window=getattr(cfg, 'STRATEGY_RSI_DIVERGENCE_WINDOW', 25)
         )
-        price_lower_high = F.is_narrowing_highs(df, n=3)
+        price_lower_high = F.is_narrowing_highs(df, n=2)
 
         if not rsi_div and not price_lower_high:
             logger.debug(

@@ -62,8 +62,8 @@ STRATEGY_VWAP_SD_HIGH: float = 5.0        # HIGH confidence tier threshold
 STRATEGY_VWAP_SD_EXTREME: float = 6.0     # EXTREME confidence tier threshold
 STRATEGY_REQUIRE_FAILED_AUCTION: bool = True  # Hard gate: require auction failure behavior
 STRATEGY_VOL_FADE_MAX_RATIO: float = 0.65    # Volume fade ratio (< this = fading) — absolute, no relaxation
-STRATEGY_VOL_FADE_LOOKBACK: int = 15         # Candles to look back for volume baseline
-STRATEGY_RSI_DIVERGENCE_WINDOW: int = 25      # Window for swing-based RSI divergence check
+STRATEGY_VOL_FADE_LOOKBACK: int = 3          # Candles to look back for volume baseline (shortened from 15)
+STRATEGY_RSI_DIVERGENCE_WINDOW: int = 10      # Window for swing-based RSI divergence check (shortened from 25)
 STRATEGY_MOMENTUM_DECAY_RATIO: float = 0.85  # Fast slope must be < slow * this ratio
 
 # ============================================================================
