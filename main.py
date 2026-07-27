@@ -259,19 +259,22 @@ async def _initialize_runtime() -> RuntimeContext:
             )
             
         # 3a. Pre-Filter Stage: Drop illiquid penny stocks using REST data
-        min_vol = getattr(config, 'SCANNER_MIN_VOLUME', 333333)
+        # DO NOT filter by volume at startup! Volume is 0 at 9:15 AM.
+        # Filtering by volume here permanently removes stocks from the WebSocket cache for the entire day.
         min_ltp = getattr(config, 'SCANNER_MIN_LTP', 40.0)
         filtered_symbols = []
         
         snapshot = broker.get_quote_cache_snapshot()
         for sym in scanner_symbols:
             quote = snapshot.get(sym)
-            if quote and quote.get('volume', 0) >= min_vol and quote.get('ltp', 0) >= min_ltp:
+            # Only filter by price to remove penny stocks. Volume will be checked during live scans.
+            if quote and quote.get('ltp', 0) >= min_ltp:
                 filtered_symbols.append(sym)
                 
         logger.info(
-            "[Pre-Filter] Dropped %d illiquid symbols. Passing %d symbols to WebSocket.",
+            "[Pre-Filter] Dropped %d penny stocks (price < %s). Passing %d symbols to WebSocket.",
             len(scanner_symbols) - len(filtered_symbols),
+            min_ltp,
             len(filtered_symbols)
         )
 
