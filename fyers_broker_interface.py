@@ -1615,10 +1615,11 @@ class FyersBrokerInterface:
             if order_type == 'LIMIT':
                 data['limitPrice'] = price
             elif order_type == 'SL_MARKET':
-                data['type'] = 4  # Fyers type 4 = SL-Market (trigger only, guaranteed fill)
+                data['type'] = 3  # Fyers type 3 = SL-Market (trigger only, guaranteed fill)
                 data['stopPrice'] = trigger_price
+                data['limitPrice'] = 0
             elif order_type == 'SL_LIMIT':
-                data['type'] = 3  # Fyers type 3 = SL-Limit
+                data['type'] = 4  # Fyers type 4 = SL-Limit
                 data['stopPrice'] = trigger_price
                 data['limitPrice'] = price
 
