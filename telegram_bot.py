@@ -72,15 +72,70 @@ class ShortCircuitBot:
         self._scanning_paused: bool = False
         self._editable_signal_flow_override: Optional[bool] = None
         self._signal_msg_index: dict = {}
-        self._signal_msg_index_lock = asyncio.Lock()
+        # threading.Lock, not asyncio.Lock: this guards a plain dict touched from
+        # both the event loop and synchronous done-callbacks, and is never held
+        # across an await.
+        self._signal_msg_index_lock = threading.Lock()
         self._scan_metadata: dict = {}
-        
-        logger.info(f"🤖 Telegram Bot initialized | Auto Mode: ON")
+
+        # Injected by main.py after construction. Declared here so a command
+        # arriving before wiring completes degrades gracefully instead of raising
+        # AttributeError inside a handler.
+        self.signal_manager = None
+        self.market_session = None
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+
+        logger.info(
+            "🤖 Telegram Bot initialized | Auto Mode: %s",
+            "ON" if self._auto_mode else "OFF",
+        )
     # ════════════════════════════════════════════════════════════
     # PUBLIC API — used by other modules
     # ════════════════════════════════════════════════════════════
     def is_auto_mode(self) -> bool:
+        """
+        Single source of truth for the auto-trade gate.
+
+        Also resolves a QUEUED activation. `/auto on` before 09:30 IST only sets
+        `_auto_on_queued`, and the sole consumer of that flag was a one-shot check
+        at the top of main._trading_loop. The loop starts at ~09:15, so any
+        `/auto on` issued after that set a flag nobody ever read again: the user
+        was told "activates at 09:30" and it silently never did.
+
+        Resolving it here means it activates the moment any consumer asks —
+        focus_engine, order_manager or /status — regardless of loop timing.
+        """
+        if self._auto_on_queued and not self._auto_mode:
+            now_ist = datetime.now(ZoneInfo("Asia/Kolkata"))
+            if (now_ist.hour, now_ist.minute) >= (9, 30):
+                self._auto_mode = True
+                self._auto_on_queued = False
+                logger.critical(
+                    "🟢 [AUTO] Queued Auto ON activated at %s IST",
+                    now_ist.strftime("%H:%M:%S"),
+                )
+                self._notify_threadsafe(
+                    "✅ *Auto Mode activated* — 09:30 reached, scanning live"
+                )
         return self._auto_mode
+
+    def _notify_threadsafe(self, message: str) -> None:
+        """
+        Fire-and-forget alert callable from any thread.
+
+        is_auto_mode() runs on the focus-engine thread as well as the event loop,
+        so a bare create_task() here would raise "no running event loop".
+        """
+        loop = getattr(self, '_loop', None)
+        try:
+            if loop is not None and loop.is_running():
+                asyncio.run_coroutine_threadsafe(self.send_alert(message), loop)
+                return
+            asyncio.get_running_loop().create_task(self.send_alert(message))
+        except RuntimeError:
+            logger.info("[TELEGRAM] Alert skipped (no loop): %s", message[:60])
+        except Exception as e:
+            logger.warning(f"[TELEGRAM] threadsafe notify failed: {e}")
     def is_editable_signal_flow_enabled(self) -> bool:
         """Runtime override takes precedence over config default."""
         if self._editable_signal_flow_override is not None:
@@ -88,8 +143,20 @@ class ShortCircuitBot:
         return bool(self.config.get('EDITABLE_SIGNAL_FLOW_ENABLED', False))
     async def send_message(self, text: str, parse_mode='HTML',
                            reply_markup=None) -> Optional[Message]:
-        """Send plain message to authorized chat."""
-        if not self.app: return None
+        """
+        Send a message to the authorized chat, degrading rather than dropping.
+
+        Telegram rejects the ENTIRE message if the markup does not parse — an
+        unescaped '<' in an error string, or a stray '*' in a broker message, is
+        enough. For a trading bot that silently loses the alert saying a position
+        is unprotected, which is exactly when you need it most.
+
+        So: try the requested markup, and on a parse failure resend as plain text.
+        A message with visible asterisks always beats no message.
+        """
+        if not self.app:
+            return None
+
         try:
             return await self.app.bot.send_message(
                 chat_id=self.chat_id,
@@ -98,6 +165,26 @@ class ShortCircuitBot:
                 reply_markup=reply_markup
             )
         except Exception as e:
+            err = str(e).lower()
+            parse_failure = (
+                "can't parse" in err or "cant parse" in err
+                or "entity" in err or "unsupported start tag" in err
+            )
+            if parse_mode is not None and parse_failure:
+                logger.warning(
+                    "Telegram %s parse failed (%s) — resending as plain text.",
+                    parse_mode, str(e)[:120],
+                )
+                try:
+                    return await self.app.bot.send_message(
+                        chat_id=self.chat_id,
+                        text=text,
+                        parse_mode=None,
+                        reply_markup=reply_markup
+                    )
+                except Exception as e2:
+                    logger.error(f"Telegram plain-text fallback also failed: {e2}")
+                    return None
             logger.error(f"Telegram send_message failed: {e}")
             return None
     async def edit_message(self, message_id: int, text: str,
@@ -128,25 +215,41 @@ class ShortCircuitBot:
         Non-blocking discovery queue.
         Returns correlation_id immediately without blocking scanner thread.
         """
+        # NOTE: `self._signal_msg_index_lock` is an asyncio.Lock, which implements
+        # only __aenter__/__aexit__. Both statements below used a plain `with`,
+        # which raises AttributeError on entry — and the second sat inside a
+        # SYNCHRONOUS done-callback, where `async with` is not even possible.
+        # The path survived only because EDITABLE_SIGNAL_FLOW_ENABLED is absent
+        # from config.py and defaults to False, so none of it has ever run.
+        #
+        # The index is a plain dict guarded for short critical sections, so a
+        # threading.Lock is the correct primitive: usable from both the loop and
+        # a sync callback, and never held across an await.
         correlation_id = str(uuid.uuid4())
         with self._signal_msg_index_lock:
             self._signal_msg_index[correlation_id] = SignalMsgState(created_at=time.time())
+
         if not self.app:
             logger.warning("[EDITABLE] Bot not ready for discovery queue")
             return correlation_id
+
         task = asyncio.create_task(self.send_signal_discovery(signal))
+
         def _on_discovery_done(done_task):
-            message_id = None
             try:
                 message_id = done_task.result()
+            except asyncio.CancelledError:
+                return
             except Exception as e:
                 logger.error(f"[EDITABLE] Discovery send failed: {e}")
                 return
             if message_id is None:
                 return
             with self._signal_msg_index_lock:
-                if correlation_id in self._signal_msg_index:
-                    self._signal_msg_index[correlation_id].message_id = message_id
+                state = self._signal_msg_index.get(correlation_id)
+                if state is not None:
+                    state.message_id = message_id
+
         task.add_done_callback(_on_discovery_done)
         return correlation_id
     async def queue_signal_validation_update(
@@ -182,7 +285,7 @@ class ShortCircuitBot:
             f"Symbol: <code>{_he(symbol)}</code>\n"
             f"Side: {side}\n"
             f"LTP: ₹{ltp:.2f}\n"
-            f"Trigger: < ₹{trigger:.2f}\n"
+            f"Trigger: &lt; ₹{trigger:.2f}\n"
             f"Est. Margin: {margin_str}\n\n"
             f"<i>Waiting for Gate 12 validation...</i>"
         )
@@ -195,27 +298,33 @@ class ShortCircuitBot:
         side = signal.get('side', 'SHORT')
         entry = signal.get('entry_price', 0)
         stop = signal.get('stop_loss', 0)
-        target = signal.get('target', 0)
-        
+
         # Calculate pre-trade margin utilization
         margin_str = "N/A"
         qty = signal.get('quantity', 0)
         if qty > 0 and entry > 0:
-            margin_str = f"₹{(qty * entry) / 5:.0f} (Qty: {qty})"
+            # Use the configured leverage, not a hardcoded 5. Entries fall back to
+            # 4x on a margin rejection, which made this figure silently wrong.
+            lev = getattr(self.capital_manager, 'leverage', None) or \
+                getattr(config, 'INTRADAY_LEVERAGE', 5.0)
+            margin_str = f"₹{(qty * entry) / lev:.0f} (Qty: {qty})"
         elif self.capital_manager and ltp > 0:
             c_qty, _, margin_req = self.capital_manager.compute_qty(symbol, ltp)
             margin_str = f"₹{margin_req:.0f} (Qty: {c_qty})"
 
         if outcome == 'VALIDATED':
-            mode = "AUTO EXECUTION" if self._auto_mode else "ALERT ONLY (AUTO OFF)"
+            mode = "AUTO EXECUTION" if self.is_auto_mode() else "ALERT ONLY (AUTO OFF)"
+            # No Target line: take-profit was removed. `signal['target']` was never
+            # populated anyway, so this always rendered "Target: ₹0.00".
             return (
                 f"✅ <b>GATE 12 VALIDATED</b>\n\n"
                 f"Symbol: <code>{_he(symbol)}</code>\n"
                 f"Side: {side}\n"
                 f"LTP: ₹{ltp:.2f}\n"
-                f"Trigger: < ₹{trigger:.2f}\n"
+                f"Trigger: &lt; ₹{trigger:.2f}\n"
                 f"Est. Margin: {margin_str}\n"
-                f"Entry: ₹{entry:.2f} | SL: ₹{stop:.2f} | Target: ₹{target:.2f}\n"
+                f"Entry: ₹{entry:.2f} | SL: ₹{stop:.2f}\n"
+                f"Exit: SL or 15:10 square-off (no TP)\n"
                 f"Action: {mode}\n"
                 f"Reason: <code>{_he(reason)}</code>"
             )
@@ -225,7 +334,7 @@ class ShortCircuitBot:
                 f"⌛ <b>GATE 12 TIMEOUT</b>\n\n"
                 f"Symbol: <code>{_he(symbol)}</code>\n"
                 f"LTP: ₹{ltp:.2f}\n"
-                f"Trigger: < ₹{trigger:.2f}\n"
+                f"Trigger: &lt; ₹{trigger:.2f}\n"
                 f"Reason: <code>{_he(reason)}</code>\n"
                 f"Timeout: {timeout_min} minute(s)"
             )
@@ -233,7 +342,7 @@ class ShortCircuitBot:
             f"⛔ <b>GATE 12 REJECTED</b>\n\n"
             f"Symbol: <code>{_he(symbol)}</code>\n"
             f"LTP: ₹{ltp:.2f}\n"
-            f"Trigger: < ₹{trigger:.2f}\n"
+            f"Trigger: &lt; ₹{trigger:.2f}\n"
             f"Reason: <code>{_he(reason)}</code>"
         )
     async def _handle_signal_validation_update(
@@ -244,7 +353,7 @@ class ShortCircuitBot:
         details: dict | None = None
     ) -> None:
         message_id = None
-        async with self._signal_msg_index_lock:
+        with self._signal_msg_index_lock:
             state = self._signal_msg_index.get(correlation_id)
             if state:
                 message_id = state.message_id
@@ -266,7 +375,7 @@ class ShortCircuitBot:
             except Exception:
                 pass
         finally:
-            async with self._signal_msg_index_lock:
+            with self._signal_msg_index_lock:
                 self._signal_msg_index.pop(correlation_id, None)
     async def _cleanup_stale_signal_entries(self, now: float | None = None) -> int:
         """
@@ -274,7 +383,7 @@ class ShortCircuitBot:
         """
         now_ts = now if now is not None else time.time()
         removed = 0
-        async with self._signal_msg_index_lock:
+        with self._signal_msg_index_lock:
             stale_keys = [
                 key for key, state in self._signal_msg_index.items()
                 if now_ts - state.created_at > 300
@@ -381,7 +490,6 @@ class ShortCircuitBot:
             else:
                 lines.append(f"Last Scan: {scan_time.strftime('%H:%M:%S')} ({scan_count} candidates)")
         return '\n'.join(lines) + '\n' if lines else ""
-        return '\n'.join(lines) + '\n' if lines else ""
     # ════════════════════════════════════════════════════════════
     # COMMAND HANDLERS — Phase 44.4: Rich structured responses
     # ════════════════════════════════════════════════════════════
@@ -390,8 +498,11 @@ class ShortCircuitBot:
         # Removed local import config
         if not self._is_authorized(update):
             return
-        mode_str = "🟢 AUTO" if self._auto_mode else "🔴 ALERT ONLY"
-        bp = getattr(self.capital_manager, 'total_buying_power', 0) if self.capital_manager else 0
+        mode_str = "🟢 AUTO" if self.is_auto_mode() else "🔴 ALERT ONLY"
+        # CapitalManager exposes `buying_power` (a property); there is no
+        # `total_buying_power` attribute, so the old getattr always fell through
+        # to its default and /start reported ₹0 no matter the real balance.
+        bp = getattr(self.capital_manager, 'buying_power', 0.0) if self.capital_manager else 0.0
         await update.message.reply_text(
             f"⚡ <b>ShortCircuit</b> is running.\n\n"
             f"Mode: <b>{_he(mode_str)}</b>\n"
@@ -406,7 +517,7 @@ class ShortCircuitBot:
         if not self._is_authorized(update):
             await update.message.reply_text("⛔ Unauthorized.")
             return
-        if self._auto_mode:
+        if self.is_auto_mode():
             await update.message.reply_text("ℹ️ Auto mode is already *ON*.", parse_mode='Markdown')
             return
 
@@ -454,8 +565,8 @@ class ShortCircuitBot:
             await update.message.reply_text(
                 "🟢 *Mode: LONG (BUY)*\n\n"
                 "Bot will now enter BUY positions.\n"
-                "TP below → TP above entry\n"
-                "SL above → SL below entry\n\n"
+                "SL flips below entry.\n"
+                "Exit remains SL or 15:10 square-off.\n\n"
                 "_All other logic unchanged._",
                 parse_mode='Markdown'
             )
@@ -552,7 +663,7 @@ class ShortCircuitBot:
                     open_positions = len(self.order_manager.active_positions)
                     unrealised = sum(p.get('unrealised_pnl', 0.0) for p in self.order_manager.active_positions.values())
 
-        mode_str = "🟢 AUTO" if self._auto_mode else "🔴 ALERT ONLY"
+        mode_str = "🟢 AUTO" if self.is_auto_mode() else "🔴 ALERT ONLY"
         if self._scanning_paused:
             mode_str += " (⏸️ PAUSED)"
         dir_str = "🟢 LONG (BUY)" if config.TRADE_DIRECTION == 'LONG' else "🔴 SHORT (SELL)"
@@ -755,10 +866,25 @@ class ShortCircuitBot:
                 snap = ws_cache.cache_health_snapshot()
 
         fresh = snap.get("fresh", 0)
-        total = snap.get("total", 2426)
+        total = snap.get("total", 0)
         fresh_pct = round(fresh / total * 100, 1) if total else 0.0
 
-        if self._auto_mode:
+        # Read the ACTUAL socket state. This block used to print
+        # "WS Data: ✅ | WS Order: ✅" unconditionally, so the first message of
+        # every session claimed both sockets were healthy even when they were
+        # down — precisely the morning you would want to know otherwise.
+        data_ok  = bool(getattr(ws_cache, 'data_ws_connected', False))
+        order_ok = bool(getattr(ws_cache, 'order_ws_connected', False))
+        ws_line = (
+            f"   WS Data   : {'✅' if data_ok else '❌'} | "
+            f"WS Order: {'✅' if order_ok else '❌'}"
+        )
+        cache_line = (
+            f"   WS Cache  : {fresh}/{total} live ({fresh_pct}%)"
+            if total else "   WS Cache  : ⚠️ not primed"
+        )
+
+        if self.is_auto_mode():
             auto_str = "ON ✅"
         elif self._auto_on_queued:
             auto_str = "OFF (queued) ⏳"
@@ -778,8 +904,8 @@ class ShortCircuitBot:
             f"📊 *NIFTY50 Morning Range*\n"
             f"{range_line}\n\n"
             f"🔌 *System Status*\n"
-            f"   WS Data   : ✅ | WS Order: ✅\n"
-            f"   WS Cache  : {fresh}/{total} live ({fresh_pct}%)\n"
+            f"{ws_line}\n"
+            f"{cache_line}\n"
             f"   Candle API: {'✅ Verified' if startup_validation_passed else '❌ Failed'}\n"
             f"   DB Pool   : ✅ Connected\n"
             f"   Auto Mode : {auto_str}\n"
@@ -857,47 +983,67 @@ class ShortCircuitBot:
         Bundles multiple fast alerts into a single message to avoid Telegram API lag.
         """
         logger.info("Telegram Alert Throttler started")
-        buffer = []
-        last_send_time = 0
-        
+        last_send_time = 0.0
+
         while not self._shutdown_event or not self._shutdown_event.is_set():
+            buffer = []
             try:
                 # Wait for first message
-                msg = await self._alert_queue.get()
-                buffer.append(msg)
-                
+                buffer.append(await self._alert_queue.get())
+
                 # Check for burst (up to 0.5s wait for next if we have space)
                 try:
                     while len(buffer) < 5:
-                        msg = await asyncio.wait_for(self._alert_queue.get(), timeout=0.5)
-                        buffer.append(msg)
+                        buffer.append(
+                            await asyncio.wait_for(self._alert_queue.get(), timeout=0.5)
+                        )
                 except asyncio.TimeoutError:
                     pass
 
                 # Rate limiting (HZ)
-                hz = getattr(config, 'P81_TELEGRAM_RATE_LIMIT_HZ', 2)
+                hz = getattr(config, 'P81_TELEGRAM_RATE_LIMIT_HZ', 2) or 2
                 interval = 1.0 / hz
                 elapsed = time.time() - last_send_time
                 if elapsed < interval:
                     await asyncio.sleep(interval - elapsed)
 
-                # Send bundled
+                # Alerts across the codebase are composed in Markdown
+                # (*BOLD*, `code`). This previously sent them with send_message's
+                # HTML default, so asterisks and backticks rendered literally and
+                # any '<' or '&' in a broker error made Telegram reject the whole
+                # bundle — losing up to 5 alerts at once.
                 final_text = "\n\n".join(buffer)
                 if len(final_text) > 4000:
                     final_text = final_text[:3900] + "\n\n...(truncated)..."
-                
-                await self.send_message(final_text)
+
+                sent = await self.send_message(final_text, parse_mode='Markdown')
+
+                if sent is None and len(buffer) > 1:
+                    # Bundling makes one bad message poison the batch. Retry the
+                    # pieces individually so the good ones still arrive.
+                    logger.warning(
+                        "[TELEGRAM] Bundle of %d failed — resending individually.",
+                        len(buffer),
+                    )
+                    for item in buffer:
+                        await self.send_message(item, parse_mode='Markdown')
+
                 last_send_time = time.time()
-                
-                for _ in range(len(buffer)):
-                    self._alert_queue.task_done()
-                buffer = []
-                
+
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.error(f"Throttler loop error: {e}")
                 await asyncio.sleep(1)
+            finally:
+                # ALWAYS drain, even if the send raised. The previous version
+                # cleared `buffer` only on the success path, so a failed send left
+                # the messages in place and every later iteration re-sent them.
+                for _ in range(len(buffer)):
+                    try:
+                        self._alert_queue.task_done()
+                    except ValueError:
+                        break
     # ════════════════════════════════════════════════════════════
     # AUTHORIZATION — Security Gate
     # ════════════════════════════════════════════════════════════
