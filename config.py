@@ -22,7 +22,11 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 # 2. CORE TRADING CONFIG (CRITICAL)
 # ============================================================================
 # Session Safety
-AUTO_MODE = True            # Controls if the bot auto-executes trades (can be toggled via Telegram)
+# Armed on boot BY DESIGN — do not change to False. Telegram is unreliable on this
+# connection, so requiring a manual /auto on each morning meant missed sessions.
+# Trading is still gated by TRADING_ENABLED (below), which MarketSession only turns
+# on at 09:30 IST. Disarm at runtime with /auto off; nothing disarms it automatically.
+AUTO_MODE = True            # Controls if the bot auto-executes trades (toggle via Telegram)
 MAX_SESSION_LOSS_INR = 500  # Max cumulative intra-day loss before bot halts (Phase 69)
 DAILY_TARGET_INR = -1       # Set to -1 for Dynamic 5% Mode (Automatic calculation)
                             # Or set a fixed amount like ₹75 to override.

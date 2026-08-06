@@ -44,9 +44,16 @@ class ShortCircuitBot:
     - Live status, P&L, position, and broker-health commands
     - All user commands (/status, /why, /pnl, etc.)
     Auto Mode State:
-    - ALWAYS False on boot — no exceptions
-    - Only /auto on command changes it to True
-    - Checked by trade_manager, focus_engine, order_manager
+    - Boots from config.AUTO_MODE, which is intentionally True. The bot is armed
+      on startup by design; do NOT "restore" a False default here. Telegram was
+      unreliable on this connection (ISP blocking), so requiring a manual /auto on
+      each morning meant missed sessions.
+    - Actual trading is still gated by config.TRADING_ENABLED, which MarketSession
+      only sets True at 09:30 IST. Armed at boot != trading at boot.
+    - The ONLY thing that disarms it is an explicit /auto off. Nothing turns it off
+      automatically — a max-session-loss halt blocks signals via SignalManager
+      without touching this flag.
+    - Checked by trade_manager, focus_engine, order_manager via is_auto_mode().
     """
     def __init__(self, config_settings: dict, order_manager, capital_manager,
                  focus_engine=None):
