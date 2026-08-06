@@ -1,11 +1,29 @@
 import pandas as pd
 import logging
+from concurrent.futures import (
+    ThreadPoolExecutor,
+    as_completed,
+    TimeoutError as FutureTimeout,
+)
 from fyers_connect import FyersConnect
 import time
 import config
 from rest_limiter import rest_limiter
 
 logger = logging.getLogger(__name__)
+
+# Long-lived pools. Deliberately NOT used as context managers: ThreadPoolExecutor
+# .__exit__ calls shutdown(wait=True), which blocks on exactly the hung task the
+# surrounding timeout was written to escape. See the 2026-07-29 session, where 41
+# slow /history calls each stalled a scan ~80s past its own 8s cap and produced 41
+# blind scan cycles.
+_QUALITY_EXECUTOR = ThreadPoolExecutor(
+    max_workers=max(4, getattr(config, 'SCANNER_PARALLEL_WORKERS', 3)),
+    thread_name_prefix="scan-quality",
+)
+_HISTORY_EXECUTOR = ThreadPoolExecutor(
+    max_workers=6, thread_name_prefix="scan-history"
+)
 
 class FyersScanner:
     def __init__(self, fyers, broker=None):
@@ -223,7 +241,6 @@ class FyersScanner:
                 # Phase 98.3: Add timeout protection — slow 15m fetch was causing 90s scan timeout
                 df_15m = None
                 try:
-                    from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
                     today_str     = today.strftime("%Y-%m-%d")
                     five_back_str = five_back.strftime("%Y-%m-%d")
                     data_15m = {
@@ -231,15 +248,26 @@ class FyersScanner:
                         "range_from": five_back_str,
                         "range_to": today_str, "cont_flag": "1"
                     }
-                    with ThreadPoolExecutor(max_workers=1) as _ex:
-                        _f = _ex.submit(self.fyers.history, data_15m)
-                        try:
-                            resp_15m = _f.result(timeout=8)  # Hard 8s cap on 15m fetch
-                            if resp_15m.get('s') == 'ok' and resp_15m.get('candles'):
-                                df_15m = pd.DataFrame(resp_15m['candles'], columns=cols)
-                                df_15m['datetime'] = pd.to_datetime(df_15m['epoch'], unit='s').dt.tz_localize('UTC').dt.tz_convert('Asia/Kolkata')
-                        except FutureTimeout:
-                            logger.debug(f"15m fetch timed out for {symbol} — skipping HTF (G9 will fail-open)")
+                    # Submitted to a SHARED, long-lived pool.
+                    #
+                    # This used to be `with ThreadPoolExecutor(...) as _ex:`. On exit
+                    # the context manager calls shutdown(wait=True), so after the 8s
+                    # cap "expired" the block still waited for the hung REST call to
+                    # return. On 2026-07-29 that turned 41 slow /history calls into 41
+                    # scans that blew the 90s ceiling and returned zero candidates —
+                    # a perfect 1:1 correlation in the logs. Abandoning the future is
+                    # the whole point of a timeout.
+                    rest_limiter.acquire()
+                    _f = _HISTORY_EXECUTOR.submit(self.fyers.history, data_15m)
+                    try:
+                        resp_15m = _f.result(timeout=8)
+                        if resp_15m and resp_15m.get('s') == 'ok' and resp_15m.get('candles'):
+                            df_15m = pd.DataFrame(resp_15m['candles'], columns=cols)
+                            df_15m['datetime'] = pd.to_datetime(df_15m['epoch'], unit='s').dt.tz_localize('UTC').dt.tz_convert('Asia/Kolkata')
+                    except FutureTimeout:
+                        # Abandon it; the worker is bounded by the HTTP read timeout.
+                        _f.cancel()
+                        logger.debug(f"15m fetch timed out for {symbol} — skipping HTF (G9 fail-closed)")
                 except Exception as e:
                     logger.warning(f"Failed to fetch 15m candles for {symbol}: {e}")
                 
@@ -277,8 +305,7 @@ class FyersScanner:
             if hasattr(self, 'broker') and getattr(self.broker, '_degraded_scan_count', 0) > 0:
                 self.broker.reset_degraded_scan_count()
 
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-        # No local import needed anymore
+        # Executors and concurrent.futures helpers are module-level now.
 
         if not self.symbols:
             self.symbols = self.fetch_nse_symbols()
@@ -517,15 +544,25 @@ class FyersScanner:
             """Fetch history + quality for a single symbol."""
             return self.check_chart_quality(symbol)
 
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {executor.submit(fetch_quality, c['symbol']): c['symbol'] for c in pre_candidates}
-            logger.debug(f"Submitted {len(futures)} quality check tasks to ThreadPool.")
+        # Shared pool, and NOT a context manager — see the 15m-fetch note above.
+        # `with` here would shutdown(wait=True) on exit and block on every
+        # still-running quality check, re-introducing the same unbounded stall at
+        # the outer level.
+        futures = {
+            _QUALITY_EXECUTOR.submit(fetch_quality, c['symbol']): c['symbol']
+            for c in pre_candidates
+        }
+        logger.debug(f"Submitted {len(futures)} quality check tasks to ThreadPool.")
 
-            for future in as_completed(futures):
+        # Hard ceiling for the whole batch, comfortably inside main.py's 90s
+        # scan timeout so a slow batch degrades to "fewer candidates" instead of
+        # "no candidates at all".
+        try:
+            completed = as_completed(futures, timeout=45)
+            for future in completed:
                 symbol = futures[future]
                 try:
-                    logger.debug(f"Waiting for quality check result: {symbol}...")
-                    is_good, df, df_15m = future.result(timeout=15)  # Phase 98.3: raised from 10s to give 8s 15m-fetch room
+                    is_good, df, df_15m = future.result(timeout=1)
                     if is_good:
                         c = candidates_map[symbol]
                         c['history_df'] = df
@@ -543,11 +580,22 @@ class FyersScanner:
                         filtered_candidates.append(c)
                 except Exception as e:
                     logger.error(f"Error in parallel quality check for {symbol}: {e}")
+        except FutureTimeout:
+            done = len(filtered_candidates)
+            stragglers = [s for f, s in futures.items() if not f.done()]
+            for f in futures:
+                if not f.done():
+                    f.cancel()
+            logger.warning(
+                "Quality-check batch hit its 45s ceiling — proceeding with %d/%d "
+                "candidates. Still pending: %s",
+                done, len(futures), ", ".join(stragglers[:5]) or "none",
+            )
 
         # Sort by Change % Descending
         filtered_candidates.sort(key=lambda x: x['change'], reverse=True)
         top_gainers = filtered_candidates[:20]
-        
+
         logger.info(f"Scan Complete. Found {len(filtered_candidates)} candidates.")
 
         return top_gainers

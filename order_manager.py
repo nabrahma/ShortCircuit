@@ -16,14 +16,26 @@ import uuid
 from datetime import datetime, timedelta, UTC
 from typing import Dict, Optional, Any
 import config
-from fyers_broker_interface import FyersBrokerInterface
+from fyers_broker_interface import (
+    FyersBrokerInterface,
+    FyersOrderStatus,
+    OrderPlacementTimeout,
+)
 from ml_logger import get_ml_logger
 
 
 logger = logging.getLogger(__name__)
 
-FYERS_ORDER_STATUS_TRADED  = 2
-FYERS_ORDER_STATUS_PENDING = 6
+# Canonical Fyers status codes live in fyers_broker_interface. These aliases are
+# kept so existing comparisons keep reading naturally.
+FYERS_ORDER_STATUS_TRADED  = int(FyersOrderStatus.FILLED)    # 2
+FYERS_ORDER_STATUS_PENDING = int(FyersOrderStatus.PENDING)   # 6
+FYERS_ORDER_STATUS_TRANSIT = int(FyersOrderStatus.TRANSIT)   # 4
+
+# An order in TRANSIT or PENDING is still working at the exchange. Treating either
+# as "not live" is how a resting stop-loss gets orphaned.
+FYERS_STATUS_WORKING = (FYERS_ORDER_STATUS_PENDING, FYERS_ORDER_STATUS_TRANSIT)
+
 EXEC_COOLDOWN_SECONDS      = 900   # 15 minutes after any failed entry
 
 
@@ -124,47 +136,185 @@ class OrderManager:
         return round(rounded, 2)
 
     def compute_stop_loss(self, ltp: float, signal: dict) -> float:
-        """Phase 51: ATR-based SL calculation. Phase 94: Direction-aware."""
+        """
+        ATR-based stop, anchored to the setup but VALIDATED against the real fill.
+
+        The stop level comes from the signal's structural level (setup high/low),
+        which is captured at signal time. The actual fill can drift past that level
+        — and when it does, the stop lands on the WRONG SIDE of the entry and is
+        marketable the instant it is placed.
+
+        That is not hypothetical. 2026-08-06, NSE:STOVEKRAFT-EQ:
+            signal ₹813.00 → filled SHORT @ ₹821.30 (+1.02% slippage)
+            stop computed from signal_high  = ₹816.00   ← BELOW the short entry
+            BUY stop @816 with price at ~821 was immediately marketable
+            → stopped out 130ms after entry at ₹821.92, realised −₹2.50
+
+        A short's stop must sit ABOVE its entry; a long's BELOW. This enforces that
+        invariant against the price we actually got, not the price we hoped for.
+        """
         atr    = signal.get('atr', 0)
         tick   = signal.get('tick_size', 0.05)
         # PRD: max(atr * 0.5, 3 * tick_size) — using config constants
         buffer = max(atr * getattr(config, 'SL_ATR_MULTIPLIER', 0.5),
                      tick * getattr(config, 'SL_MIN_TICK_BUFFER', 3))
-        
+
+        # Minimum separation between entry and stop, so a corrected stop is not
+        # merely "on the right side" but far enough to survive normal spread.
+        min_gap = max(buffer, tick * getattr(config, 'SL_MIN_TICK_BUFFER', 3))
+
         direction = config.TRADE_DIRECTION
         if direction == 'LONG':
-            # For LONG trades, SL is below entry/low
             signal_low = signal.get('signal_low', ltp * 0.99)
             sl_price = signal_low - buffer
+            if ltp > 0 and sl_price >= ltp - (min_gap / 2):
+                corrected = ltp - min_gap
+                logger.critical(
+                    "🚨 [SL-GUARD] LONG stop ₹%.2f is at/above fill ₹%.2f — would fire "
+                    "instantly. Re-anchoring to fill: ₹%.2f",
+                    sl_price, ltp, corrected,
+                )
+                sl_price = corrected
             return self._round_sl_to_tick(sl_price, 'BUY', tick)
-        else:
-            # For SHORT trades, SL is above entry/high
-            signal_high = signal.get('signal_high', ltp * 1.01)
-            sl_price = signal_high + buffer
-            return self._round_sl_to_tick(sl_price, 'SELL', tick)
+
+        # SHORT
+        signal_high = signal.get('signal_high', ltp * 1.01)
+        sl_price = signal_high + buffer
+        if ltp > 0 and sl_price <= ltp + (min_gap / 2):
+            corrected = ltp + min_gap
+            logger.critical(
+                "🚨 [SL-GUARD] SHORT stop ₹%.2f is at/below fill ₹%.2f — would fire "
+                "instantly. Re-anchoring to fill: ₹%.2f",
+                sl_price, ltp, corrected,
+            )
+            sl_price = corrected
+        return self._round_sl_to_tick(sl_price, 'SELL', tick)
+
+    def validate_stop_against_fill(
+        self, symbol: str, entry_price: float, stop_price: float, side: str
+    ) -> tuple:
+        """
+        Final safety gate before a stop is sent to the broker.
+
+        Returns (ok, reason). ok=False means DO NOT place this stop — the caller
+        should exit the position at market instead, because a stop on the wrong
+        side is not protection, it is a guaranteed immediate round-trip.
+        """
+        if entry_price <= 0 or stop_price <= 0:
+            return False, f"non-positive price (entry={entry_price}, stop={stop_price})"
+
+        if side == 'SHORT' and stop_price <= entry_price:
+            return False, (
+                f"SHORT stop ₹{stop_price:.2f} is not above entry ₹{entry_price:.2f}"
+            )
+        if side == 'LONG' and stop_price >= entry_price:
+            return False, (
+                f"LONG stop ₹{stop_price:.2f} is not below entry ₹{entry_price:.2f}"
+            )
+
+        # Sanity ceiling: a stop more than 10% away is almost certainly a bad
+        # level rather than a deliberate one, and risks far more than intended.
+        risk_pct = abs(stop_price - entry_price) / entry_price * 100
+        if risk_pct > 10.0:
+            return False, f"stop is {risk_pct:.1f}% from entry — implausible risk"
+
+        return True, f"stop {risk_pct:.2f}% from entry"
 
     def compute_take_profits(self, entry: float, signal: dict) -> dict:
-        """Dynamic VWAP Target (VWAP Mean Reversion Strategy)."""
-        direction = config.TRADE_DIRECTION
-        
-        # Pull VWAP from the signal dictionary (injected by analyzer.py)
-        # If VWAP is missing for some reason, fallback to 1% fixed target.
+        """
+        Reference VWAP target — INFORMATIONAL ONLY. Not an exit trigger.
+
+        Take-profit exits were removed: the target capped every winner while
+        losers still ran to the stop. This is retained purely so the VWAP level
+        keeps landing in the ML observation log for later analysis.
+        """
         vwap = signal.get('vwap')
-        
         if vwap is not None and vwap > 0:
             tp = vwap
         else:
-            tp_pct = 0.01 
-            if direction == 'LONG':
-                tp = entry * (1 + tp_pct)
-            else:
-                tp = entry * (1 - tp_pct)
-            
-        # Round to tick size
+            direction = config.TRADE_DIRECTION
+            tp = entry * (1.01 if direction == 'LONG' else 0.99)
+
         tick = signal.get('tick_size', 0.05)
-        tp = round(round(tp / tick) * tick, 2)
-        
-        return {'tp': tp}
+        return {'tp': round(round(tp / tick) * tick, 2)}
+
+    async def _reconcile_unknown_order(
+        self, symbol: str, side: str, qty: int, lookback_seconds: int = 60
+    ) -> Optional[str]:
+        """
+        Find an order we may have placed but whose response we never received.
+
+        Called after an OrderPlacementTimeout. Scans the orderbook for a recent
+        order matching this symbol/side/qty that is either working or already
+        filled. Returns its id if found, else None.
+
+        This is the difference between "the request timed out so nothing happened"
+        (usually wrong) and "let me go look" (always correct).
+        """
+        try:
+            loop = asyncio.get_event_loop()
+            rest = getattr(self.broker, 'rest_client', None)
+            if not rest:
+                return None
+
+            orderbook = await asyncio.wait_for(
+                loop.run_in_executor(None, rest.orderbook), timeout=5.0
+            )
+            if not isinstance(orderbook, dict) or orderbook.get('s') != 'ok':
+                logger.error("[RECONCILE-ORDER] Orderbook unavailable for %s", symbol)
+                return None
+
+            want_side = 1 if side == 'BUY' else -1
+            cutoff = datetime.now() - timedelta(seconds=lookback_seconds)
+            candidates = []
+
+            for o in orderbook.get('orderBook', []):
+                if o.get('symbol') != symbol:
+                    continue
+                if o.get('side') != want_side:
+                    continue
+                if int(o.get('qty', 0) or 0) != int(qty):
+                    continue
+
+                status = FyersOrderStatus.coerce(o.get('status'))
+                if status in (FyersOrderStatus.CANCELLED, FyersOrderStatus.REJECTED):
+                    continue
+
+                # Prefer recency when the timestamp is parseable; if not, still
+                # consider it — a live matching order matters more than its clock.
+                ts = o.get('orderDateTime', '')
+                recent = True
+                for fmt in ('%d-%b-%Y %H:%M:%S', '%Y-%m-%d %H:%M:%S'):
+                    try:
+                        recent = datetime.strptime(ts, fmt) >= cutoff
+                        break
+                    except (ValueError, TypeError):
+                        continue
+                if recent:
+                    candidates.append(o)
+
+            if not candidates:
+                logger.info(
+                    "[RECONCILE-ORDER] No matching live order for %s %s x%s — "
+                    "the timed-out request most likely never reached the exchange.",
+                    symbol, side, qty,
+                )
+                return None
+
+            chosen = candidates[-1]
+            order_id = str(chosen.get('id'))
+            logger.critical(
+                "[RECONCILE-ORDER] Recovered order %s for %s (status=%s)",
+                order_id, symbol, FyersOrderStatus.coerce(chosen.get('status')),
+            )
+            return order_id
+
+        except asyncio.TimeoutError:
+            logger.error("[RECONCILE-ORDER] Orderbook fetch timed out for %s", symbol)
+            return None
+        except Exception as e:
+            logger.error("[RECONCILE-ORDER] Failed for %s: %s", symbol, e)
+            return None
 
     async def _verify_fill_via_rest(self, order_id: str) -> Optional[float]:
         """
@@ -354,7 +504,13 @@ class OrderManager:
                     return False
 
                 # ── PHASE 99: MANUAL OVERRIDE DETECTION ("Driver's Seat") ──
-                pending_orders = [o for o in orderbook.get('orderBook', []) if o.get('symbol') == symbol and o.get('status') == FYERS_ORDER_STATUS_PENDING]
+                # TRANSIT counts as live — an order en route to the exchange is a
+                # real resting order, and ignoring it hides genuine manual edits.
+                pending_orders = [
+                    o for o in orderbook.get('orderBook', [])
+                    if o.get('symbol') == symbol
+                    and o.get('status') in FYERS_STATUS_WORKING
+                ]
                 manual_override_detected = False
                 
                 for o in pending_orders:
@@ -483,7 +639,10 @@ class OrderManager:
             loop = asyncio.get_event_loop()
             orderbook = await loop.run_in_executor(None, self.broker.rest_client.orderbook)
             if orderbook and isinstance(orderbook, dict) and orderbook.get('s') == 'ok':
-                pending = [o for o in orderbook.get('orderBook', []) if o['status'] == FYERS_ORDER_STATUS_PENDING]
+                pending = [
+                    o for o in orderbook.get('orderBook', [])
+                    if o.get('status') in FYERS_STATUS_WORKING
+                ]
                 for order in pending:
                     logger.info(f"[STARTUP] Cancelling stale order {order['id']}")
                     await self.broker.cancel_order(order['id'])
@@ -547,12 +706,14 @@ class OrderManager:
 
 
 
-            if self.capital:
-                # Phase 88.1: Fetch the true leverage previously cached by the scanner
-                dynamic_leverage = 5.0
-                if hasattr(self.broker, '_leverage_cache'):
-                    dynamic_leverage = self.broker._leverage_cache.get(symbol, 5.0)
+            # Resolved before the branch: the exception handler and the 4x fallback
+            # both read this, and it was previously only bound inside the `if`,
+            # making it an UnboundLocalError whenever capital was not injected.
+            dynamic_leverage = 5.0
+            if hasattr(self.broker, '_leverage_cache'):
+                dynamic_leverage = self.broker._leverage_cache.get(symbol, 5.0)
 
+            if self.capital:
                 qty, required_capital, margin_req = self.capital.compute_qty(symbol, ltp, dynamic_leverage)
             else:
                 # Fallback if capital manager not injected
@@ -610,6 +771,34 @@ class OrderManager:
                         qty=qty,
                         order_type='MARKET'
                     )
+                except OrderPlacementTimeout as e:
+                    # The HTTP call timed out. The order may be LIVE at the exchange.
+                    # Blindly retrying here is how you end up double-sized. Reconcile
+                    # against the broker before deciding anything.
+                    logger.critical(
+                        "🚨 [ENTRY] place_order timed out for %s — order state UNKNOWN. "
+                        "Reconciling against broker before proceeding.", symbol
+                    )
+                    adopted = await self._reconcile_unknown_order(symbol, side, qty)
+                    if adopted:
+                        entry_id = adopted
+                        logger.critical(
+                            "[ENTRY] Timed-out order WAS live for %s (id=%s). Adopted.",
+                            symbol, entry_id,
+                        )
+                    else:
+                        self._set_exec_cooldown(symbol, reason='PLACE_TIMEOUT', seconds=600)
+                        if self.telegram and hasattr(self.telegram, 'send_alert'):
+                            await self.telegram.send_alert(
+                                f"🚨 *ORDER TIMEOUT — VERIFY MANUALLY*\n\n"
+                                f"Symbol: `{symbol}` {side} x{qty}\n"
+                                f"The place-order call timed out and no matching order "
+                                f"was found on the broker.\n"
+                                f"⚠️ *Check your Fyers app* — if a position exists, the "
+                                f"bot is not tracking it.\n"
+                                f"⏳ Cooldown: 10 min"
+                            )
+                        raise
                 except Exception as e:
                     err_str = str(e).lower()
                     is_margin_err = 'margin' in err_str or 'insufficient' in err_str or 'shortfall' in err_str or '-99' in err_str
@@ -643,44 +832,69 @@ class OrderManager:
                         f"Order ID: `{entry_id}`"
                     )
 
-                # ── FIX 3: Wait for Fill — 15s with REST fallback ─────────
+                # ── Wait for fill ─────────────────────────────────────────
+                # With the order-socket envelope fixed, this now resolves on the
+                # real terminal frame (typically sub-second) instead of always
+                # burning the full timeout and being rescued by REST.
                 filled = await self.broker.wait_for_fill(entry_id, timeout=15.0)
 
                 if not filled:
-                    logger.warning(f"⚠️ [ENTRY] Fill timeout for {entry_id} — attempting cancel...")
-                    cancel_result = await self.broker.cancel_order(entry_id)
+                    # VERIFY BEFORE CANCEL. The old order was cancel-first, which
+                    # fires a cancel at an order that may have just filled, then
+                    # inferred the fill from the cancel's error string. Ask the
+                    # orderbook what actually happened first.
+                    rest_fill_price = await self._verify_fill_via_rest(entry_id)
+                    if rest_fill_price:
+                        logger.warning(
+                            "[ENTRY] %s filled @ ₹%.2f but no terminal WS frame arrived. "
+                            "Proceeding with the fill.",
+                            entry_id, rest_fill_price,
+                        )
+                        filled = True
+                        ltp = rest_fill_price   # size/SL off the real fill price
+                    else:
+                        logger.warning(
+                            "⚠️ [ENTRY] %s not filled within 15s — cancelling.", entry_id
+                        )
+                        cancel_result = await self.broker.cancel_order(entry_id)
 
-                    # FIX 3b: If cancel says "not a pending order",
-                    # the fill arrived but WS event was dropped.
-                    # Verify via REST before declaring failure.
-                    cancel_err = str(cancel_result).lower() if cancel_result else ""
-                    if 'not a pending' in cancel_err or '-52' in cancel_err or cancel_result is False:
-                        rest_fill_price = await self._verify_fill_via_rest(entry_id)
-                        if rest_fill_price:
-                            logger.warning(
-                                f"[ENTRY] WS drop recovered — order {entry_id} "
-                                f"WAS filled @ ₹{rest_fill_price:.2f}. Continuing with fill."
-                            )
-                            filled = True
-                            ltp = rest_fill_price   # use actual fill price
-                        else:
-                            logger.error(
-                                f"❌ [ENTRY] Fill timeout AND REST shows not filled "
-                                f"for {symbol} order {entry_id}"
-                            )
-                    
+                        # Cancel can lose a race with a fill. Re-verify before
+                        # declaring failure, otherwise we abandon a live position.
+                        if not cancel_result:
+                            rest_fill_price = await self._verify_fill_via_rest(entry_id)
+                            if rest_fill_price:
+                                logger.warning(
+                                    "[ENTRY] Cancel lost the race — %s filled @ ₹%.2f. "
+                                    "Adopting the position.",
+                                    entry_id, rest_fill_price,
+                                )
+                                filled = True
+                                ltp = rest_fill_price
+
                     if not filled:
-                        # FIX 4: Set 20-min cooldown on genuine fill timeout
                         self._set_exec_cooldown(symbol, reason='FILL_TIMEOUT', seconds=1200)
                         if self.telegram and hasattr(self.telegram, 'send_alert'):
                             await self.telegram.send_alert(
                                 f"❌ *ENTRY FILL TIMEOUT*\n\n"
                                 f"Symbol: `{symbol}`\n"
                                 f"Order ID: `{entry_id}`\n"
-                                f"Action: Order cancelled.\n"
+                                f"Action: Order cancelled, no position taken.\n"
                                 f"⏳ Cooldown: 20 min"
                             )
                         return None
+
+                # Use the broker's actual average fill price for SL/TP geometry.
+                # Sizing off the pre-trade LTP silently skews every downstream level
+                # by the slippage amount.
+                actual_fill = await self.broker.get_order_avg_price(entry_id)
+                if actual_fill and actual_fill > 0:
+                    if abs(actual_fill - ltp) / max(ltp, 0.01) > 0.001:
+                        logger.info(
+                            "[ENTRY] %s fill ₹%.2f vs signal ₹%.2f (slippage %.2f%%)",
+                            symbol, actual_fill, ltp,
+                            ((actual_fill - ltp) / ltp) * 100,
+                        )
+                    ltp = actual_fill
 
                 # ── FIX 2: Acquire Capital Slot AFTER confirmed fill ───────
                 # (This was completely missing before — capital was NEVER consumed)
@@ -695,6 +909,32 @@ class OrderManager:
                 logger.info(
                     f"[SL-CALC] {symbol} ATR-based stop_price=₹{stop_price:.2f} (tick={tick})"
                 )
+
+                # Hard gate. compute_stop_loss already re-anchors a wrong-side stop,
+                # so reaching here means something is deeply inconsistent — never
+                # send an order that is marketable on arrival.
+                ok, reason = self.validate_stop_against_fill(
+                    symbol, ltp, stop_price, signal_type
+                )
+                if not ok:
+                    logger.critical(
+                        "🚨 [SL-GUARD] Refusing to place stop for %s: %s. "
+                        "Exiting position immediately at market.", symbol, reason,
+                    )
+                    if self.telegram and hasattr(self.telegram, 'send_alert'):
+                        await self.telegram.send_alert(
+                            f"🚨 *UNSAFE STOP — POSITION CLOSED*\n\n"
+                            f"Symbol: `{symbol}`\n"
+                            f"Entry: ₹{ltp:.2f} | Attempted stop: ₹{stop_price:.2f}\n"
+                            f"Reason: {reason}\n\n"
+                            f"_A stop on the wrong side of entry fires instantly. "
+                            f"Exited at market instead._"
+                        )
+                    await self._emergency_exit(symbol, qty, 'BUY' if side == 'SELL' else 'SELL')
+                    if self.capital:
+                        await self.capital.release_slot(broker=self.broker)
+                    self._set_exec_cooldown(symbol, reason='UNSAFE_STOP', seconds=EXEC_COOLDOWN_SECONDS)
+                    return None
 
                 try:
                     # Calculate safe limit price (2% buffer) to satisfy Fyers type=3 requirements
@@ -773,7 +1013,10 @@ class OrderManager:
                     'obs_id':     signal.get('obs_id'),  # Phase 71: ML Link
                     # Phase 51: G13 Targets for trade_manager monitoring
                     'tp_targets': self.compute_take_profits(ltp, signal),
-                    'leverage':   final_leverage
+                    'leverage':   final_leverage,
+                    # Carried so move_hard_stop can round to the SYMBOL's real tick
+                    # instead of assuming 0.05 and getting rejected.
+                    'tick_size':  tick,
                 }
 
                 self.active_positions[symbol] = pos_state
@@ -878,10 +1121,14 @@ class OrderManager:
                         ob = await loop.run_in_executor(None, rest.orderbook)
                         if isinstance(ob, dict) and ob.get('s') == 'ok':
                             for o in ob.get('orderBook', []):
+                                # Must include TRANSIT: a stop still en route to the
+                                # exchange survives this cleanup, then fires AFTER the
+                                # position is closed — opening an accidental reverse
+                                # position with no bot state behind it.
                                 if (o.get('symbol') == symbol
-                                        and o.get('status') == FYERS_ORDER_STATUS_PENDING):
+                                        and o.get('status') in FYERS_STATUS_WORKING):
                                     await self.broker.cancel_order(o['id'])
-                                    logger.info(f"[SAFE_EXIT] Cancelled pending order {o['id']} for {symbol}")
+                                    logger.info(f"[SAFE_EXIT] Cancelled resting order {o['id']} for {symbol}")
                 except Exception as e:
                     logger.warning(f"[SAFE_EXIT] Order cleanup failed (non-fatal): {e}")
 
@@ -909,13 +1156,17 @@ class OrderManager:
                 # STEP 2: CHECK IF POSITION STILL EXISTS ON BROKER
                 # If SL already filled (fast price action), position is already closed.
                 try:
-                    broker_positions = await self.broker.get_all_positions()
+                    # force_rest: this decides whether we skip placing an exit order.
+                    # A stale or empty cache reading "flat" would leave a live position
+                    # open with its stop already cancelled above — the worst possible
+                    # outcome. Only the broker's own answer is good enough here.
+                    broker_positions = await self.broker.get_all_positions(force_rest=True)
                     pos_on_broker = None
                     for bp in broker_positions:
                         if bp.get('symbol') == symbol and bp.get('qty', 0) != 0:
                             pos_on_broker = bp
                             break
-                    
+
                     if pos_on_broker is None:
                         logger.info(f"[SAFE_EXIT] {symbol} already flat on broker (SL/manual close). Finalizing cleanup.")
                         # Try to get actual exit price from the SL order that filled
@@ -936,7 +1187,7 @@ class OrderManager:
                         
                         await self._finalize_closed_position(
                             symbol=symbol,
-                            reason='HARD_STOP_FILLED' if reason == 'TP_HIT' else reason,
+                            reason=reason,
                             exit_price=exit_price,
                             pnl=pnl,
                             send_alert=True,
@@ -1179,7 +1430,8 @@ class OrderManager:
 
             current_sl_order = None
             for order in orderbook.get('orderBook', []):
-                if str(order.get('id')) == str(sl_id) and order.get('status') == FYERS_ORDER_STATUS_PENDING:
+                if (str(order.get('id')) == str(sl_id)
+                        and order.get('status') in FYERS_STATUS_WORKING):
                     current_sl_order = order
                     break
 
@@ -1190,20 +1442,35 @@ class OrderManager:
             qty = new_qty if new_qty is not None else current_sl_order.get('qty', pos.get('qty', 0))
             direction = pos.get('side', 'SHORT')
 
-            # For SHORT: SL is a BUY order above entry. Limit = stop * 1.005 (safety buffer)
-            # For LONG:  SL is a SELL order below entry. Limit = stop * 0.995
-            tick = 0.05
-            if direction == 'SHORT':
-                limit_price = round(round(new_stop_price * 1.005 / tick) * tick, 2)
-            else:
-                limit_price = round(round(new_stop_price * 0.995 / tick) * tick, 2)
+            # Use the SYMBOL'S real tick, not a hardcoded 0.05. NSE ticks are
+            # 0.01/0.05/0.10 depending on the scrip; rounding a 0.01-tick stock to
+            # 0.05 produces a price the exchange rejects, so the breakeven stop
+            # silently never moves.
+            tick = pos.get('tick_size') or 0.05
 
+            # Match the entry SL's 2% limit buffer. The previous 0.5% buffer meant a
+            # BE stop could gap straight through its own limit in a fast move and
+            # never fill — the exact scenario a breakeven stop exists to prevent.
+            buffer_pct = 0.02
+            if direction == 'SHORT':
+                raw_limit = new_stop_price * (1 + buffer_pct)
+                stop_rounded = math.ceil(new_stop_price / tick) * tick
+            else:
+                raw_limit = new_stop_price * (1 - buffer_pct)
+                stop_rounded = math.floor(new_stop_price / tick) * tick
+
+            limit_price = round(round(raw_limit / tick) * tick, 2)
+            stop_rounded = round(stop_rounded, 2)
+
+            # type must match the order actually resting at the broker. Entry places
+            # SL_LIMIT (Fyers type 4); sending type 3 here would be a different
+            # instrument and gets rejected.
             modify_data = {
                 "id":         sl_id,
                 "qty":        qty,
-                "type":       4,              # SL-M order type
+                "type":       4,              # SL-Limit — same as placed at entry
                 "limitPrice": limit_price,
-                "stopPrice":  round(new_stop_price, 2),
+                "stopPrice":  stop_rounded,
             }
 
             resp = await loop.run_in_executor(

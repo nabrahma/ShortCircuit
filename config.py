@@ -35,7 +35,11 @@ INTRADAY_LEVERAGE = 5.0    # Fixed 5× leverage (NSE standard requirement)
 TRADE_DIRECTION = 'SHORT'  # 'SHORT' or 'LONG'
 
 # Timing (IST)
-MAX_HOLD_TIME_MINUTES = 45
+# 0 disables the time-based exit. Positions run until the stop-loss or the EOD
+# square-off — the same reasoning that removed the take-profit: a 45-minute cap
+# closed winners early, and the only profitable trade in the first two live days
+# needed 67 minutes to develop. Set a positive value to re-enable.
+MAX_HOLD_TIME_MINUTES = 0
 
 # ============================================================================
 # 3. SCANNER & G5 STRETCH CONSTANTS

@@ -4,10 +4,94 @@ import config
 import logging
 from pathlib import Path
 
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
 # Configure Logging
 logger = logging.getLogger(__name__)
 
 TOKEN_FILE = Path(__file__).resolve().parent / "data" / "access_token.txt"
+
+# (connect, read) seconds. The Fyers SDK issues requests with NO timeout, so a
+# stalled socket blocks its caller forever. On 2026-07-29 that produced 41 scan
+# timeouts: a hung /history call held a scanner worker for ~80s past its own 8s
+# cap, and every one of those scan cycles returned zero candidates.
+DEFAULT_HTTP_TIMEOUT = (3.05, 12.0)
+
+
+class TimeoutHTTPAdapter(HTTPAdapter):
+    """
+    HTTPAdapter that applies a default timeout to every request.
+
+    requests only accepts a timeout per-call, and the vendored SDK never passes
+    one. Injecting it at the adapter layer bounds every SDK call without having to
+    patch the SDK itself.
+    """
+
+    def __init__(self, *args, timeout=DEFAULT_HTTP_TIMEOUT, **kwargs):
+        self._timeout = timeout
+        super().__init__(*args, **kwargs)
+
+    def send(self, request, **kwargs):
+        if kwargs.get("timeout") is None:
+            kwargs["timeout"] = self._timeout
+        return super().send(request, **kwargs)
+
+
+def harden_fyers_session(client, label: str = "fyers") -> bool:
+    """
+    Attach connection pooling, bounded retries and a hard timeout to a FyersModel.
+
+    The broker interface already tuned its own rest_client, but the client built
+    here — the one the scanner, analyzer and focus engine all share, and which
+    makes every /history call — was left with library defaults: a 10-connection
+    pool and no timeout whatsoever.
+    """
+    # FyersModel does NOT expose `.session`. The real requests.Session lives on the
+    # inner service object: FyersModel.service.session (verified against
+    # fyers-apiv3 3.1.13). Code that checked `hasattr(client, 'session')` — including
+    # the broker's own pool-size fix — silently did nothing, which is why the
+    # 2026-08-06 log still shows "no .session to harden" plus 25 position-fetch
+    # timeouts and "Connection pool is full" warnings.
+    session = None
+    for path in ("session", "service.session", "_service.session"):
+        obj = client
+        for part in path.split("."):
+            obj = getattr(obj, part, None)
+            if obj is None:
+                break
+        if obj is not None and hasattr(obj, "mount"):
+            session = obj
+            logger.debug("[HTTP] %s: session found at client.%s", label, path)
+            break
+
+    if session is None:
+        logger.error(
+            "[HTTP] %s: could not locate a requests.Session — calls will be "
+            "UNBOUNDED. Check fyers-apiv3 internals.", label
+        )
+        return False
+
+    retry = Retry(
+        total=2,
+        backoff_factor=0.5,
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=["HEAD", "GET", "OPTIONS"],   # never auto-retry POSTs (orders)
+        raise_on_status=False,
+    )
+    adapter = TimeoutHTTPAdapter(
+        pool_connections=50,
+        pool_maxsize=50,
+        max_retries=retry,
+        timeout=DEFAULT_HTTP_TIMEOUT,
+    )
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    logger.info(
+        "[HTTP] %s session hardened — pool=50, timeout=%ss connect / %ss read",
+        label, DEFAULT_HTTP_TIMEOUT[0], DEFAULT_HTTP_TIMEOUT[1],
+    )
+    return True
 
 class FyersConnect:
     """
@@ -173,12 +257,16 @@ class FyersConnect:
         FYERS_REST_LOG_DIR = LOG_ROOT / "fyers_rest"
         FYERS_REST_LOG_DIR.mkdir(parents=True, exist_ok=True)
 
-        return fyersModel.FyersModel(
+        client = fyersModel.FyersModel(
             client_id=self.client_id,
             token=access_token,
             log_path=str(FYERS_REST_LOG_DIR) + os.sep,
-            is_async=False 
+            is_async=False
         )
+        # Bound every call made through this client. Without it a single stalled
+        # /history request hangs whichever worker issued it, indefinitely.
+        harden_fyers_session(client, label="scanner/analyzer client")
+        return client
 
     def _validate_token(self, token: str) -> bool:
         """

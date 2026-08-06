@@ -33,7 +33,8 @@ from enum import Enum
 from typing import Optional, Dict, List, Any, Callable, Set
 import time
 import threading
-from rest_limiter import rest_limiter
+from market_utils import is_market_hours as is_market_hours_ist
+from rest_limiter import rest_limiter, Priority
 
 logger = logging.getLogger(__name__)
 
@@ -60,14 +61,104 @@ except ImportError as e:
 from fyers_apiv3 import fyersModel
 
 
+class OrderPlacementTimeout(Exception):
+    """
+    The place_order HTTP call timed out.
+
+    Deliberately distinct from a rejection: a timeout means the order's fate is
+    UNKNOWN. It may be live at the exchange. Callers must reconcile against the
+    orderbook before retrying, or they risk double-entering a position.
+    """
+
+
+class FyersOrderStatus(int, Enum):
+    """
+    Fyers API v3 numeric order status codes.
+
+    Verified against this account's own session logs, where the observed
+    distribution was: 4 (353x), 6 (269x), 2 (134x), 1 (37x), 5 (29x).
+
+    NOTE: 4 is TRANSIT (order en route to the exchange), not "partial fill".
+    The previous status map labelled it PARTIAL, which made any wait-for-fill
+    that returned on the first update resolve on a not-yet-live order.
+    """
+    CANCELLED = 1
+    FILLED    = 2
+    RESERVED  = 3   # documented as "for future use"
+    TRANSIT   = 4
+    REJECTED  = 5
+    PENDING   = 6
+
+    @classmethod
+    def coerce(cls, raw) -> Optional["FyersOrderStatus"]:
+        """Accept int, numeric string, or enum. Returns None when unrecognised."""
+        if isinstance(raw, cls):
+            return raw
+        try:
+            return cls(int(raw))
+        except (TypeError, ValueError):
+            return None
+
+
+# An order in one of these states will never change again — safe to stop waiting.
+TERMINAL_ORDER_STATUSES = frozenset({
+    FyersOrderStatus.FILLED,
+    FyersOrderStatus.CANCELLED,
+    FyersOrderStatus.REJECTED,
+})
+
+# States meaning "still working" — a waiter must keep waiting.
+LIVE_ORDER_STATUSES = frozenset({
+    FyersOrderStatus.TRANSIT,
+    FyersOrderStatus.PENDING,
+})
+
+
+def unwrap_ws_payload(message: Any, key: str) -> Optional[dict]:
+    """
+    Unwrap a Fyers order-socket envelope.
+
+    The SDK's __parse_* methods return the payload nested under a type key:
+
+        {'s': 'ok', 'orders':    {...}}
+        {'s': 'ok', 'positions': {...}}
+        {'s': 'ok', 'trades':    {...}}
+
+    Reading fields off the envelope's top level (message.get('id')) silently
+    yields None for every field — the defect that made every fill fall back to
+    the 15s REST timeout path. Confirmed against the installed SDK's
+    FyersWebsocket/order_ws.py and its map.json field mappers.
+
+    Tolerates a already-flat payload so this stays correct if the SDK ever stops
+    wrapping, and returns None for anything unusable.
+    """
+    if not isinstance(message, dict):
+        return None
+
+    payload = message.get(key)
+    if isinstance(payload, dict) and payload:
+        return payload
+
+    # Already unwrapped? Envelopes carry only 's' plus the type key; a real
+    # payload carries identifying fields.
+    if any(f in message for f in ('id', 'symbol', 'orderNumber', 'netQty')):
+        return message
+
+    return None
+
+
 class OrderUpdate:
     """Data class for order updates from WebSocket."""
     def __init__(self, data: dict):
         self.order_id = data.get('id')
         self.symbol = data.get('symbol')
-        self.status = data.get('status')  # PENDING, OPEN, FILLED, REJECTED, CANCELLED
-        self.filled_qty = data.get('filledQty', 0)
-        self.avg_price = data.get('tradedPrice', 0)
+        self.status = data.get('status')  # numeric Fyers code, or mapped string
+        self.filled_qty = data.get('filledQty', 0) or 0
+        self.remaining_qty = data.get('remainingQuantity', 0) or 0
+        self.avg_price = data.get('tradedPrice', 0) or 0
+        self.limit_price = data.get('limitPrice', 0) or 0
+        self.stop_price = data.get('stopPrice', 0) or 0
+        self.message = data.get('message', '')
         self.timestamp = datetime.now(UTC)
         self.raw_data = data
 
@@ -327,17 +418,15 @@ class FyersBrokerInterface:
             log_path="logs/fyers_rest"
         )
         
-        # Inject custom HTTPAdapter to fix urllib3 connection pool overflow
-        if hasattr(self.rest_client, 'session') and self.rest_client.session is not None:
-            retry_strategy = Retry(
-                total=3,
-                backoff_factor=1,
-                status_forcelist=[429, 500, 502, 503, 504],
-                allowed_methods=["HEAD", "GET", "OPTIONS"]
-            )
-            adapter = HTTPAdapter(pool_connections=50, pool_maxsize=50, max_retries=retry_strategy)
-            self.rest_client.session.mount("http://", adapter)
-            self.rest_client.session.mount("https://", adapter)
+        # Connection pooling + hard timeout.
+        #
+        # This block used to test `hasattr(self.rest_client, 'session')`, which is
+        # ALWAYS False — FyersModel keeps its requests.Session on an inner service
+        # object (client.service.session). So the pool-size fix never applied, and
+        # every broker REST call ran with library defaults and no timeout at all.
+        # harden_fyers_session() resolves the real session and reports honestly.
+        from fyers_connect import harden_fyers_session
+        harden_fyers_session(self.rest_client, label="broker rest_client")
         
         # WebSocket clients
         self.data_ws = None  # Market data WebSocket
@@ -385,7 +474,17 @@ class FyersBrokerInterface:
         # Order WebSocket state (Added in Phase 42.2.5)
         self._fill_callbacks: Dict[str, Callable] = {}   # order_id -> callback function
         self._order_cache: Dict[str, Dict] = {}      # order_id -> latest order message
-        self._position_cache: Dict[str, Dict] = {}   # symbol -> latest position message
+        self._position_cache: Dict[str, Dict] = {}   # symbol -> latest raw position message
+
+        # Authoritative fill prices, volume-weighted across partial executions.
+        # Sourced from trade events, which carry the real traded price.
+        self._fill_prices: Dict[str, float] = {}     # order_id -> avg fill price
+        self._fill_qtys:   Dict[str, int]   = {}     # order_id -> cumulative filled qty
+
+        # position_cache is written from the SDK's socket thread and read from the
+        # event loop and from reconciliation — guard it.
+        self._position_cache_lock = threading.Lock()
+        self._position_cache_last_event: float = 0.0
         
         # Phase 44.7 / PRD-007 — WS quote cache for scanner pre-filter
         # (threading imported at module level L28)
@@ -529,6 +628,16 @@ class FyersBrokerInterface:
             'session_degraded_secs':      round(self._session_degraded_seconds, 1),
             'capital_sync_timeouts':      self._capital_sync_timeout_count,
             'reconcile_timeouts':         self._reconcile_timeout_count,
+            # Order pipeline — proves the fill path is actually live
+            'positions_cached':           len(self.position_cache),
+            'position_event_age':         (
+                round(now - self._position_cache_last_event, 1)
+                if self._position_cache_last_event else None
+            ),
+            'orders_tracked':             len(self.order_status_cache),
+            'fills_recorded':             len(self._fill_prices),
+            # REST budget
+            'rate_limit':                 rest_limiter.snapshot(),
         }
 
         
@@ -704,13 +813,6 @@ class FyersBrokerInterface:
         self._order_ws_health.last_error = str(message)[:200]
 
 
-    def _handle_position_update(self, message: dict):
-        logger.debug(f"Position update: {message}")
-        # Could implement cache update here
-
-    def _handle_trade_update(self, message: dict):
-        logger.debug(f"Trade update: {message}")
-
     def _handle_general_update(self, message: dict):
         """
         Called by Order WebSocket for general/system messages.
@@ -820,154 +922,287 @@ class FyersBrokerInterface:
     # All called by FyersOrderSocket when events arrive
     # ================================================================
 
+    def _signal_order_waiters(self, order_id: str) -> None:
+        """
+        Wake any wait_for_fill() coroutine watching this order.
+
+        Order-socket callbacks run on the SDK's own thread, so the asyncio.Event
+        must be set via call_soon_threadsafe. Setting it directly from this thread
+        is not thread-safe and can be missed entirely by the waiting loop.
+        """
+        event = self.order_fill_events.get(order_id)
+        if event is None:
+            return
+        loop = getattr(self, '_loop', None)
+        if loop is not None and not loop.is_closed():
+            try:
+                loop.call_soon_threadsafe(event.set)
+                return
+            except RuntimeError:
+                pass
+        event.set()   # fallback: same-thread or loop unavailable
+
     def _handle_order_update(self, message: dict):
         """
-        Called by Order WebSocket on every order status change.
+        Called by the Order WebSocket on every order status change.
+
+        Payload arrives wrapped as {'s': 'ok', 'orders': {...}} — see
+        unwrap_ws_payload for why reading the envelope's top level silently failed.
         """
         try:
-            if not message:
+            order = unwrap_ws_payload(message, 'orders')
+            if not order:
+                logger.debug("Order update with no usable payload: %s", message)
                 return
 
-            logger.info(f"📋 Order Update: {message}")
-
-            order_id = (
-                message.get('id') or
-                message.get('orderId') or
-                message.get('order_id')
-            )
-            status = message.get('status')
-            filled_qty = message.get('filledQty', 0)
-            fill_price = message.get('tradedPrice', 0.0)
-
+            order_id = str(
+                order.get('id')
+                or order.get('orderId')
+                or order.get('order_id')
+                or ''
+            ).strip()
             if not order_id:
-                logger.debug(f"Order update with no ID: {message}")
+                logger.debug("Order update with no ID: %s", order)
                 return
 
-            # Notify waiting fill listeners (used by wait_for_fill)
-            if hasattr(self, '_fill_callbacks') and order_id in self._fill_callbacks:
+            status = FyersOrderStatus.coerce(order.get('status'))
+            filled_qty = order.get('filledQty', 0) or 0
+            fill_price = order.get('tradedPrice', 0) or 0.0
+            remaining = order.get('remainingQuantity', 0) or 0
+
+            # Publish to the cache BEFORE waking waiters, so a waiter that runs
+            # immediately observes this update rather than the previous one.
+            update = OrderUpdate({**order, 'id': order_id, 'status': status})
+            self.order_status_cache[order_id] = update
+            self._order_cache[order_id] = order
+
+            # A trade event may have already reported the true average fill price;
+            # never regress it to 0 just because this status frame omitted it.
+            if not fill_price:
+                known = self._fill_prices.get(order_id)
+                if known:
+                    update.avg_price = known
+
+            self._signal_order_waiters(order_id)
+
+            # Legacy per-order callbacks
+            cb = self._fill_callbacks.get(order_id)
+            if cb is not None:
                 try:
-                    self._fill_callbacks[order_id](message)
+                    cb(order)
                 except Exception as cb_err:
-                    logger.error(f"Fill callback error for {order_id}: {cb_err}")
-            
-            # Also trigger asyncio Event for wait_for_fill
-            if order_id in self.order_fill_events:
-                 # Update status cache before setting event so waiter sees new status
-                 # We need to map WS message to OrderUpdate object or similar
-                 # For now, let's just update the cache used by wait_for_fill
-                 from datetime import datetime
-                 
-                 # Map numeric status to string if needed, or keep as is.
-                 # wait_for_fill checks for 'FILLED'. Fyers WS sends 2 for Filled.
-                 status_map_rev = {2: 'FILLED', 1: 'CANCELLED', 4: 'PARTIAL', 5: 'REJECTED', 6: 'PENDING'}
-                 status_str = status_map_rev.get(status, str(status))
-                 
-                 # Update the cache that wait_for_fill reads
-                 self.order_status_cache[order_id] = OrderUpdate({
-                     'id': order_id,
-                     'status': status_str,
-                     'filledQty': filled_qty,
-                     'tradedPrice': fill_price
-                 })
-                 
-                 self.order_fill_events[order_id].set()
+                    logger.error("Fill callback error for %s: %s", order_id, cb_err)
 
-            # Update internal order cache
-            if hasattr(self, '_order_cache'):
-                self._order_cache[order_id] = message
+            for callback in self.on_order_update_callbacks:
+                try:
+                    callback(update)
+                except Exception as e:
+                    logger.error("on_order_update callback error: %s", e)
 
-            # Log meaningful status transitions
-            status_map = {
-                1: "CANCELLED",
-                2: "FILLED ✅",
-                4: "PARTIAL FILL",
-                5: "REJECTED ❌",
-                6: "PENDING"
-            }
-            status_str = status_map.get(status, f"UNKNOWN({status})")
+            label = status.name if status else f"UNKNOWN({order.get('status')})"
+            mark = {'FILLED': ' ✅', 'REJECTED': ' ❌', 'CANCELLED': ' ⛔'}.get(label, '')
             logger.info(
-                f"Order {order_id}: {status_str} "
-                f"| Qty: {filled_qty} | Price: {fill_price}"
+                "Order %s: %s%s | %s | filled=%s remaining=%s price=₹%s%s",
+                order_id, label, mark,
+                order.get('symbol', '?'), filled_qty, remaining, fill_price,
+                f" | {order.get('message')}" if order.get('message') else "",
             )
 
         except Exception as e:
-            logger.error(f"_handle_order_update error: {e} | message: {message}")
-
+            logger.error("_handle_order_update error: %s | message: %s", e, message)
 
     def _handle_position_update(self, message: dict):
         """
-        Called by Order WebSocket when position changes.
+        Called by the Order WebSocket when a position changes.
+
+        Writes into self.position_cache — the cache that get_all_positions() and
+        ReconciliationEngine._read_broker_cache() actually read. Previously this
+        wrote to a different, unread dict, so the WS position pipeline was inert
+        and every consumer silently fell back to REST polling.
         """
         try:
-            if not message:
+            pos = unwrap_ws_payload(message, 'positions')
+            if not pos:
                 return
 
-            logger.debug(f"📊 Position Update: {message}")
+            symbol = pos.get('symbol')
+            if not symbol:
+                return
 
-            symbol = message.get('symbol') or message.get('id')
-            if symbol:
-                if not hasattr(self, '_position_cache'):
-                    self._position_cache = {}
+            update = PositionUpdate(pos)
+            with self._position_cache_lock:
+                if update.net_qty == 0:
+                    # Flat: drop it so stale non-zero state can never be re-read.
+                    self.position_cache.pop(symbol, None)
+                else:
+                    self.position_cache[symbol] = update
                 self._position_cache[symbol] = {
-                    'data': message,
-                    'timestamp': datetime.now(UTC)
+                    'data': pos,
+                    'timestamp': datetime.now(UTC),
                 }
+                self._position_cache_last_event = time.time()
+
+            logger.debug(
+                "📊 Position: %s netQty=%s avg=%s realised=%s",
+                symbol, update.net_qty, update.avg_price, update.realized_pnl,
+            )
+
+            for callback in self.on_position_update_callbacks:
+                try:
+                    callback(update)
+                except Exception as e:
+                    logger.error("on_position_update callback error: %s", e)
 
         except Exception as e:
-            logger.error(f"_handle_position_update error: {e}")
-
+            logger.error("_handle_position_update error: %s", e)
 
     def _handle_trade_update(self, message: dict):
         """
-        Called by Order WebSocket on trade execution.
+        Called by the Order WebSocket on each execution.
+
+        Trades carry the authoritative traded price. Note the trade mapper emits
+        `orderNumber` (not `id`) for the parent order — correlating on `id` here
+        would silently never match.
         """
         try:
-            if not message:
+            trade = unwrap_ws_payload(message, 'trades')
+            if not trade:
                 return
 
-            logger.info(f"💹 Trade Executed: {message}")
+            order_id = str(
+                trade.get('orderNumber') or trade.get('id') or ''
+            ).strip()
+            price = trade.get('tradePrice', 0) or 0.0
+            qty = trade.get('tradedQty', 0) or 0
+            symbol = trade.get('symbol', '?')
+            side = 'BUY' if trade.get('side') == 1 else 'SELL'
 
-            trade_id = message.get('id') or message.get('tradeId')
-            symbol = message.get('symbol')
-            price = message.get('tradedPrice', 0)
-            qty = message.get('tradedQty', 0)
-            side = 'BUY' if message.get('side') == 1 else 'SELL'
+            if order_id and price:
+                # Volume-weight across partial fills so the recorded entry price is
+                # the real average, not just the last slice.
+                prev_px = self._fill_prices.get(order_id, 0.0)
+                prev_qty = self._fill_qtys.get(order_id, 0)
+                total_qty = prev_qty + qty
+                if total_qty > 0:
+                    self._fill_prices[order_id] = (
+                        (prev_px * prev_qty) + (price * qty)
+                    ) / total_qty
+                    self._fill_qtys[order_id] = total_qty
+
+                cached = self.order_status_cache.get(order_id)
+                if cached is not None:
+                    cached.avg_price = self._fill_prices[order_id]
+
+                self._signal_order_waiters(order_id)
 
             logger.info(
-                f"TRADE | {side} {qty} {symbol} @ ₹{price} "
-                f"| Trade ID: {trade_id}"
+                "💹 TRADE | %s %s %s @ ₹%s | order=%s trade=%s",
+                side, qty, symbol, price, order_id, trade.get('tradeNumber'),
             )
 
         except Exception as e:
-            logger.error(f"_handle_trade_update error: {e}")
-    
-    
+            logger.error("_handle_trade_update error: %s", e)
+
     async def _websocket_keepalive(self):
-        """Background task to monitor WebSocket health. (Simplified)"""
+        """
+        Watchdog for the ORDER socket.
+
+        The data socket has its own health-monitor thread; the order socket had no
+        supervision at all, so a silent drop meant fills stopped arriving with no
+        alarm — indistinguishable from an idle market. We detect staleness and
+        rebuild the socket.
+        """
+        CHECK_INTERVAL = 30
+        SILENCE_LIMIT = 180.0     # no event AND disconnected for this long → rebuild
+
         while True:
-            await asyncio.sleep(60)
-            # Implementation depends on Fyers SDK internals. 
-            # We mostly rely on the SDK's auto-reconnect for now.
-            pass
+            try:
+                await asyncio.sleep(CHECK_INTERVAL)
+
+                if not is_market_hours_ist():
+                    continue
+
+                health = self._order_ws_health
+                now = time.time()
+                last = health.last_event_time or self._health_state_entered_at
+                silence = now - last
+
+                if health.connected:
+                    continue
+
+                if silence < SILENCE_LIMIT:
+                    logger.warning(
+                        "[ORDER-WS] Disconnected %.0fs (limit %.0fs) — awaiting SDK auto-reconnect.",
+                        silence, SILENCE_LIMIT,
+                    )
+                    continue
+
+                logger.critical(
+                    "[ORDER-WS] Down for %.0fs with no events — rebuilding socket. "
+                    "Fills cannot be confirmed while this socket is dead.",
+                    silence,
+                )
+                self._send_telegram_alert_async(
+                    "🚨 *ORDER SOCKET DOWN*\n\n"
+                    f"No order events for {silence:.0f}s. Rebuilding.\n"
+                    "_Fill confirmation is degraded to REST until this recovers._"
+                )
+                try:
+                    await self._init_order_websocket()
+                    if self.order_ws:
+                        await asyncio.get_event_loop().run_in_executor(
+                            None, self._start_order_ws
+                        )
+                        self._order_ws_health.reconnect_count += 1
+                        logger.info("[ORDER-WS] Reconnect dispatched.")
+                except Exception as e:
+                    logger.critical("[ORDER-WS] Rebuild failed: %s", e)
+
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.error("[ORDER-WS] Keepalive error: %s", e)
     
     async def _cache_cleanup(self):
-        """Background task to clean old cache entries."""
+        """Background task to evict stale cache entries and bound memory growth."""
         while True:
             await asyncio.sleep(300)  # Every 5 minutes
             try:
                 now = datetime.now(UTC)
-                # Use list(keys) to avoid runtime errors during modification
+
                 for symbol in list(self.tick_cache.keys()):
                     ticks = self.tick_cache[symbol]
                     if ticks:
                         latest = ticks[-1].timestamp
                         if (now - latest).total_seconds() > 3600:
                             del self.tick_cache[symbol]
-                
+
+                expired_orders = []
                 for order_id in list(self.order_status_cache.keys()):
                     update = self.order_status_cache[order_id]
                     if (now - update.timestamp).total_seconds() > 3600:
-                        del self.order_status_cache[order_id]
+                        # Never evict an order someone is actively waiting on.
+                        if order_id in self.order_fill_events:
+                            continue
+                        expired_orders.append(order_id)
+
+                for order_id in expired_orders:
+                    self.order_status_cache.pop(order_id, None)
+                    self._order_cache.pop(order_id, None)
+                    self._fill_prices.pop(order_id, None)
+                    self._fill_qtys.pop(order_id, None)
+                    self._fill_callbacks.pop(order_id, None)
+
+                # Drop position entries that went flat and were never re-touched.
+                with self._position_cache_lock:
+                    for symbol in list(self.position_cache.keys()):
+                        p = self.position_cache[symbol]
+                        if p.net_qty == 0 or (now - p.timestamp).total_seconds() > 3600:
+                            self.position_cache.pop(symbol, None)
+                            self._position_cache.pop(symbol, None)
+
+                if expired_orders:
+                    logger.debug("[CACHE] Evicted %d completed orders.", len(expired_orders))
             except Exception as e:
                 logger.error(f"Cache cleanup error: {e}")
 
@@ -1191,17 +1426,6 @@ class FyersBrokerInterface:
                                       BrokerHealthState.DEGRADED, BrokerHealthState.CRITICAL,
                                       BrokerHealthState.HYBRID_REST_MODE)
 
-    def is_cache_severely_degraded(self) -> bool:
-        """Returns True when fresh% < 5% AND degradation has persisted > 30s."""
-        return (
-            self._health_state in (BrokerHealthState.SEVERE_DEGRADED,
-                                   BrokerHealthState.REPRIME_PENDING,
-                                   BrokerHealthState.FULL_RECONNECT_PENDING,
-                                   BrokerHealthState.HYBRID_REST_MODE,
-                                   BrokerHealthState.UNRECOVERABLE)
-            and (time.time() - self._severe_degraded_since) >= 30
-        )
-
     def wait_for_cache_ready(self, timeout_sec: float = 45.0) -> bool:
         """
         Blocks caller until cache is READY or timeout expires.
@@ -1219,15 +1443,32 @@ class FyersBrokerInterface:
         self._telegram_bot = telegram_bot
         logger.info("[WS Cache] Telegram bot wired for cache degradation alerts.")
 
+    # Health states in which the WS feed cannot be trusted for scanning.
+    _SEVERE_STATES = (
+        BrokerHealthState.SEVERE_DEGRADED,
+        BrokerHealthState.REPRIME_PENDING,
+        BrokerHealthState.FULL_RECONNECT_PENDING,
+        BrokerHealthState.HYBRID_REST_MODE,
+        BrokerHealthState.UNRECOVERABLE,
+    )
+
     def is_cache_severely_degraded(self) -> bool:
         """
-        Returns True when fresh% < 5% AND degradation has persisted > 30s.
-        Called by scanner.py and focus_engine.py for the scan-level DEGRADED banner.
+        True when the feed has been in a severe state for more than 30 seconds.
+
+        This method was previously defined twice. The first definition checked the
+        health state but read `time.time() - self._severe_degraded_since` without
+        guarding the 0.0 sentinel — so it returned True the instant any severe state
+        was entered. The second (which silently won) checked the timestamp but
+        ignored health state entirely. This merges both correctly.
+
+        Called by scanner.py and focus_engine.py for the DEGRADED scan banner.
         """
-        return (
-            self._severe_degraded_since > 0
-            and (time.time() - self._severe_degraded_since) >= 30
-        )
+        if self._severe_degraded_since <= 0:
+            return False
+        if self._health_state not in self._SEVERE_STATES:
+            return False
+        return (time.time() - self._severe_degraded_since) >= 30
 
     def increment_degraded_scan_count(self) -> int:
         """
@@ -1589,28 +1830,55 @@ class FyersBrokerInterface:
     # REST API Wrappers with Rate Limit
     # ===================================================================
     
-    async def _rate_limit_wait(self, endpoint: str):
-        """Enforce global rate limits using the token bucket."""
-        import asyncio
-        from rest_limiter import rest_limiter
-        await asyncio.to_thread(rest_limiter.acquire)
+    ORDER_PRIORITY_ENDPOINTS = frozenset({
+        'place_order', 'cancel_order', 'modify_order', 'get_order_status',
+    })
 
-    async def place_order(self, symbol: str, side: str, qty: int, order_type: str = 'MARKET', price: float = 0, trigger_price: float = 0) -> str:
-        """Place order via REST API."""
+    async def _rate_limit_wait(self, endpoint: str):
+        """
+        Enforce global rate limits.
+
+        Order-path endpoints acquire at HIGH priority so a stop-loss placement is
+        never queued behind hundreds of scanner quote calls.
+        """
+        priority = (
+            Priority.HIGH if endpoint in self.ORDER_PRIORITY_ENDPOINTS
+            else Priority.NORMAL
+        )
+        await rest_limiter.acquire_async(priority=priority)
+
+    async def place_order(
+        self,
+        symbol: str,
+        side: str,
+        qty: int,
+        order_type: str = 'MARKET',
+        price: float = 0,
+        trigger_price: float = 0,
+        order_tag: Optional[str] = None,
+    ) -> str:
+        """
+        Place an order via REST.
+
+        The fill-notification Event is registered BEFORE the HTTP call returns is
+        impossible (we need the id), so instead we register it immediately on
+        receipt and then replay any order update that already landed in the cache
+        during that window — otherwise a fast fill can be missed entirely.
+        """
         await self._rate_limit_wait('place_order')
-        
+
         try:
             # Ensure subscribed
             await self.subscribe_symbols([symbol])
-            
+
             data = {
                 "symbol": symbol,
                 "qty": qty,
-                "type": 2 if order_type == 'MARKET' else 1,  
+                "type": 2 if order_type == 'MARKET' else 1,
                 "side": 1 if side == 'BUY' else -1,
                 "productType": "INTRADAY",
                 "validity": "DAY",
-                "offlineOrder": False
+                "offlineOrder": False,
             }
             if order_type == 'LIMIT':
                 data['limitPrice'] = price
@@ -1623,22 +1891,40 @@ class FyersBrokerInterface:
                 data['stopPrice'] = trigger_price
                 data['limitPrice'] = price
 
+            if order_tag:
+                # Echoed back on every order/trade event — useful for correlating
+                # an execution to the signal that caused it.
+                data['orderTag'] = str(order_tag)[:20]
+
             loop = asyncio.get_event_loop()
+
             async def _place():
                 return await loop.run_in_executor(None, self.rest_client.place_order, data)
-                
+
             try:
-                response = await asyncio.wait_for(_place(), timeout=3.0)
+                response = await asyncio.wait_for(_place(), timeout=5.0)
             except asyncio.TimeoutError:
-                raise Exception("Fyers API place_order timeout (3s)")
-                
-            if response['s'] == 'ok':
-                order_id = response['id']
-                self.order_fill_events[order_id] = asyncio.Event()
-                logger.info(f"Order placed: {order_id} {side} {qty} {symbol}")
+                # A timeout is NOT proof the order failed — it may be live at the
+                # exchange. Surface it distinctly so callers reconcile before retry.
+                raise OrderPlacementTimeout(
+                    f"place_order timed out after 5s for {symbol} {side} x{qty}; "
+                    f"order may or may not be live — reconcile before retrying"
+                )
+
+            if isinstance(response, dict) and response.get('s') == 'ok':
+                order_id = str(response['id'])
+                self.order_fill_events.setdefault(order_id, asyncio.Event())
+                # If an update for this id already arrived, don't wait for another.
+                if order_id in self.order_status_cache:
+                    self._signal_order_waiters(order_id)
+                logger.info(
+                    "Order placed: %s %s %s x%s%s",
+                    order_id, side, symbol, qty,
+                    f" ({order_type})" if order_type != 'MARKET' else "",
+                )
                 return order_id
-            else:
-                raise Exception(f"Order placement failed: {response}")
+
+            raise Exception(f"Order placement failed: {response}")
         except Exception as e:
             logger.error(f"place_order error: {e}")
             raise
@@ -1668,42 +1954,126 @@ class FyersBrokerInterface:
             logger.error(f"cancel_order error: {e}")
             return False
 
-    async def wait_for_fill(self, order_id: str, timeout: float = 30.0) -> bool:
-        """Wait for order fill via WebSocket event."""
-        if order_id not in self.order_fill_events:
-            self.order_fill_events[order_id] = asyncio.Event()
-        
-        try:
-            await asyncio.wait_for(self.order_fill_events[order_id].wait(), timeout=timeout)
-            
-            if order_id in self.order_status_cache:
-                status = self.order_status_cache[order_id].status
-                return status == 'FILLED'
-            
-            # Fallback
-            return await self._check_order_status_rest(order_id) == 'FILLED'
-        except asyncio.TimeoutError:
-            logger.warning(f"Order {order_id} fill timeout")
-            return False
-        finally:
-            if order_id in self.order_fill_events:
-                del self.order_fill_events[order_id]
+    async def wait_for_fill(self, order_id: str, timeout: float = 15.0) -> bool:
+        """
+        Wait until the order reaches a TERMINAL state. Returns True only if FILLED.
 
+        Two defects made the previous version resolve incorrectly on every order:
+
+        1. It returned after the FIRST websocket event. Fyers emits TRANSIT (4) and
+           PENDING (6) before FILLED (2) — in this account's logs status 4 is the
+           single most common frame — so the first event almost never meant "filled".
+        2. It compared against the string 'FILLED' while the socket delivers numeric
+           codes.
+
+        We now loop until a terminal status, with a periodic REST reconcile so a
+        genuinely dropped websocket frame still resolves well inside the timeout
+        instead of burning the full budget.
+        """
+        order_id = str(order_id)
+        loop = asyncio.get_event_loop()
+        event = self.order_fill_events.setdefault(order_id, asyncio.Event())
+        deadline = loop.time() + timeout
+        rest_probe_interval = 3.0
+        next_rest_probe = loop.time() + rest_probe_interval
+
+        try:
+            while True:
+                # Clear BEFORE inspecting: any update landing after this point sets
+                # the event, so the wait below returns immediately and we re-check.
+                event.clear()
+
+                cached = self.order_status_cache.get(order_id)
+                if cached is not None:
+                    status = FyersOrderStatus.coerce(cached.status)
+                    if status in TERMINAL_ORDER_STATUSES:
+                        if status is FyersOrderStatus.FILLED:
+                            logger.info(
+                                "✅ Fill confirmed via WS: %s @ ₹%s",
+                                order_id, self._fill_prices.get(order_id, cached.avg_price),
+                            )
+                            return True
+                        logger.warning(
+                            "Order %s terminal but not filled: %s%s",
+                            order_id, status.name,
+                            f" — {cached.message}" if cached.message else "",
+                        )
+                        return False
+
+                now = loop.time()
+                remaining = deadline - now
+                if remaining <= 0:
+                    break
+
+                # Periodic REST reconcile guards against a dropped WS frame.
+                if now >= next_rest_probe:
+                    next_rest_probe = now + rest_probe_interval
+                    rest_status = await self._check_order_status_rest(order_id)
+                    if rest_status in TERMINAL_ORDER_STATUSES:
+                        logger.warning(
+                            "Order %s resolved via REST probe (WS frame missed): %s",
+                            order_id, rest_status.name,
+                        )
+                        return rest_status is FyersOrderStatus.FILLED
+
+                try:
+                    await asyncio.wait_for(
+                        event.wait(),
+                        timeout=min(remaining, rest_probe_interval),
+                    )
+                except asyncio.TimeoutError:
+                    continue   # fall through to the next status/REST check
+
+            # Timed out — one last authoritative check before declaring failure.
+            final = await self._check_order_status_rest(order_id)
+            if final is FyersOrderStatus.FILLED:
+                logger.warning(
+                    "Order %s filled but no terminal WS frame arrived within %.0fs.",
+                    order_id, timeout,
+                )
+                return True
+
+            logger.warning(
+                "Order %s fill timeout after %.0fs (last known status: %s)",
+                order_id, timeout, final.name if final else "unknown",
+            )
+            return False
+
+        finally:
+            self.order_fill_events.pop(order_id, None)
 
     async def get_order_avg_price(self, order_id: str) -> float:
-        """Fetch average fill price from cache or REST fallback."""
-        if order_id in self.order_status_cache:
-            return self.order_status_cache[order_id].avg_price
-        
-        # Fallback to REST
+        """
+        Average fill price.
+
+        Prefers the volume-weighted price accumulated from trade events, which is
+        exact across partial fills. Falls back to the order frame, then REST.
+        """
+        order_id = str(order_id)
+
+        traded = self._fill_prices.get(order_id)
+        if traded:
+            return float(traded)
+
+        cached = self.order_status_cache.get(order_id)
+        if cached is not None and cached.avg_price:
+            return float(cached.avg_price)
+
         await self._rate_limit_wait('get_order_status')
         try:
             loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(None, self.rest_client.orderbook)
-            if response['s'] == 'ok':
-                for order in response['orderBook']:
-                    if order['id'] == order_id:
-                        return float(order.get('tradedPrice', 0))
+            response = await asyncio.wait_for(
+                loop.run_in_executor(None, self.rest_client.orderbook), timeout=5.0
+            )
+            if isinstance(response, dict) and response.get('s') == 'ok':
+                for order in response.get('orderBook', []):
+                    if str(order.get('id')) == order_id:
+                        for key in ('tradedPrice', 'tradePrice', 'limitPrice'):
+                            val = order.get(key, 0)
+                            if val:
+                                return float(val)
+        except asyncio.TimeoutError:
+            logger.warning("Order price query timed out for %s", order_id)
         except Exception as e:
             logger.error(f"Order price query error: {e}")
         return 0.0
@@ -1732,20 +2102,52 @@ class FyersBrokerInterface:
 
 
 
-    async def _check_order_status_rest(self, order_id: str) -> str:
+    async def _check_order_status_rest(
+        self, order_id: str
+    ) -> Optional[FyersOrderStatus]:
+        """
+        Authoritative order status from the orderbook. Returns None when unknown.
+
+        Also back-fills the local caches, so a terminal state discovered here is
+        visible to wait_for_fill and get_order_avg_price without a second call.
+        """
+        order_id = str(order_id)
         await self._rate_limit_wait('get_order_status')
         try:
             loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(None, self.rest_client.orderbook)
-            if response['s'] == 'ok':
-                for order in response['orderBook']:
-                    if order['id'] == order_id:
-                        status = order['status']
-                        return status
-            return 'UNKNOWN'
+            response = await asyncio.wait_for(
+                loop.run_in_executor(None, self.rest_client.orderbook), timeout=5.0
+            )
+            if not isinstance(response, dict) or response.get('s') != 'ok':
+                return None
+
+            for order in response.get('orderBook', []):
+                if str(order.get('id')) != order_id:
+                    continue
+
+                status = FyersOrderStatus.coerce(order.get('status'))
+                if status is None:
+                    return None
+
+                # Back-fill caches so subsequent lookups are free and consistent.
+                self.order_status_cache[order_id] = OrderUpdate(
+                    {**order, 'id': order_id, 'status': status}
+                )
+                if status is FyersOrderStatus.FILLED:
+                    for key in ('tradedPrice', 'tradePrice'):
+                        px = order.get(key, 0)
+                        if px:
+                            self._fill_prices.setdefault(order_id, float(px))
+                            break
+                return status
+
+            return None
+        except asyncio.TimeoutError:
+            logger.warning("Order status query timed out for %s", order_id)
+            return None
         except Exception as e:
             logger.error(f"Order status query error: {e}")
-            return 'UNKNOWN'
+            return None
 
     async def get_funds(self) -> dict:
         """
@@ -1865,44 +2267,113 @@ class FyersBrokerInterface:
                 self._leverage_cache[symbol] = 5.0
             return 5.0
 
-    async def get_all_positions(self) -> List[Dict]:
+    # A WS position snapshot older than this is not trusted for reconciliation.
+    POSITION_CACHE_TTL_SECONDS = 30.0
+
+    @staticmethod
+    def _normalise_position(raw: dict) -> dict:
         """
-        Get all open positions (WS cache first, REST fallback).
-        Phase PRD-WS 4: Hard 10s timeout on REST fallback to never block reconciliation.
+        Normalise a position record to one shape every consumer can rely on.
+
+        Fyers returns BOTH `qty` (absolute) and `netQty` (signed, negative for
+        shorts). Different call sites in this codebase read different keys, so a
+        record missing either one produced silent zeros. Always emit both, plus
+        the aliases already in use.
         """
-        positions = []
-        for symbol, pos_update in self.position_cache.items():
-            age = (datetime.now(UTC) - pos_update.timestamp).total_seconds()
-            if age < 10.0 and pos_update.net_qty != 0:
-                positions.append({
+        net = raw.get('netQty', raw.get('net_qty', 0)) or 0
+        try:
+            net = int(net)
+        except (TypeError, ValueError):
+            net = 0
+
+        qty = raw.get('qty')
+        try:
+            qty = abs(int(qty)) if qty is not None else abs(net)
+        except (TypeError, ValueError):
+            qty = abs(net)
+
+        avg = (
+            raw.get('avgPrice')
+            or raw.get('netAvg')
+            or raw.get('avg_price')
+            or 0.0
+        )
+        # For a short, sellAvg is the true entry; for a long, buyAvg.
+        if not avg:
+            avg = raw.get('sellAvg', 0) if net < 0 else raw.get('buyAvg', 0)
+
+        return {
+            **raw,
+            'symbol': raw.get('symbol'),
+            'qty': qty,
+            'netQty': net,
+            'avgPrice': float(avg or 0.0),
+            'side': 'SHORT' if net < 0 else ('LONG' if net > 0 else 'FLAT'),
+            'productType': raw.get('productType', 'INTRADAY'),
+            'realized_profit': raw.get('realized_profit', 0) or 0,
+            'unrealized_profit': raw.get('unrealized_profit', 0) or 0,
+        }
+
+    async def get_all_positions(self, force_rest: bool = False) -> List[Dict]:
+        """
+        All open positions — WS cache first, REST fallback.
+
+        The cache is now genuinely populated (see _handle_position_update), so the
+        common path costs zero REST calls. Previously nothing ever wrote to
+        position_cache, so this silently hit REST on every single invocation —
+        including every 6s reconciliation cycle.
+
+        force_rest=True bypasses the cache for the authoritative pre-exit check.
+        """
+        if not force_rest:
+            now = datetime.now(UTC)
+            with self._position_cache_lock:
+                snapshot = list(self.position_cache.items())
+
+            fresh = [
+                self._normalise_position({
                     'symbol': symbol,
-                    'netQty': pos_update.net_qty,
-                    'avgPrice': pos_update.avg_price,
-                    'unrealized_profit': getattr(pos_update, 'unrealized_pnl', 0),
-                    'realized_profit': getattr(pos_update, 'realized_pnl', 0)
+                    'netQty': p.net_qty,
+                    'qty': abs(p.net_qty),
+                    'avgPrice': p.avg_price,
+                    'realized_profit': p.realized_pnl,
+                    'unrealized_profit': p.unrealized_pnl,
+                    **(p.raw_data or {}),
                 })
+                for symbol, p in snapshot
+                if p.net_qty != 0
+                and (now - p.timestamp).total_seconds() < self.POSITION_CACHE_TTL_SECONDS
+            ]
+            if fresh:
+                return fresh
 
-        if not positions:
-            await self._rate_limit_wait('get_positions')
-            try:
-                async def _fetch_positions():
-                    loop = asyncio.get_event_loop()
-                    return await loop.run_in_executor(None, self.rest_client.positions)
+        # Cache empty or stale. Note: empty cache legitimately means "flat", so we
+        # still verify via REST rather than assuming — being wrong about flat is
+        # how a naked position goes unnoticed.
+        await self._rate_limit_wait('get_positions')
+        try:
+            async def _fetch_positions():
+                loop = asyncio.get_event_loop()
+                return await loop.run_in_executor(None, self.rest_client.positions)
 
-                response = await asyncio.wait_for(_fetch_positions(), timeout=10.0)
-                if response['s'] == 'ok':
-                    for pos in response.get('netPositions', []):
-                        if pos.get('netQty', 0) != 0:
-                            positions.append(pos)
-            except asyncio.TimeoutError:
-                self._reconcile_timeout_count += 1
-                logger.warning(
-                    f"[RECONCILE] get_all_positions timed out (10s). "
-                    f"Timeout #{self._reconcile_timeout_count}. Returning empty list."
-                )
-            except Exception as e:
-                logger.error(f"Get all positions error: {e}")
-        return positions
+            response = await asyncio.wait_for(_fetch_positions(), timeout=10.0)
+            if isinstance(response, dict) and response.get('s') == 'ok':
+                return [
+                    self._normalise_position(pos)
+                    for pos in response.get('netPositions', [])
+                    if (pos.get('netQty', 0) or 0) != 0
+                ]
+            logger.warning("get_all_positions: unexpected response: %s", response)
+        except asyncio.TimeoutError:
+            self._reconcile_timeout_count += 1
+            logger.warning(
+                "[RECONCILE] get_all_positions timed out (10s). Timeout #%d. "
+                "Returning empty list — callers must NOT treat this as flat.",
+                self._reconcile_timeout_count,
+            )
+        except Exception as e:
+            logger.error(f"Get all positions error: {e}")
+        return []
 
     async def shutdown(self):
         logger.info("Shutting down broker interface...")

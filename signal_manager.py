@@ -188,6 +188,31 @@ class SignalManager:
                 logger.critical(f"🚨 TRADING PAUSED: Max session loss limit breached. Session PnL: ₹{self.daily_pnl:.2f}")
     
 
+    def get_remaining_signals(self) -> int:
+        """
+        Signals still permitted today.
+
+        focus_engine calls this after burning a slot; the method simply did not
+        exist, so every successful entry logged
+        "[SignalManager] record_signal failed (non-fatal): 'SignalManager' object
+        has no attribute 'get_remaining_signals'" — harmless, but it made a normal
+        entry look like a failure in the session log.
+
+        There is no hard daily cap today (risk is bounded by MAX_SESSION_LOSS_INR
+        and the single capital slot), so this reports headroom against the daily
+        target gate rather than a fixed count.
+        """
+        with self._lock:
+            self._reset_if_new_day()
+            if self.is_paused:
+                return 0
+            daily_target = getattr(config, 'DAILY_TARGET_INR', 0)
+            if daily_target == -1:
+                daily_target = self.daily_target_inr
+            if daily_target > 0 and self.daily_pnl >= daily_target:
+                return 0   # only EXTREME/MAX_CONVICTION pass the target gate
+            return -1      # -1 == uncapped
+
     def get_status(self):
         """Get current status for operator commands and logging."""
         self._reset_if_new_day()

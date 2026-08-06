@@ -157,13 +157,16 @@ class ReconciliationEngine:
 
         # Step 2: Get broker positions (cache-first, REST fallback)
         broker_positions = {}
+        broker_fetch_failed = False
         try:
             broker_positions = await self._get_broker_positions_cached(broker_open)
         except Exception as e:
-            # Phase 77: Resilience Fix. Log but don't return early.
-            # If broker is down, we cannot confirm phantoms, but we shouldn't kill the engine.
-            logger.error(f"Reconcile: Broker fetch failed (API Degraded): {e}")
-            # return  # <--- REMOVED early return
+            # Do NOT let a failed fetch look like "broker is flat". An empty
+            # broker_positions makes every DB row a phantom, and phantom handling
+            # force-closes DB state and releases capital. A degraded API must never
+            # be able to trigger that.
+            broker_fetch_failed = True
+            logger.error(f"Reconcile: Broker fetch failed (API degraded): {e}")
 
         # Step 3: Get DB positions (only if dirty)
         try:
@@ -181,8 +184,10 @@ class ReconciliationEngine:
         mismatched = []
 
         for symbol, b_pos in broker_positions.items():
-            b_qty = b_pos.get('qty', 0)
-            b_qty_abs = abs(b_qty)  # Phase 95: Fyers uses negative qty for shorts
+            # 'qty' is now normalised to absolute; 'net_qty' keeps the sign so the
+            # long/short side can still be inferred downstream by adopt_orphan.
+            b_qty_abs = abs(b_pos.get('qty', 0) or 0)
+            b_qty = b_pos.get('net_qty', b_qty_abs)
             if symbol not in db_positions:
                 # Phase 98.1: Grace period — skip orphan alert if recently closed internally
                 import time
@@ -210,7 +215,7 @@ class ReconciliationEngine:
                     s: t for s, t in self._recently_modified.items()
                     if time.time() - t < self._orphan_grace_secs
                 }
-                orphans.append({'symbol': symbol, 'qty': b_qty})
+                orphans.append({'symbol': symbol, 'qty': b_qty_abs, 'net_qty': b_qty})
             elif db_positions[symbol] != b_qty_abs:
                 # Suppress mismatch if recently modified (partial exit in progress)
                 import time
@@ -231,17 +236,24 @@ class ReconciliationEngine:
             if symbol not in broker_positions:
                 phantoms.append({'symbol': symbol, 'qty': db_qty})
 
-        # Step 5: Alert on divergence
+        # Step 5: Act on divergence — only when the broker view is trustworthy.
         if orphans or phantoms or mismatched:
-            # Phase 77: Only handle divergence if broker_positions fetch actually succeeded (non-empty)
-            # or if it's a confirmed flat state.
-            if broker_positions or not broker_open:
+            if broker_fetch_failed:
+                logger.warning(
+                    "⚠️ Skipping divergence handling — broker fetch failed, so an "
+                    "empty position set proves nothing. Deferring to next cycle."
+                )
+            elif not broker_positions and broker_open:
+                # Cache says positions exist but the map came back empty: contradictory.
+                logger.warning(
+                    "⚠️ Skipping divergence handling — cache reports open positions "
+                    "but the position map is empty (inconsistent view)."
+                )
+            else:
                 await self._handle_divergence(
                     db_positions, broker_positions,
                     orphans, phantoms, mismatched
                 )
-            else:
-                logger.warning("⚠️ Skipping divergence handling — Broker API failed and cache is empty.")
 
     # ── Private Helpers ───────────────────────────────────────────────
 
@@ -263,38 +275,57 @@ class ReconciliationEngine:
 
     async def _get_broker_positions_cached(self, cache_has_data: bool) -> dict:
         """
-        If WebSocket cache has data, build the dict from cache (0 REST).
-        Only falls back to REST if cache appears empty but we expect positions.
+        Build the broker-side position map.
+
+        The websocket cache is now genuinely populated, so this is a zero-REST read
+        whenever the socket is healthy. Falls back to REST when the cache is empty,
+        because an empty cache means "no events yet", not "flat".
+
+        Two bugs fixed here:
+          * `qty` was populated from p.net_qty, which is SIGNED. Downstream compares
+            it against the DB's absolute quantity, so every short reported a
+            spurious quantity mismatch.
+          * The REST fallback ran get_all_positions() inside a brand-new event loop
+            spun up in an executor thread — from async code that could simply await
+            it. That loop churn was pure overhead, and its 2s timeout was shorter
+            than the inner call's own 10s timeout, so it almost always fired first.
         """
         if cache_has_data:
-            # Build from cache directly — no REST call
             result = {}
-            for symbol, p in self.broker.position_cache.items():
+            with self.broker._position_cache_lock:
+                snapshot = list(self.broker.position_cache.items())
+            for symbol, p in snapshot:
                 if p.net_qty != 0:
                     result[symbol] = {
-                        'qty':       p.net_qty,
                         'symbol':    symbol,
-                        'avg_price': getattr(p, 'avg_price', 0.0),   # NEW
+                        'qty':       abs(p.net_qty),   # absolute, matches DB
+                        'net_qty':   p.net_qty,        # signed, for side inference
+                        'avg_price': getattr(p, 'avg_price', 0.0),
                     }
             return result
 
-        # Cache is empty but we might have stale state — hit REST once to verify
-        cached_positions = await asyncio.wait_for(
-            asyncio.get_event_loop().run_in_executor(
-                None, self._sync_get_positions
-            ),
-            timeout=2.0
-        )
-        return {p['symbol']: p for p in cached_positions}
-
-    def _sync_get_positions(self):
-        """Synchronous broker call — runs in executor, doesn't block event loop."""
-        import asyncio
-        loop = asyncio.new_event_loop()
+        # Cache empty — verify against REST rather than assuming flat.
         try:
-            return loop.run_until_complete(self.broker.get_all_positions())
-        finally:
-            loop.close()
+            positions = await asyncio.wait_for(
+                self.broker.get_all_positions(force_rest=True), timeout=12.0
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "[RECONCILE] Broker position fetch timed out — treating as UNKNOWN, "
+                "not flat. Skipping this cycle's divergence check."
+            )
+            raise
+
+        return {
+            p['symbol']: {
+                'symbol':    p['symbol'],
+                'qty':       p.get('qty', 0),
+                'net_qty':   p.get('netQty', 0),
+                'avg_price': p.get('avgPrice', 0.0),
+            }
+            for p in positions
+            if p.get('symbol')
+        }
 
     async def _get_db_positions_cached(self) -> dict:
         """
@@ -444,53 +475,59 @@ class ReconciliationEngine:
             # ── Step 4: Log to DB ─────────────────────────────────────────────
             # CRITICAL: This is what stops infinite re-detection.
             # Without this, every reconcile cycle re-detects the same orphan.
-            if self.order_manager and self.order_manager.db:
+            # Persisting the adoption is what stops infinite re-detection: until the
+            # position exists in the DB, every reconcile cycle sees it as a fresh
+            # orphan and tries to adopt it again.
+            #
+            # The old chain had a dead middle branch keyed on `self.db_manager`, an
+            # attribute this class never defines (the constructor stores `self.db`),
+            # so it raised AttributeError inside adopt_orphan's try and aborted the
+            # whole adoption. Collapsed here into one ordered fallback.
+            entry_payload = {
+                'symbol':       symbol,
+                'direction':    side,
+                'qty':          qty,
+                'entry_price':  avg_price,
+                'order_id':     'MANUAL_ENTRY',
+                'sl_id':        sl_id,
+                'source':       'ORPHAN_RECOVERY',
+                'session_date': date.today(),
+            }
+
+            db_handle = (
+                self.order_manager.db
+                if (self.order_manager and getattr(self.order_manager, 'db', None))
+                else self.db
+            )
+
+            persisted = False
+            if db_handle is not None:
                 try:
-                    logger.info("[ADOPT-DB] Using ordermanager.db path (primary)")
-                    await self.order_manager.db.log_trade_entry({
-                        'symbol':      symbol,
-                        'direction':   side,
-                        'qty':         qty,
-                        'entry_price': avg_price,
-                        'order_id':    'MANUAL_ENTRY',
-                        'sl_id':       sl_id,
-                        'source':      'ORPHAN_RECOVERY',
-                        'session_date': date.today(),
-                    })
+                    await db_handle.log_trade_entry(entry_payload)
                     logger.info(f"[ADOPT] DB entry logged for {symbol} (state=OPEN)")
+                    persisted = True
                 except Exception as e:
-                    logger.error(
-                        f"[ADOPT-DB] ordermanager.db path FAILED: {e} — "
-                        f"orphan may be re-detected next cycle"
-                    )
-            elif self.db_manager:
-                try:
-                    logger.info("[ADOPT-DB] Using self.db_manager path (fallback)")
-                    await self.db_manager.log_trade_entry({
-                        'symbol':      symbol,
-                        'direction':   side,
-                        'qty':         qty,
-                        'entry_price': avg_price,
-                        'order_id':    'MANUAL_ENTRY',
-                        'sl_id':       sl_id,
-                        'source':      'ORPHAN_RECOVERY',
-                        'session_date': date.today(),
-                    })
-                    logger.info(f"[ADOPT] DB entry logged for {symbol} (state=OPEN) via db_manager.")
-                except Exception as e:
-                    logger.error(f"[ADOPT-DB] self.db_manager path FAILED: {e}")
-            elif self.db:
-                # Fallback: use reconciliation engine's own db reference
-                try:
-                    await self.db.execute(
-                        """INSERT INTO positions (symbol, direction, qty, entry_price, state, opened_at)
-                           VALUES ($1, $2, $3, $4, 'OPEN', NOW())
-                           ON CONFLICT (symbol) DO UPDATE SET state='OPEN'""",
-                        symbol, side, qty, avg_price
-                    )
-                    logger.info(f"[ADOPT] DB entry inserted (fallback path) for {symbol}")
-                except Exception as e:
-                    logger.error(f"[ADOPT] DB fallback insert failed: {e}")
+                    logger.error(f"[ADOPT-DB] log_trade_entry failed: {e} — trying raw insert")
+
+                if not persisted:
+                    try:
+                        await db_handle.execute(
+                            """INSERT INTO positions (symbol, direction, qty, entry_price, state, opened_at)
+                               VALUES ($1, $2, $3, $4, 'OPEN', NOW())
+                               ON CONFLICT (symbol) DO UPDATE SET state='OPEN'""",
+                            symbol, side, qty, avg_price
+                        )
+                        logger.info(f"[ADOPT] DB entry inserted via raw fallback for {symbol}")
+                        persisted = True
+                    except Exception as e:
+                        logger.error(f"[ADOPT] Raw insert fallback failed: {e}")
+
+            if not persisted:
+                logger.critical(
+                    "[ADOPT] ⚠️ %s adopted in memory but NOT persisted — it will be "
+                    "re-detected as an orphan next cycle. Investigate the DB.",
+                    symbol,
+                )
 
             # ── Step 5: Mark DB dirty ─────────────────────────────────────────
             # Forces fresh DB read next reconcile cycle.
@@ -641,11 +678,14 @@ class ReconciliationEngine:
                 f"🚨 ORPHAN DETECTED: {sym} qty={orphan['qty']} — "
                 f"adopting with emergency SL"
             )
-            # Build broker_pos dict for adopt_orphan
+            # adopt_orphan infers side from the SIGN of qty, so it must receive the
+            # signed net quantity — passing the absolute value would label every
+            # short as a LONG and place the emergency stop on the wrong side.
+            src = broker_pos.get(sym, {})
             adopt_data = {
                 'symbol':    sym,
-                'qty':       orphan['qty'],
-                'avg_price': broker_pos.get(sym, {}).get('avg_price', 0.0),
+                'qty':       src.get('net_qty', orphan.get('net_qty', orphan['qty'])),
+                'avg_price': src.get('avg_price', 0.0),
             }
             await self.adopt_orphan(adopt_data)
     
@@ -739,9 +779,19 @@ class ReconciliationEngine:
                     logger.info(f"✅ [RECOVERY] Slot successfully released and capital synced.")
                 except Exception as e:
                     logger.error(f"❌ [RECOVERY] Critical failure clearing slot for {sym}: {e}")
-                    # Emergency direct reset as final fallback
-                    self.capital.is_slot_free = True
-                    self.capital.active_symbol = None
+                    # Emergency direct reset. This previously assigned to
+                    # `is_slot_free` / `active_symbol`, which are read-only
+                    # properties — so the fallback itself raised AttributeError and
+                    # the slot stayed locked for the rest of the session, blocking
+                    # every subsequent entry.
+                    try:
+                        self.capital.force_reset_slot(reason=f"PHANTOM_{sym}")
+                    except Exception as reset_err:
+                        logger.critical(
+                            "🚨 [RECOVERY] Force reset ALSO failed for %s: %s — "
+                            "capital slot may be stuck. Restart required.",
+                            sym, reset_err,
+                        )
 
             # Step 3: CRITICAL — mark DB dirty so next cycle re-fetches fresh positions.
             # Without this, _get_db_positions_cached() keeps returning stale cache

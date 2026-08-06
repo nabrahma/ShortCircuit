@@ -141,34 +141,29 @@ class TradeManager:
 
                     logger.info(f"[EOD] Squaring off {symbol}: Qty {exit_qty} Side {exit_side}")
                     res = self.fyers.place_order(data=data)
-                    
-                    # Phase 80: Standardize log for session analyzer
-                    avg_price = pos.get('avgPrice', 0)
-                    exit_price = pos.get('lp', ltp if 'ltp' in locals() else 0)
-                    pnl_estimate = 0.0
-                    if avg_price > 0 and exit_price > 0:
-                        if net_qty < 0: # SHORT
-                            pnl_estimate = (avg_price - exit_price) * abs(net_qty)
-                        elif net_qty > 0: # LONG
-                            pnl_estimate = (exit_price - avg_price) * abs(net_qty)
-                    
-                    logger.info(f"[EXIT] {symbol} reason=EOD_SQUAREOFF exit=₹{exit_price:.2f} pnl=₹{pnl_estimate:.2f}")
                     logger.info(f"Square-off Response: {res}")
-                    
+
+                    # PnL for the session risk tracker.
+                    #
+                    # This previously read pos.get('lp', ...) — but Fyers netPositions
+                    # records carry no 'lp'/'ltp' field at all, so exit_price was
+                    # always 0, pnl_estimate always 0.0, and every EOD square-off
+                    # recorded a flat ₹0 outcome into MAX_SESSION_LOSS tracking. A
+                    # day closed entirely by square-off therefore looked risk-free.
+                    # (The fallback also referenced an undefined `ltp` guarded by a
+                    # locals() check that could never be true.)
+                    pnl_estimate = self._estimate_exit_pnl(pos, symbol, net_qty)
+
+                    logger.info(
+                        f"[EXIT] {symbol} reason=EOD_SQUAREOFF pnl=₹{pnl_estimate:.2f}"
+                    )
+
                     # Phase 51 [G13]: Record outcome
                     try:
-                        avg_price = pos.get('avgPrice', 0)
-                        exit_price = pos.get('lp', 0) # Use last price as estimate for PnL
-                        pnl_estimate = 0.0
-                        if avg_price > 0 and exit_price > 0:
-                            if net_qty < 0: # SHORT
-                                pnl_estimate = (avg_price - exit_price) * abs(net_qty)
-                            elif net_qty > 0: # LONG
-                                pnl_estimate = (exit_price - avg_price) * abs(net_qty)
                         self.record_trade_outcome(symbol, pnl_estimate)
                     except Exception as e:
                         logger.error(f"G13 outcome recording failed in square-off: {e}")
-                    
+
                     closed_count += 1
 
                     # Phase 42: Clean up SL tracking
@@ -185,6 +180,52 @@ class TradeManager:
         except Exception as e:
             logger.error(f"Auto-Square Off Failed: {e}")
             return f"Square Off Error: {e}"
+
+    def _estimate_exit_pnl(self, pos: dict, symbol: str, net_qty: int) -> float:
+        """
+        Best available PnL estimate for a position being squared off.
+
+        Preference order:
+          1. Broker-reported realised + unrealised P&L — exact, no extra call.
+          2. Mark-to-market against a freshly fetched LTP.
+          3. 0.0, logged loudly, so a missing number is never mistaken for a flat day.
+        """
+        # 1. Broker's own numbers.
+        try:
+            realised = float(pos.get('realized_profit', 0) or 0)
+            unrealised = float(pos.get('unrealized_profit', 0) or 0)
+            if realised or unrealised:
+                return realised + unrealised
+        except (TypeError, ValueError):
+            pass
+
+        # 2. Mark to market. netAvg is the true entry for both sides.
+        try:
+            entry = float(
+                pos.get('netAvg')
+                or pos.get('avgPrice')
+                or (pos.get('sellAvg') if net_qty < 0 else pos.get('buyAvg'))
+                or 0
+            )
+            if entry <= 0:
+                raise ValueError("no usable entry price")
+
+            quote = self.fyers.quotes(data={"symbols": symbol})
+            ltp = 0.0
+            if isinstance(quote, dict) and quote.get('d'):
+                ltp = float(quote['d'][0].get('v', {}).get('lp', 0) or 0)
+
+            if ltp > 0:
+                qty = abs(net_qty)
+                return (entry - ltp) * qty if net_qty < 0 else (ltp - entry) * qty
+        except Exception as e:
+            logger.warning(f"[EOD] Mark-to-market failed for {symbol}: {e}")
+
+        logger.error(
+            "[EOD] Could not determine PnL for %s — recording 0.0. "
+            "Session loss tracking is understated for this trade.", symbol
+        )
+        return 0.0
 
     def record_trade_outcome(self, symbol: str, pnl: float):
         """

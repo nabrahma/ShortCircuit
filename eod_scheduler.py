@@ -56,8 +56,17 @@ async def eod_scheduler(
             if should_fire:
                 logger.info("[EOD_SCHEDULER] 15:10 reached; triggering forced square-off.")
                 try:
-                    await trigger_eod_squareoff()
-                    await notify("EOD Square-off complete.")
+                    # Only announce success when the caller could actually PROVE the
+                    # account is flat. Previously this always reported "complete",
+                    # even one second after a timeout warning.
+                    ok = await trigger_eod_squareoff()
+                    if ok is False:
+                        logger.error(
+                            "[EOD_SCHEDULER] Square-off did not verify flat — "
+                            "operator has been alerted."
+                        )
+                    else:
+                        await notify("EOD Square-off complete.")
                 except Exception as exc:
                     logger.error("[EOD_SCHEDULER] Square-off failed: %s", exc)
                     await notify(f"EOD Square-off FAILED: {exc}")

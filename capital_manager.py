@@ -227,10 +227,18 @@ class CapitalManager:
                 f"all new entries BLOCKED until position closes"
             )
 
+    # The margin refresh must never outlive the close path that triggered it.
+    # broker.get_funds() has its own 15s ceiling, but focus_engine waits only 10s
+    # on _finalize_closed_position — so on 2026-08-06 the finalize was reported as
+    # FAILED (with an empty message, since that is str(concurrent TimeoutError))
+    # while the underlying work actually completed 5s later. Releasing the slot is
+    # the part that matters and is instant; the margin number can lag.
+    RELEASE_SYNC_TIMEOUT = 6.0
+
     async def release_slot(self, broker=None):
         """
         Release capital slot after SL/TP/manual exit.
-        Re-syncs Fyers margin if broker is provided.
+        Re-syncs Fyers margin if broker is provided, without blocking the caller.
         """
         async with self._lock:
             released = self._active_symbol
@@ -238,9 +246,32 @@ class CapitalManager:
             self._active_symbol = None
             logger.info(f"💰 CAPITAL SLOT RELEASED ← {released}")
 
-        # Sync outside lock — avoids deadlock, gets fresh margin for next trade
-        if broker:
+        # Sync outside the lock — avoids deadlock, refreshes margin for the next trade.
+        if not broker:
+            return
+        try:
+            await asyncio.wait_for(self.sync(broker), timeout=self.RELEASE_SYNC_TIMEOUT)
+        except asyncio.TimeoutError:
+            # Finish the refresh in the background; the slot is already free, which
+            # is the only part the caller is waiting on.
+            logger.warning(
+                "[CAPITAL] Margin refresh exceeded %.0fs after releasing %s — "
+                "continuing in background (slot is already free).",
+                self.RELEASE_SYNC_TIMEOUT, released,
+            )
+            try:
+                asyncio.get_running_loop().create_task(self._background_sync(broker))
+            except RuntimeError:
+                pass
+        except Exception as e:
+            logger.error(f"[CAPITAL] Margin refresh failed after release: {e}")
+
+    async def _background_sync(self, broker):
+        """Best-effort margin refresh detached from any caller's timeout."""
+        try:
             await self.sync(broker)
+        except Exception as e:
+            logger.error(f"[CAPITAL] Background margin sync failed: {e}")
 
     def get_slot_status(self) -> dict:
         """Rich status dict — used in Telegram capital alerts."""
@@ -274,3 +305,24 @@ class CapitalManager:
     def release(self, symbol: str):
         """DEPRECATED — use release_slot(). Kept so old code doesn't crash."""
         logger.warning(f"⚠️ capital.release() called [DEPRECATED] for {symbol} — migrate to release_slot()")
+
+    def force_reset_slot(self, reason: str = "EMERGENCY") -> None:
+        """
+        Synchronously clear the capital slot without awaiting the async lock.
+
+        Last-resort path for reconciliation when the normal async release has
+        already failed. Callers previously tried to do this by assigning
+        `capital.is_slot_free = True` and `capital.active_symbol = None` — but both
+        are read-only @property objects, so the assignment raised AttributeError
+        and the slot stayed locked forever, silently blocking every later entry.
+
+        Safe to call from any thread: it only rebinds two attributes, and the
+        single-position model means there is nothing to interleave with.
+        """
+        previous = self._active_symbol
+        self._position_active = False
+        self._active_symbol = None
+        logger.critical(
+            "💰 CAPITAL SLOT FORCE-RESET (%s) — was held by %s",
+            reason, previous or "nothing",
+        )

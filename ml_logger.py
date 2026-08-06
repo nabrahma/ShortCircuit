@@ -128,6 +128,32 @@ class MLDataLogger:
         
         logger.info(f"[ML] Data logger initialized. File: {self.daily_file}")
     
+    def _roll_date_if_needed(self) -> None:
+        """
+        Roll to a new daily file when the session date changes.
+
+        `self.today` was captured once at construction, and this logger is a
+        process-wide singleton. Any run that survives midnight — which the
+        post-market handler explicitly does, sleeping until the next open — kept
+        appending to the previous day's parquet and re-saving that day's whole
+        buffer, mislabelling every new observation.
+        """
+        current = datetime.datetime.now(IST).date().isoformat()
+        if current == self.today:
+            return
+
+        with self._lock:
+            if current == self.today:   # re-check under lock
+                return
+            previous = self.today
+            self.today = current
+            self.daily_file = self.data_dir / f"observations_{current}.parquet"
+            self.backup_file = self.data_dir / f"observations_{current}.csv"
+            self._buffer = []
+
+        logger.info("[ML] Rolled session file %s → %s", previous, current)
+        self._load_existing()
+
     def _load_existing(self):
         """Load existing observations for today if file exists."""
         if self.daily_file.exists():
@@ -187,6 +213,7 @@ class MLDataLogger:
         Log a new observation when a signal is detected.
         Returns observation ID for later outcome update.
         """
+        self._roll_date_if_needed()
         obs_id = str(uuid.uuid4())[:8]  # Short unique ID
         now = datetime.datetime.now(IST)
         
@@ -228,10 +255,23 @@ class MLDataLogger:
             "candle_body_pct": features.get("candle_body_pct", 0),
             "upper_wick_pct": features.get("upper_wick_pct", 0),
             "lower_wick_pct": features.get("lower_wick_pct", 0),
-            
+
+            # ── Strategy quality features ──────────────────────────────────
+            # These four are declared in FEATURE_COLUMNS and are passed in by
+            # analyzer._finalize_signal, but were never copied into the observation
+            # record — so _dataframe_from_buffer backfilled them as None and every
+            # row written since this logger was introduced has them null (verified:
+            # 99/99 across 27 session files). They are the most discriminative
+            # features the strategy produces; without them the parquet dataset
+            # cannot support any confidence- or fade-conditioned analysis.
+            "stretch_score": features.get("stretch_score", 0.0),
+            "vol_fade_ratio": features.get("vol_fade_ratio", 0.0),
+            "confidence": features.get("confidence", "MEDIUM"),
+            "pattern_bonus": features.get("pattern_bonus", "None"),
+
             "dom_ratio": features.get("dom_ratio", 1.0),
             "bid_ask_spread": features.get("bid_ask_spread", 0),
-            
+
             "num_confirmations": features.get("num_confirmations", 0),
             "confirmations": json.dumps(features.get("confirmations", [])),
             

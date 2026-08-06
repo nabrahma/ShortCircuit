@@ -730,30 +730,108 @@ async def main() -> int:
             except Exception as exc:
                 logger.error("[NOTIFY] Failed: %s", exc)
 
-        async def _trigger_squareoff():
-            # ✅ ADD: Stop the validation monitor BEFORE squaring off
+        async def _trigger_squareoff() -> bool:
+            """
+            Force-close everything at EOD. Returns True only if we can PROVE flat.
+
+            This used to swallow asyncio.TimeoutError and return normally, so the
+            scheduler's `await trigger_eod_squareoff()` succeeded and it immediately
+            sent "EOD Square-off complete." On 2026-07-29 the operator received
+            "⚠️ TIMED OUT ... positions might stay open" and "complete" one second
+            apart. At EOD, an unverified square-off is the single most expensive
+            thing to be wrong about — it must never report success it cannot prove.
+            """
             if ctx.focus_engine:
                 ctx.focus_engine.stop("EOD_SQUAREOFF")
                 logger.info("[EOD] FocusEngine validation monitor stopped before square-off.")
 
-            try:
-                # Add timeout to prevent hanging on broker connection issues
-                message = await asyncio.wait_for(
-                    asyncio.to_thread(ctx.trade_manager.close_all_positions),
-                    timeout=60
-                )
-                await _notify(f"[EOD] Square-off result:\n{message}")
-                
-                # Phase 97: Ensure capital slot is released after square-off
-                if ctx.capital_manager:
-                    await ctx.capital_manager.release_slot(broker=ctx.broker)
-                    logger.info("[EOD] Capital slot released after square-off.")
-            except asyncio.TimeoutError:
-                logger.error("[EOD] Square-off timed out after 60s!")
-                await _notify("⚠️ EOD Square-off TIMED OUT. Some positions might stay open!")
-            except Exception as exc:
-                logger.error("[EOD] Square-off failed: %s", exc)
-                await _notify(f"❌ EOD Square-off FAILED: {exc}")
+            # Square-off is retried until the account is provably flat or the hard
+            # deadline passes — NOT attempted once with a 60s budget.
+            #
+            # On 2026-07-29 the single attempt hung 974s inside its very first
+            # REST call (self.fyers.positions(), on a client with no timeout), the
+            # 60s wait_for gave up, and the run was reported as complete. A
+            # one-shot square-off has no way to recover from a transient stall,
+            # and 15:10 leaves 20 minutes before the 15:30 close — ample room to
+            # keep trying.
+            deadline = datetime.now(IST).replace(
+                hour=15, minute=25, second=0, microsecond=0
+            )
+            attempt = 0
+
+            while True:
+                attempt += 1
+                try:
+                    message = await asyncio.wait_for(
+                        asyncio.to_thread(ctx.trade_manager.close_all_positions),
+                        timeout=90
+                    )
+                    logger.info("[EOD] Square-off attempt %d: %s", attempt, message)
+                except asyncio.TimeoutError:
+                    # to_thread cannot be cancelled — the worker keeps running. The
+                    # HTTP-layer timeout is what actually bounds it now.
+                    logger.error("[EOD] Square-off attempt %d timed out (90s).", attempt)
+                except Exception as exc:
+                    logger.error("[EOD] Square-off attempt %d failed: %s", attempt, exc)
+
+                # Verify against the broker. Never claim success without proof.
+                still_open = None
+                try:
+                    positions = await asyncio.wait_for(
+                        ctx.broker.get_all_positions(force_rest=True), timeout=20
+                    )
+                    still_open = [p for p in positions if p.get('qty', 0)]
+                except Exception as verify_err:
+                    logger.error("[EOD] Could not verify flat state: %s", verify_err)
+
+                if still_open == []:
+                    logger.info("[EOD] ✅ Verified flat after %d attempt(s).", attempt)
+                    if ctx.capital_manager:
+                        await ctx.capital_manager.release_slot(broker=ctx.broker)
+                        logger.info("[EOD] Capital slot released after square-off.")
+                    return True
+
+                now = datetime.now(IST)
+                if now >= deadline:
+                    break
+
+                if still_open:
+                    detail = ", ".join(
+                        f"{p.get('symbol')} x{p.get('qty')}" for p in still_open[:5]
+                    )
+                    logger.critical(
+                        "🚨 [EOD] Attempt %d left positions open: %s — retrying.",
+                        attempt, detail,
+                    )
+                    if attempt == 1:
+                        await _notify(
+                            f"⚠️ *EOD SQUARE-OFF RETRYING*\n\n"
+                            f"Still open: `{detail}`\n"
+                            f"Retrying until 15:25 IST."
+                        )
+                else:
+                    logger.error(
+                        "[EOD] Attempt %d could not verify broker state — retrying.",
+                        attempt,
+                    )
+
+                await asyncio.sleep(10)
+
+            # Deadline passed without proof of flat.
+            detail = (
+                ", ".join(f"{p.get('symbol')} x{p.get('qty')}" for p in still_open[:5])
+                if still_open else "state unverifiable"
+            )
+            logger.critical("🚨 [EOD] SQUARE-OFF FAILED after %d attempts: %s", attempt, detail)
+            await _notify(
+                f"🚨 *EOD SQUARE-OFF FAILED*\n\n"
+                f"After {attempt} attempts up to 15:25 IST.\n"
+                f"Status: `{detail}`\n\n"
+                f"⚠️ *CLOSE MANUALLY IN THE FYERS APP NOW.*\n"
+                f"_Anything left open is auto-squared by the broker at a price "
+                f"you do not control._"
+            )
+            return False
 
         async def _run_analysis():
             try:
@@ -788,9 +866,8 @@ async def main() -> int:
         async def _restart_recovery():
             await ctx.startup_recovery.scan_orphaned_trades()
 
-        _update_terminal_log()
-
-        # PRD-008: periodic terminal log update
+        # Was invoked twice back-to-back here; the second call was a no-op that
+        # re-ran two subprocesses over the whole session log at startup.
         _update_terminal_log()
 
         async with asyncio.TaskGroup() as tg:

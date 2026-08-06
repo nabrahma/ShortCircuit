@@ -12,6 +12,7 @@ All feature computation lives in features.py.
 All strategy logic lives in strategy/back_to_vwap.py.
 """
 
+import concurrent.futures
 import csv
 import datetime
 import logging
@@ -33,6 +34,12 @@ from strategy.back_to_vwap import BackToVWAPShort
 logger = logging.getLogger(__name__)
 
 SIGNAL_LOG_FILE = "logs/signals.csv"
+
+# Shared pool for the G9 higher-timeframe check. Sized for the scanner's parallel
+# candidate analysis; daemon threads so it can never hold up interpreter shutdown.
+_HTF_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=4, thread_name_prefix="htf-confluence"
+)
 
 
 def log_signal(symbol: str, ltp: float, pattern: str, stop_loss: float,
@@ -301,16 +308,23 @@ class FyersAnalyzer:
         pattern_desc = result.get('pattern_bonus', 'EXHAUSTION_FADE')
 
         # ── G9: HTF Confluence ────────────────────────────────────────
-        import concurrent.futures
+        # Runs on a shared, long-lived pool. The previous version built a new
+        # ThreadPoolExecutor per symbol per scan and used it as a context manager,
+        # so __exit__ called shutdown(wait=True) — meaning a timed-out G9 check
+        # still blocked here until the worker finished, defeating the timeout it
+        # was written to enforce. It also churned thread creation across every
+        # candidate on every 60s cycle.
         try:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _htf_exec:
-                _htf_future = _htf_exec.submit(
-                    self.htf_confluence.check_trend_exhaustion,
-                    symbol, df_15m=df_15m, vwap_sd=vwap_sd,
-                )
-                htf_ok, htf_msg = _htf_future.result(timeout=1.5)
+            _htf_future = _HTF_EXECUTOR.submit(
+                self.htf_confluence.check_trend_exhaustion,
+                symbol, df_15m=df_15m, vwap_sd=vwap_sd,
+            )
+            htf_ok, htf_msg = _htf_future.result(timeout=1.5)
+        except concurrent.futures.TimeoutError:
+            # Abandon the worker rather than waiting on it; G9 is fail-closed.
+            htf_ok, htf_msg = False, "G9 BLOCK: HTF check timed out (1.5s)"
         except Exception as e:
-            htf_ok, htf_msg = False, f"G9 BLOCK: Timeout ({e})"
+            htf_ok, htf_msg = False, f"G9 BLOCK: {e}"
 
         gr.g9_pass = htf_ok
         gr.g9_value = htf_msg

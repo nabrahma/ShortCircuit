@@ -48,6 +48,10 @@ terminal_log.md
 md/*
 !md/PHASE44_5_OPEN_ITEMS.md
 
+# ── Agent / Assistant Context (local only) ────────────────────
+CLAUDE.md
+.claude/
+
 # ── Runtime Files ─────────────────────────────────────────────
 shortcircuit.lock
 

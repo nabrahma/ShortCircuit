@@ -600,48 +600,125 @@ class FocusEngine:
 
     def attempt_recovery(self):
         """
-        Scans Fyers for open positions and pending orders to 'adopt' orphaned trades.
+        Scan Fyers for open positions and resting orders to adopt orphaned trades.
+
+        Previously this call could never succeed: it invoked
+            start_focus(symbol, entry_price, sl_price, message_id=None, ...)
+        against the signature
+            start_focus(symbol, position_data, message_id=None, ...)
+        so a float landed where a dict was expected and `.get()` raised on the first
+        line. It also referenced `self.bot`, which does not exist (the attribute is
+        `telegram_bot`). Both failures were swallowed by the outer except, so this
+        logged "[RECOVERY] Failed" every startup and adopted nothing.
         """
         try:
             logger.info("[RECOVERY] Scanning for orphaned trades...")
             positions = self.fyers.positions()
-            
-            if 'netPositions' not in positions: return
-            
+
+            if not isinstance(positions, dict) or 'netPositions' not in positions:
+                logger.warning("[RECOVERY] Positions unavailable — skipping recovery scan.")
+                return
+
             for p in positions['netPositions']:
-                qty = p['netQty']
-                if qty != 0:
-                    symbol = p['symbol']
-                    logger.info(f"[RECOVERY] Found Open Position: {symbol} Qty: {qty}")
-                    
-                    # Determine Entry Price
-                    entry_price = float(p['avgPrice']) # buyAvg or sellAvg depending on side
-                    if qty < 0:
-                        entry_price = float(p['sellAvg']) # Short Entry
-                    
-                    # Find Pending SL Order
-                    sl_price = entry_price * 1.01 # Default fallback
+                qty = p.get('netQty', 0) or 0
+                if qty == 0:
+                    continue
+
+                symbol = p.get('symbol')
+                if not symbol:
+                    continue
+
+                logger.info(f"[RECOVERY] Found Open Position: {symbol} Qty: {qty}")
+
+                # Entry price: for a short the true entry is sellAvg, for a long buyAvg.
+                if qty < 0:
+                    entry_price = float(p.get('sellAvg') or p.get('netAvg') or p.get('avgPrice') or 0)
+                else:
+                    entry_price = float(p.get('buyAvg') or p.get('netAvg') or p.get('avgPrice') or 0)
+
+                if entry_price <= 0:
+                    logger.error(
+                        "[RECOVERY] %s has no usable entry price (%s) — refusing to adopt "
+                        "blind. Close manually or let reconciliation handle it.",
+                        symbol, entry_price,
+                    )
+                    continue
+
+                # Locate a resting stop for this symbol.
+                is_short = qty < 0
+                sl_price = entry_price * (1.01 if is_short else 0.99)  # conservative default
+                try:
                     orders = self.fyers.orderbook()
-                    if 'orderBook' in orders:
-                        for o in orders['orderBook']:
-                            if o['symbol'] == symbol and o['status'] == 6: # Pending
-                                # Assume this is SL
-                                sl_price = float(o['stopPrice']) if o['stopPrice'] > 0 else float(o['limitPrice'])
-                                logger.info(f"[RECOVERY] Found Pending SL Order: {sl_price}")
-                                break
-                    
-                    # Start Focus
-                    # We pass message_id=None so Telegram sends a fresh recovery alert.
-                    self.start_focus(symbol, entry_price, sl_price, message_id=None, trade_id="RECOVERY", qty=abs(qty))
-                    
-                    if self.bot and config.TELEGRAM_CHAT_ID:
-                         self.bot.send_message(config.TELEGRAM_CHAT_ID, f"♻️ **RECOVERY MODE**\nAdopting Trade: {symbol}")
-                    
-                    # We only support 1 active trade for now in Focus Engine
-                    break 
-                    
+                    for o in (orders or {}).get('orderBook', []):
+                        if o.get('symbol') != symbol:
+                            continue
+                        # 6 = PENDING, 4 = TRANSIT; both are live resting orders.
+                        if o.get('status') not in (4, 6):
+                            continue
+                        candidate = float(o.get('stopPrice') or 0) or float(o.get('limitPrice') or 0)
+                        if candidate > 0:
+                            sl_price = candidate
+                            logger.info(f"[RECOVERY] Found resting SL order @ {sl_price}")
+                            break
+                except Exception as ob_err:
+                    logger.warning(f"[RECOVERY] Orderbook lookup failed: {ob_err}")
+
+                # start_focus expects a position_data DICT — this is the actual fix.
+                position_data = {
+                    'symbol':      symbol,
+                    'entry_price': entry_price,
+                    'stop_loss':   sl_price,
+                    'qty':         abs(qty),
+                    'tick_size':   0.05,
+                    'trade_id_str': f"RECOVERY_{symbol}",
+                }
+                self.start_focus(symbol, position_data, message_id=None, trade_id="RECOVERY")
+
+                if self.telegram_bot:
+                    msg = (
+                        f"♻️ *RECOVERY MODE*\n\n"
+                        f"Adopted: `{symbol}`\n"
+                        f"Qty: {abs(qty)} ({'SHORT' if is_short else 'LONG'})\n"
+                        f"Entry: ₹{entry_price:.2f}\n"
+                        f"SL: ₹{sl_price:.2f}\n\n"
+                        f"_Bot is now monitoring this position._"
+                    )
+                    self._dispatch_alert(msg)
+
+                # FocusEngine tracks one active trade.
+                break
+
         except Exception as e:
-            logger.error(f"[RECOVERY] Failed: {e}")
+            logger.error(f"[RECOVERY] Failed: {e}", exc_info=True)
+
+    def _dispatch_alert(self, message: str) -> None:
+        """
+        Send a Telegram alert from either sync or async context.
+
+        attempt_recovery() runs during __init__, before any event loop exists, so a
+        bare asyncio.create_task() there raises. Resolve the context at call time.
+        """
+        bot = self.telegram_bot
+        if not bot:
+            return
+        try:
+            loop = getattr(self, '_event_loop', None)
+            if loop is not None and loop.is_running():
+                asyncio.run_coroutine_threadsafe(bot.send_alert(message), loop)
+                return
+            try:
+                running = asyncio.get_running_loop()
+                running.create_task(bot.send_alert(message))
+            except RuntimeError:
+                # No loop yet (startup path) — queue for the morning briefing instead
+                # of crashing the recovery scan.
+                pending = getattr(self, '_deferred_alerts', None)
+                if pending is None:
+                    pending = self._deferred_alerts = []
+                pending.append(message)
+                logger.info("[ALERT] Deferred (no event loop yet): %s", message[:60])
+        except Exception as e:
+            logger.warning(f"[ALERT] Dispatch failed: {e}")
 
     def start_focus(self, symbol, position_data, message_id=None, trade_id=None, qty=1):
         """
@@ -667,32 +744,15 @@ class FocusEngine:
         else:
             soft_sl = entry_price * (1 + soft_stop_pct)
 
-        # Phase 52: Compute TP levels from OrderManager
-        tps = {}
-        if (self.order_manager and entry_price > 0):
-            try:
-                tps = self.order_manager.compute_take_profits(entry_price, position_data)
-            except Exception as e:
-                logger.warning(f"[P52] compute_take_profits failed for {symbol}: {e}")
-
-        # TP default: 1.0% in the correct direction
-        tp_default = entry_price * 1.01 if is_long else entry_price * 0.99
-        tp_2 = tps.get('tp', tp_default)
-
-        # Phase 98: Hybrid VWAP 50% Scale-out Target (Midpoint)
-        # We find the exact midpoint between entry_price and the VWAP target
+        # Take-profit removed — see the note in focus_loop. Trades exit on the
+        # stop-loss or at EOD; nothing caps the upside.
         tick = position_data.get('tick_size', 0.05)
-        tp_1_raw = entry_price + (tp_2 - entry_price) / 2.0
-        tp_1 = round(round(tp_1_raw / tick) * tick, 2)
 
         self.active_trade = {
             'symbol':          symbol,
             'entry':           entry_price,
             'sl':              sl_price,
             'soft_sl':         soft_sl,
-            'tp':              tp_1,       # Final target set to Midpoint (TP_1) per user request
-            'tp_1':            tp_1,       # (Legacy reference)
-            'tp_1_hit':        False,      # State tracker for partial exit
             'status':          'OPEN',
             'highest_profit':  -999,
             'message_id':      message_id,
@@ -719,10 +779,26 @@ class FocusEngine:
             'mae_pct':         0.0,  # Max Adverse Excursion (% from entry)
         }
         
+        # Per-trade detector state MUST be reset here.
+        #
+        # These live on the engine, not on the trade, and were never cleared when a
+        # new focus began. On 2026-08-06 NSE:STOVEKRAFT-EQ left _consecutive_flat_reads
+        # at 1; the very next trade (NSE:BAJAJELEC-EQ) needed only a single flat read
+        # to reach the "2 consecutive" threshold and was declared manually closed
+        # 23ms after entry. _last_broker_pos_check likewise left the 5s interval gate
+        # already open, so the check fired immediately instead of after 5s.
+        self._consecutive_flat_reads = 0
+        self._api_fail_streak = 0
+        self._last_broker_pos_check = time.time()
+
+        # Grace period: give the broker time to register the fill and push its first
+        # position frame before any close-detection is allowed to run at all.
+        self._flat_check_not_before = time.time() + 10.0
+
         self.is_running = True
         logger.info(
             f"[FOCUS] Started {symbol} qty={actual_qty} entry=₹{entry_price:.2f} "
-            f"tp=₹{self.active_trade['tp']:.2f} sl=₹{sl_price:.2f}"
+            f"sl=₹{sl_price:.2f} (no TP — runs to SL or EOD)"
         )
         
         # Start Loop
@@ -731,20 +807,62 @@ class FocusEngine:
 
     def _check_broker_position(self, symbol: str) -> dict:
         """
-        Phase 42/95: Query broker for current position.
+        Query broker for the current position.
+
         Returns:
           - Position dict if found
-          - None if API succeeded but position not found (genuinely flat)
-          - {'_api_failed': True} if API call failed (DO NOT treat as flat)
+          - None if the source was authoritative and the position is genuinely gone
+          - {'_api_failed': True} if we could not determine the truth (NEVER flat)
+
+        The websocket position cache is consulted first. That cache is now actually
+        populated (it previously had no writer), so the common case costs zero REST
+        calls instead of one every 5 seconds per open position.
+
+        A cache MISS is deliberately not treated as flat — the cache only holds
+        symbols that have pushed an event this session, so absence proves nothing.
+        We fall through to REST for that verdict.
         """
+        broker = self.order_manager.broker if self.order_manager else None
+
+        # ── Fast path: live WS position cache ────────────────────────────
+        # A cache HIT is authoritative. A cache MISS is NOT — it only means no
+        # position frame has arrived for this symbol yet.
+        #
+        # An earlier version of this method returned None (i.e. "flat") on a miss
+        # whenever ANY symbol had pushed an event in the last 15s. That global
+        # timestamp has nothing to do with this symbol. On 2026-08-06 it fired
+        # 23ms after entry on NSE:BAJAJELEC-EQ — the position's own first frame
+        # did not arrive until 540ms later — and the bot declared a manual close
+        # on a position that was perfectly fine at the broker.
+        if broker is not None:
+            try:
+                with broker._position_cache_lock:
+                    entry = broker.position_cache.get(symbol)
+
+                if entry is not None:
+                    age = (datetime.datetime.now(datetime.timezone.utc) - entry.timestamp).total_seconds()
+                    if age < broker.POSITION_CACHE_TTL_SECONDS:
+                        return {
+                            'symbol': symbol,
+                            'netQty': entry.net_qty,
+                            'qty': abs(entry.net_qty),
+                            'avgPrice': entry.avg_price,
+                            '_source': 'ws_cache',
+                        }
+                # Miss → fall through to REST. Never infer "flat" from absence.
+            except Exception as e:
+                logger.debug(f"[SAFETY] WS position cache read failed: {e}")
+
+        # ── Authoritative path: REST ─────────────────────────────────────
         try:
             positions = self.fyers.positions()
-            if positions.get('s') != 'ok' or 'netPositions' not in positions:
+            if not isinstance(positions, dict) or positions.get('s') != 'ok' \
+                    or 'netPositions' not in positions:
                 logger.error("[SAFETY] Could not fetch positions (API error, not flat)")
                 return {'_api_failed': True}
 
             for pos in positions.get('netPositions', []):
-                if pos['symbol'] == symbol:
+                if pos.get('symbol') == symbol:
                     return pos
 
             return None  # API succeeded, position genuinely not found = closed
@@ -781,12 +899,13 @@ class FocusEngine:
                     manual_override = pos.get('manual_override', False)
 
                 # ── CRITICAL: TIME-BASED STOP (Mean Reversion Expiration) ───
-                if not manual_override and hasattr(config, 'MAX_HOLD_TIME_MINUTES') and self.order_manager:
+                _max_hold = getattr(config, 'MAX_HOLD_TIME_MINUTES', 0) or 0
+                if not manual_override and _max_hold > 0 and self.order_manager:
                     om_pos = self.order_manager.active_positions.get(symbol)
                     if om_pos and om_pos.get('status') == 'OPEN' and 'entry_time' in om_pos:
                         hold_duration = (datetime.datetime.now() - om_pos['entry_time']).total_seconds() / 60.0
-                        if hold_duration >= config.MAX_HOLD_TIME_MINUTES:
-                            logger.warning(f"⏰ [TIME_STOP] {symbol} held for {hold_duration:.1f} mins > {config.MAX_HOLD_TIME_MINUTES} mins limit. Exiting.")
+                        if hold_duration >= _max_hold:
+                            logger.warning(f"⏰ [TIME_STOP] {symbol} held for {hold_duration:.1f} mins > {_max_hold} mins limit. Exiting.")
                             if self._event_loop:
                                 future = asyncio.run_coroutine_threadsafe(
                                     self.order_manager.safe_exit(symbol, "TIME_STOP"),
@@ -869,7 +988,12 @@ class FocusEngine:
                 _last_broker_check = getattr(self, '_last_broker_pos_check', 0)
                 _api_fail_streak = getattr(self, '_api_fail_streak', 0)
                 _check_interval = min(5 * (2 ** _api_fail_streak), 30)  # 5s → 10s → 20s → 30s max
-                if time.time() - _last_broker_check > _check_interval:
+                # Post-entry grace: the broker needs a moment to register the fill.
+                # Without this, close-detection can race the position's own first frame.
+                _grace_until = getattr(self, '_flat_check_not_before', 0)
+                if time.time() < _grace_until:
+                    pass
+                elif time.time() - _last_broker_check > _check_interval:
                     self._last_broker_pos_check = time.time()
                     broker_pos = self._check_broker_position(symbol)
 
@@ -923,9 +1047,14 @@ class FocusEngine:
                                         ),
                                         self._event_loop
                                     )
-                                    future.result(timeout=10)
+                                    future.result(timeout=20)
                                 except Exception as e:
-                                    logger.error(f"[FOCUS] _finalize_closed_position failed: {e}")
+                                    # concurrent.futures.TimeoutError stringifies to
+                                    # '', which produced a blank error in the log.
+                                    logger.error(
+                                        "[FOCUS] _finalize_closed_position failed: %s: %s",
+                                        type(e).__name__, e or "(timed out)",
+                                    )
                                     # Fallback: release capital directly
                                     if self.order_manager.capital:
                                         asyncio.run_coroutine_threadsafe(
@@ -1008,25 +1137,15 @@ class FocusEngine:
                 # DISABLED: User requested 100% exit at TP_1 (Midpoint). 
                 # The Phase 78 engine below will now handle the 100% exit at TP_1.
 
-                # ── PHASE 78: SINGLE TP ENGINE (FINAL TP 2) ────────────────────────
-                # Phase 94: Direction-aware TP comparison
-                if not manual_override:
-                    _tp_hit = (ltp >= t['tp']) if _trade_dir == 'LONG' else (ltp <= t['tp'])
-                    if _tp_hit:
-                        logger.info(f"🎯 [TP] {symbol} hit ₹{t['tp']:.2f} — closing 100% ({t['remaining_qty']} shares)")
-                        if self.order_manager and self._event_loop:
-                            future = asyncio.run_coroutine_threadsafe(
-                                self.order_manager.safe_exit(symbol, "TP_HIT"),
-                                self._event_loop
-                            )
-                            # Wait for safe_exit to complete (max 30s) to ensure capital is released
-                            try:
-                                result = future.result(timeout=30)
-                                logger.info(f"[TP] safe_exit completed for {symbol}: success={result}")
-                            except Exception as tp_exit_err:
-                                logger.error(f"[TP] safe_exit failed/timed out for {symbol}: {tp_exit_err}")
-                        self.stop_focus("TP_HIT")
-                        return
+                # ── TAKE-PROFIT: REMOVED ───────────────────────────────────────────
+                # The target sat at the midpoint between entry and VWAP, which is
+                # far too tight for this strategy: it capped every winner while
+                # leaving losers to run to the stop. The only profitable trade in
+                # the first two live days (NSE:BAJAJELEC-EQ, +₹76.30) made its money
+                # precisely because no TP fired and it ran to the EOD square-off.
+                #
+                # Positions now exit on the stop-loss or at EOD. Nothing else caps
+                # the upside.
 
                 # ── SOFT STOP (existing logic — keep for non-partial-exit fallback) ──
                 partial_enabled = False  # Phase 93: Partial exit not currently active
