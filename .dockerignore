@@ -1,0 +1,36 @@
+# Secrets — must never enter the image
+.env
+.env.*
+!.env.example
+*.token
+*.key
+access_token.txt
+data/access_token.txt
+
+# Runtime state
+logs/
+data/
+reports/
+scratch/
+
+# Local tooling
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+coverage.xml
+
+# VCS and CI
+.git/
+.github/
+.gitignore
+.pre-commit-config.yaml
+
+# Docs not needed at runtime
+docs/
+*.md
+!README.md

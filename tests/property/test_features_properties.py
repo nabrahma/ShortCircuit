@@ -170,7 +170,7 @@ def test_p7_read_only_features_are_pure_and_do_not_mutate_input(df):
         F.is_narrowing_highs(df, n=3),
     )
 
-    for a, b in zip(first, second):
+    for a, b in zip(first, second, strict=True):
         if isinstance(a, float) and np.isnan(a):
             assert np.isnan(b)
         else:

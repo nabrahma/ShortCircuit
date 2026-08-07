@@ -1,0 +1,138 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "shortcircuit"
+version = "1.0.0"
+description = "Live intraday NSE execution engine: WebSocket-first market data with freshness tracking, sequential gate validation, broker-verified fills, capital-aware sizing, and automated state reconciliation."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Nabaskar Brahma" }]
+keywords = [
+    "algorithmic-trading", "trading-bot", "nse", "intraday",
+    "market-microstructure", "asyncio", "websockets", "state-reconciliation",
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Office/Business :: Financial :: Investment",
+]
+dynamic = ["dependencies"]
+
+[project.urls]
+Homepage = "https://github.com/nabrahma/ShortCircuit"
+Documentation = "https://github.com/nabrahma/ShortCircuit/tree/main/docs"
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements.txt"] }
+
+# The package still lives at the repository root. Modules are enumerated
+# explicitly rather than auto-discovered so that data/, logs/ and reports/ are
+# never mistaken for packages.
+[tool.setuptools]
+py-modules = [
+    "config", "main", "analyzer", "scanner", "order_manager", "focus_engine",
+    "trade_manager", "capital_manager", "signal_manager", "reconciliation",
+    "database", "ml_logger", "gate_result_logger", "telegram_bot",
+    "market_session", "market_utils", "startup_recovery", "symbols",
+    "rest_limiter", "fyers_connect", "fyers_broker_interface",
+    "eod_analyzer", "eod_scheduler", "eod_watchdog", "dump_terminal_log",
+]
+
+[tool.setuptools.packages.find]
+include = ["strategy*"]
+
+# ── pytest ────────────────────────────────────────────────────────────────
+# Replaces pytest.ini. asyncio_mode=auto is preserved from the original.
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-ra --strict-markers"
+markers = [
+    "integration: tests that require external infrastructure (e.g. PostgreSQL)",
+    "slow: tests that take more than a second",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning:pkg_resources",
+    "ignore::DeprecationWarning:fyers_apiv3.*",
+]
+
+# ── coverage ──────────────────────────────────────────────────────────────
+[tool.coverage.run]
+branch = true
+omit = [
+    "tests/*", "scratch/*", "tools/*", ".venv/*",
+    "main.py",              # orchestration only; covered by integration, not units
+    "dump_terminal_log.py",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+]
+show_missing = true
+skip_covered = false
+
+# ── ruff ──────────────────────────────────────────────────────────────────
+# Deliberately narrow. This is an existing codebase and the prime directive
+# forbids reformatting working trading logic to satisfy a linter, so only rules
+# that catch genuine defects are enabled.
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+exclude = [".venv", "scratch", "migrations", "data", "logs", "reports"]
+
+[tool.ruff.lint]
+select = [
+    "E9",    # syntax / runtime errors
+    "F63",   # comparison mistakes
+    "F7",    # syntax anti-patterns
+    "F82",   # undefined names  ← catches the class of bug found in this repo
+    "B",     # bugbear
+]
+ignore = [
+    "E501",  # line length: existing code, not worth reflowing
+    "B008",  # function call in default arg — used deliberately in places
+    "B904",  # raise-from: would require touching exception handling
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B011"]
+
+# Pre-existing findings in trading code. Each is suppressed HERE, with a reason,
+# rather than silenced with an inline noqa — so the list stays visible and
+# reviewable in one place. None are fixed because §3.1 of the presentation PRD
+# forbids editing function bodies in a repository that places real orders; every
+# one is recorded in docs/KNOWN_GAPS.md with an assessment.
+#
+# B023 — closure over a loop variable. In both cases the closure is invoked
+#        within the same iteration, so the late-binding hazard does not
+#        materialise. Real fix is a default-arg bind; deferred.
+"focus_engine.py" = ["B023"]
+"main.py"         = ["B023", "B012"]   # B012: return inside finally, in the shutdown path
+"gate_result_logger.py" = ["B007"]     # unused loop variable, cosmetic
+"scanner.py"      = ["B007"]           # unused loop variable, cosmetic
+# F821 below is a genuine undefined name, but sits after an unconditional
+# `continue` and is therefore unreachable. Flagged in KNOWN_GAPS.md.
+"tools/analyze_session_log.py" = ["F821"]
+
+# ── mypy ──────────────────────────────────────────────────────────────────
+# Advisory only. Typing 26 untyped modules would be a code change, which the
+# prime directive forbids. Runs in CI with continue-on-error so the signal is
+# visible without blocking on a refactor.
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+warn_unused_configs = true
+check_untyped_defs = false
+disallow_untyped_defs = false
+exclude = ["\\.venv", "scratch", "tests"]

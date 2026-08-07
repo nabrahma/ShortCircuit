@@ -1,0 +1,63 @@
+name: Security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "0 3 * * 1"       # Mondays 03:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  secrets:
+    name: Secret scan (full history)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          fetch-depth: 0       # full history — a deleted credential still lives here
+      - name: gitleaks
+        uses: gitleaks/gitleaks-action@83373cf2f8c4db6e24b41c1a9b086bb9619e9cd3  # v2.3.7
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "false"   # never upload a report containing secrets
+
+  deps:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b  # v5.3.0
+        with:
+          python-version: "3.12"
+      - run: pip install pip-audit
+      - run: pip-audit -r requirements.txt --desc
+        continue-on-error: true   # advisory: upstream SDK pins are not ours to bump
+
+  code:
+    name: Static analysis
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b  # v5.3.0
+        with:
+          python-version: "3.12"
+      - run: pip install bandit
+      - run: bandit -r . -ll --exclude ./.venv,./tests,./scratch,./migrations
+
+  image:
+    name: Container scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      - run: docker build -f deploy/Dockerfile -t shortcircuit:scan .
+      - name: trivy
+        uses: aquasecurity/trivy-action@18f2510ee396bbf400402947b394f2dd8c87dbb0  # v0.29.0
+        with:
+          image-ref: shortcircuit:scan
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+          ignore-unfixed: true
