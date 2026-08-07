@@ -10,7 +10,12 @@ from urllib3.util.retry import Retry
 # Configure Logging
 logger = logging.getLogger(__name__)
 
-TOKEN_FILE = Path(__file__).resolve().parent / "data" / "access_token.txt"
+# Resolved against the repository root rather than this file's directory.
+# `Path(__file__).parent / "data"` was correct only while this module sat in the
+# repository root; relocating it into a package would have pointed the cached
+# broker token at a directory inside the package, and the bot would have tried to
+# re-authenticate interactively on every start. Pinned by tests/unit/test_paths.py.
+from paths import TOKEN_FILE  # noqa: E402
 
 # (connect, read) seconds. The Fyers SDK issues requests with NO timeout, so a
 # stalled socket blocks its caller forever. On 2026-07-29 that produced 41 scan
@@ -271,8 +276,8 @@ class FyersConnect:
         """Build and return authenticated Fyers client."""
         from fyers_apiv3 import fyersModel
         
-        LOG_ROOT = Path(__file__).resolve().parent / "logs"
-        FYERS_REST_LOG_DIR = LOG_ROOT / "fyers_rest"
+        # Repository-anchored, for the same reason as TOKEN_FILE above.
+        from paths import FYERS_REST_LOG_DIR
         FYERS_REST_LOG_DIR.mkdir(parents=True, exist_ok=True)
 
         client = fyersModel.FyersModel(
