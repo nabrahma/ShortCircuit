@@ -16,6 +16,7 @@ import uuid
 from datetime import datetime, timedelta, UTC
 from typing import Dict, Optional, Any
 import config
+from fyers_connect import ASYNC_CALL_TIMEOUT, ASYNC_RETRIED_TIMEOUT
 from fyers_broker_interface import (
     FyersBrokerInterface,
     FyersOrderStatus,
@@ -239,7 +240,8 @@ class OrderManager:
         return {'tp': round(round(tp / tick) * tick, 2)}
 
     async def _reconcile_unknown_order(
-        self, symbol: str, side: str, qty: int, lookback_seconds: int = 60
+        self, symbol: str, side: str, qty: int, lookback_seconds: int = 60,
+        attempts: int = 3,
     ) -> Optional[str]:
         """
         Find an order we may have placed but whose response we never received.
@@ -250,19 +252,67 @@ class OrderManager:
 
         This is the difference between "the request timed out so nothing happened"
         (usually wrong) and "let me go look" (always correct).
-        """
-        try:
-            loop = asyncio.get_event_loop()
-            rest = getattr(self.broker, 'rest_client', None)
-            if not rest:
-                return None
 
-            orderbook = await asyncio.wait_for(
-                loop.run_in_executor(None, rest.orderbook), timeout=5.0
+        It RETRIES, because this is the safety net and a single attempt is not
+        good enough. On 2026-08-07 the one attempt used a 5s budget against a 12s
+        transport timeout, timed out, and the bot proceeded without ever learning
+        whether a live SELL order was resting at the broker.
+        """
+        loop = asyncio.get_event_loop()
+        rest = getattr(self.broker, 'rest_client', None)
+        if not rest:
+            logger.error("[RECONCILE-ORDER] No REST client — cannot verify %s", symbol)
+            return None
+
+        orderbook = None
+        for attempt in range(1, attempts + 1):
+            try:
+                orderbook = await asyncio.wait_for(
+                    loop.run_in_executor(None, rest.orderbook),
+                    timeout=ASYNC_RETRIED_TIMEOUT,
+                )
+                if isinstance(orderbook, dict) and orderbook.get('s') == 'ok':
+                    break
+                logger.warning(
+                    "[RECONCILE-ORDER] Attempt %d/%d: bad orderbook response for %s",
+                    attempt, attempts, symbol,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "[RECONCILE-ORDER] Attempt %d/%d timed out for %s",
+                    attempt, attempts, symbol,
+                )
+            except Exception as e:
+                logger.warning(
+                    "[RECONCILE-ORDER] Attempt %d/%d failed for %s: %s",
+                    attempt, attempts, symbol, e,
+                )
+            orderbook = None
+            if attempt < attempts:
+                await asyncio.sleep(2.0 * attempt)
+
+        if orderbook is None:
+            # We could not determine the truth. This is the dangerous case: a live
+            # order may be resting unmanaged. Escalate loudly rather than assume.
+            logger.critical(
+                "🚨 [RECONCILE-ORDER] Could not verify order state for %s after %d "
+                "attempts. A live order may be resting at the broker.",
+                symbol, attempts,
             )
-            if not isinstance(orderbook, dict) or orderbook.get('s') != 'ok':
-                logger.error("[RECONCILE-ORDER] Orderbook unavailable for %s", symbol)
-                return None
+            if self.telegram and hasattr(self.telegram, 'send_alert'):
+                try:
+                    await self.telegram.send_alert(
+                        f"🚨 *ORDER STATE UNKNOWN*\n\n"
+                        f"Symbol: `{symbol}` {side} x{qty}\n"
+                        f"Could not read the orderbook after {attempts} attempts.\n\n"
+                        f"⚠️ *Check the Fyers app now* — an order may be live and "
+                        f"untracked."
+                    )
+                except Exception:
+                    pass
+            return None
+
+        try:
 
             want_side = 1 if side == 'BUY' else -1
             cutoff = datetime.now() - timedelta(seconds=lookback_seconds)
@@ -309,11 +359,8 @@ class OrderManager:
             )
             return order_id
 
-        except asyncio.TimeoutError:
-            logger.error("[RECONCILE-ORDER] Orderbook fetch timed out for %s", symbol)
-            return None
         except Exception as e:
-            logger.error("[RECONCILE-ORDER] Failed for %s: %s", symbol, e)
+            logger.error("[RECONCILE-ORDER] Parsing orderbook failed for %s: %s", symbol, e)
             return None
 
     async def _verify_fill_via_rest(self, order_id: str) -> Optional[float]:
@@ -330,7 +377,7 @@ class OrderManager:
             async def _fetch_ob():
                 return await loop.run_in_executor(None, rest.orderbook)
             try:
-                orderbook = await asyncio.wait_for(_fetch_ob(), timeout=3.0)
+                orderbook = await asyncio.wait_for(_fetch_ob(), timeout=ASYNC_RETRIED_TIMEOUT)
             except asyncio.TimeoutError:
                 logger.warning(f"REST verify orderbook timeout for {order_id}")
                 return None
@@ -496,7 +543,7 @@ class OrderManager:
                     return None
 
                 try:
-                    orderbook = await asyncio.wait_for(_fetch(), timeout=3.0)
+                    orderbook = await asyncio.wait_for(_fetch(), timeout=ASYNC_RETRIED_TIMEOUT)
                 except asyncio.TimeoutError:
                     return False
 

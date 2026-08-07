@@ -3,6 +3,7 @@ import logging
 import json
 from datetime import datetime, date, time as dtime
 import math
+from fyers_connect import ASYNC_RETRIED_TIMEOUT
 from database import DatabaseManager
 from fyers_broker_interface import FyersBrokerInterface
 
@@ -307,7 +308,8 @@ class ReconciliationEngine:
         # Cache empty — verify against REST rather than assuming flat.
         try:
             positions = await asyncio.wait_for(
-                self.broker.get_all_positions(force_rest=True), timeout=12.0
+                self.broker.get_all_positions(force_rest=True),
+                timeout=ASYNC_RETRIED_TIMEOUT
             )
         except asyncio.TimeoutError:
             logger.warning(

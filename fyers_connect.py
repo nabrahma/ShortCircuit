@@ -16,7 +16,25 @@ TOKEN_FILE = Path(__file__).resolve().parent / "data" / "access_token.txt"
 # stalled socket blocks its caller forever. On 2026-07-29 that produced 41 scan
 # timeouts: a hung /history call held a scanner worker for ~80s past its own 8s
 # cap, and every one of those scan cycles returned zero candidates.
-DEFAULT_HTTP_TIMEOUT = (3.05, 12.0)
+# Fyers REST normally answers in well under a second; 8s is already generous. Kept
+# deliberately tight because these budgets stack: with 2 retries a 12s read meant a
+# 37s worst case on a path that reconciliation polls every 6 seconds.
+DEFAULT_HTTP_TIMEOUT = (3.05, 8.0)
+
+# Every asyncio-level `wait_for` around a REST call MUST be longer than the HTTP
+# read timeout, otherwise the outer timeout always fires first and abandons a
+# request that is still in flight — leaving the caller with no idea whether it
+# succeeded. On 2026-08-07 that lost the day's only valid entry: place_order was
+# wrapped in a 5s wait_for while the socket had 12s to read, so it was abandoned
+# at 5s with the order state genuinely unknown.
+#
+# Derive the outer budgets from the transport, so raising one raises the others.
+HTTP_MAX_RETRIES = 1                                 # GET/HEAD only; POSTs never retry
+HTTP_READ_TIMEOUT = DEFAULT_HTTP_TIMEOUT[1]          # 8.0s
+ASYNC_CALL_TIMEOUT = HTTP_READ_TIMEOUT + 4.0         # 12.0s — single attempt (POST)
+ASYNC_RETRIED_TIMEOUT = (                            # 20.0s — GET may retry once
+    HTTP_READ_TIMEOUT * (HTTP_MAX_RETRIES + 1) + 4.0
+)
 
 
 class TimeoutHTTPAdapter(HTTPAdapter):
@@ -73,7 +91,7 @@ def harden_fyers_session(client, label: str = "fyers") -> bool:
         return False
 
     retry = Retry(
-        total=2,
+        total=HTTP_MAX_RETRIES,
         backoff_factor=0.5,
         status_forcelist=[429, 500, 502, 503, 504],
         allowed_methods=["HEAD", "GET", "OPTIONS"],   # never auto-retry POSTs (orders)

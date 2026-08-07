@@ -22,6 +22,7 @@ from eod_analyzer import EODAnalyzer
 from eod_scheduler import eod_scheduler
 from eod_watchdog import eod_watchdog
 from focus_engine import FocusEngine
+from fyers_connect import ASYNC_RETRIED_TIMEOUT
 from fyers_broker_interface import FyersBrokerInterface
 from fyers_connect import FyersConnect
 from market_session import MarketSession
@@ -778,7 +779,8 @@ async def main() -> int:
                 still_open = None
                 try:
                     positions = await asyncio.wait_for(
-                        ctx.broker.get_all_positions(force_rest=True), timeout=20
+                        ctx.broker.get_all_positions(force_rest=True),
+                        timeout=ASYNC_RETRIED_TIMEOUT
                     )
                     still_open = [p for p in positions if p.get('qty', 0)]
                 except Exception as verify_err:

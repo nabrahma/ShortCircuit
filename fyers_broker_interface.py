@@ -34,6 +34,7 @@ from typing import Optional, Dict, List, Any, Callable, Set
 import time
 import threading
 from market_utils import is_market_hours as is_market_hours_ist
+from fyers_connect import ASYNC_CALL_TIMEOUT, ASYNC_RETRIED_TIMEOUT
 from rest_limiter import rest_limiter, Priority
 
 logger = logging.getLogger(__name__)
@@ -1809,6 +1810,13 @@ class FyersBrokerInterface:
             except Exception as e:
                 logger.error(f"[WS Cache] Health monitor error: {e}")
 
+    async def _subscribe_quietly(self, symbol: str) -> None:
+        """Best-effort tick subscription, off the order critical path."""
+        try:
+            await self.subscribe_symbols([symbol])
+        except Exception as e:
+            logger.debug("Background subscribe failed for %s: %s", symbol, e)
+
     async def subscribe_symbols(self, symbols: List[str]):
         """Subscribe to real-time data for symbols."""
         new_symbols = [s for s in symbols if s not in self.subscribed_symbols]
@@ -1868,8 +1876,12 @@ class FyersBrokerInterface:
         await self._rate_limit_wait('place_order')
 
         try:
-            # Ensure subscribed
-            await self.subscribe_symbols([symbol])
+            # Subscription is for tick data, NOT for order placement — it has no
+            # bearing on whether the order succeeds. It used to be awaited here,
+            # putting a websocket round-trip (565ms on 2026-08-07, including the
+            # server ACK) directly in front of every order. Fire it off and move on.
+            if symbol not in self.subscribed_symbols:
+                asyncio.create_task(self._subscribe_quietly(symbol))
 
             data = {
                 "symbol": symbol,
@@ -1902,13 +1914,16 @@ class FyersBrokerInterface:
                 return await loop.run_in_executor(None, self.rest_client.place_order, data)
 
             try:
-                response = await asyncio.wait_for(_place(), timeout=5.0)
+                # MUST exceed the HTTP read timeout — otherwise this fires first and
+                # abandons a request the transport would have resolved cleanly.
+                response = await asyncio.wait_for(_place(), timeout=ASYNC_CALL_TIMEOUT)
             except asyncio.TimeoutError:
                 # A timeout is NOT proof the order failed — it may be live at the
                 # exchange. Surface it distinctly so callers reconcile before retry.
                 raise OrderPlacementTimeout(
-                    f"place_order timed out after 5s for {symbol} {side} x{qty}; "
-                    f"order may or may not be live — reconcile before retrying"
+                    f"place_order timed out after {ASYNC_CALL_TIMEOUT:.0f}s for "
+                    f"{symbol} {side} x{qty}; order may or may not be live — "
+                    f"reconcile before retrying"
                 )
 
             if isinstance(response, dict) and response.get('s') == 'ok':
@@ -1939,7 +1954,7 @@ class FyersBrokerInterface:
                 return await loop.run_in_executor(None, self.rest_client.cancel_order, data)
                 
             try:
-                response = await asyncio.wait_for(_cancel(), timeout=3.0)
+                response = await asyncio.wait_for(_cancel(), timeout=ASYNC_CALL_TIMEOUT)
             except asyncio.TimeoutError:
                 logger.warning(f"Fyers API cancel_order timeout for {order_id}")
                 return False
@@ -2063,7 +2078,8 @@ class FyersBrokerInterface:
         try:
             loop = asyncio.get_event_loop()
             response = await asyncio.wait_for(
-                loop.run_in_executor(None, self.rest_client.orderbook), timeout=5.0
+                loop.run_in_executor(None, self.rest_client.orderbook),
+                timeout=ASYNC_RETRIED_TIMEOUT
             )
             if isinstance(response, dict) and response.get('s') == 'ok':
                 for order in response.get('orderBook', []):
@@ -2116,7 +2132,8 @@ class FyersBrokerInterface:
         try:
             loop = asyncio.get_event_loop()
             response = await asyncio.wait_for(
-                loop.run_in_executor(None, self.rest_client.orderbook), timeout=5.0
+                loop.run_in_executor(None, self.rest_client.orderbook),
+                timeout=ASYNC_RETRIED_TIMEOUT
             )
             if not isinstance(response, dict) or response.get('s') != 'ok':
                 return None
@@ -2356,7 +2373,7 @@ class FyersBrokerInterface:
                 loop = asyncio.get_event_loop()
                 return await loop.run_in_executor(None, self.rest_client.positions)
 
-            response = await asyncio.wait_for(_fetch_positions(), timeout=10.0)
+            response = await asyncio.wait_for(_fetch_positions(), timeout=ASYNC_RETRIED_TIMEOUT)
             if isinstance(response, dict) and response.get('s') == 'ok':
                 return [
                     self._normalise_position(pos)
