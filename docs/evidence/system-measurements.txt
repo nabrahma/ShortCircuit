@@ -1,0 +1,30 @@
+System measurements — all derived from committed session logs and gate result logs.
+Command: see docs/evidence/README.md
+Date: 2026-08-07
+
+SCANNING
+  Session logs analysed        : 28
+  Total scan cycles            : 4776
+  Scanner universe (symbols)   : 2406
+  Scan latency p50             : 9 ms
+  Scan latency p99             : 501 ms
+
+GATE PIPELINE
+  Sessions with gate audit     : 27
+  Recorded gate rejections     : 878
+    G5 strategy (6 hard gates) : 867  (98.7%)
+    G9 HTF confluence          : 9  (1.0%)
+    G8 signal manager          : 2  (0.2%)
+  Reached all 6 strategy gates : 55
+
+DATA PLANE
+  Cache priming, cold start    : 4.0 s to 25.3 s observed
+  Reconciliation cadence       : 6 s during market hours
+
+TEST SUITE
+  Tests                        : 143
+  Runtime                      : ~6.5 s
+  ML observation session files : 34
+
+NOTE: this file contains no performance, profitability or return figure.
+      See docs/DISCLOSURE.md.
