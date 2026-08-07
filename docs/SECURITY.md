@@ -1,0 +1,89 @@
+# Security
+
+This repository connects to a live brokerage account. Credential handling is
+treated as a first-class concern rather than an afterthought.
+
+## Credential handling
+
+All secrets are supplied through environment variables, loaded from a local
+`.env` file that is git-ignored. `.env.example` documents the required keys with
+no values.
+
+| Variable | Purpose |
+|---|---|
+| `FYERS_CLIENT_ID` | Broker API client identifier |
+| `FYERS_SECRET_ID` | Broker API secret |
+| `FYERS_REDIRECT_URI` | OAuth redirect target |
+| `TELEGRAM_BOT_TOKEN` | Operator interface bot token |
+| `TELEGRAM_CHAT_ID` | Authorised chat — the only chat that may issue commands |
+| `DB_USER` / `DB_PASS` / `DB_NAME` / `DB_HOST` / `DB_PORT` | PostgreSQL connection |
+
+The broker access token is cached to `data/access_token.txt`, which is
+git-ignored, and is refreshed through the OAuth flow when it expires.
+
+## What is never logged
+
+- Access tokens, secrets, and the Telegram bot token
+- The contents of `.env`
+- Full broker API request bodies containing authentication headers
+
+Session logs do contain symbols, quantities, prices and order identifiers,
+because they are needed to reconstruct what the system did. Logs are git-ignored
+and stay on the host.
+
+## Command authorisation
+
+Every Telegram command and inline button press is checked against
+`TELEGRAM_CHAT_ID` before it is acted on. An unauthorised sender is logged and
+ignored. This limits the damage if the bot token is ever exposed: possessing the
+token is not sufficient to issue commands.
+
+## Scanning
+
+`gitleaks` runs over the **full git history**, not just the working tree, in CI
+and on a weekly schedule. History is where a deleted credential still lives, and
+a working-tree-only scan gives false assurance.
+
+```bash
+gitleaks detect --source . --redact --log-opts="--all"
+```
+
+Dependencies are audited with `pip-audit`, source with `bandit`, and container
+images with `trivy`.
+
+## Current findings
+
+A full-history scan on 2026-08-07 returned **2 findings**. Both are in files that
+were deleted from the working tree long ago but remain reachable in history.
+Evidence (redacted): [`evidence/gitleaks-full-history.txt`](evidence/gitleaks-full-history.txt).
+
+| # | Artefact | Commit | Status |
+|---|---|---|---|
+| 1 | PostgreSQL password for a local `botuser` role | `9b2f2158` (2026-04-06) | **Rotation pending** |
+| 2 | Fyers OAuth `auth_code` (JWT) | `6557df96` (2026-01-30) | Expired 2026-01-09; single-use by design, no action required |
+
+Finding 2 is inert: Fyers auth codes are single-use and expire within minutes of
+issue, so a code from January carries no residual access.
+
+Finding 1 is a real exposure and is tracked for rotation. The affected role is
+bound to `localhost`, so exploitation additionally requires access to the host.
+
+**Remediation procedure for a leaked database credential:**
+
+```sql
+ALTER USER botuser WITH PASSWORD '<new-strong-password>';
+```
+
+then update `DB_PASS` in `.env`. Nothing else reads the value —
+`shortcircuit/state/database.py` resolves it from `DB_PASS`/`DB_PASSWORD` at
+connection time.
+
+History rewriting is deliberately **not** part of the remediation. Rotating the
+credential renders the historical value worthless, and rewriting 227 commits
+would break every existing clone for no additional security benefit.
+
+## Reporting a vulnerability
+
+Open a GitHub issue for anything non-sensitive. For anything involving a
+credential or an exploitable defect, email the address on the repository owner's
+GitHub profile rather than filing publicly.

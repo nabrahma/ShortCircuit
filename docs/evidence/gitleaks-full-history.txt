@@ -1,0 +1,12 @@
+    ○ ░
+    ░    gitleaks
+
+[90m5:02PM[0m [32mINF[0m [1m227 commits scanned.[0m
+[90m5:02PM[0m [32mINF[0m [1mscanned ~2694836 bytes (2.69 MB) in 714ms[0m
+[90m5:02PM[0m [33mWRN[0m [1mleaks found: 2[0m
+
+Command: gitleaks detect --source . --redact --log-opts="--all"
+Date:    2026-08-07
+Result:  2 findings, both in files deleted from HEAD but retained in history.
+         Details and remediation status: docs/SECURITY.md
+         Secret values are redacted; this file contains no credentials.

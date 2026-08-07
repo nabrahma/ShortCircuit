@@ -52,6 +52,10 @@ md/*
 CLAUDE.md
 .claude/
 
+# ── Planning / PRD docs (local only) ──────────────────────────
+SHORTCIRCUIT_PRD_V2.md
+*_PRD_*.md
+
 # ── Runtime Files ─────────────────────────────────────────────
 shortcircuit.lock
 

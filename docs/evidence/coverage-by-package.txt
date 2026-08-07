@@ -1,0 +1,41 @@
+============================= test session starts ==============================
+platform linux -- Python 3.12.3, pytest-9.0.2, pluggy-1.6.0
+rootdir: /home/nabbaazz/ShortCircuit
+configfile: pytest.ini
+plugins: cov-7.1.0, anyio-4.12.1, asyncio-1.3.0, hypothesis-6.165.2
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 143 items
+
+tests/unit/strategy/test_features.py .................................   [ 23%]
+tests/unit/strategy/test_market_profile.py ............                  [ 31%]
+tests/unit/test_brain_isolation.py ..............                        [ 41%]
+tests/unit/test_capital_manager.py .....................                 [ 55%]
+tests/unit/test_reconciliation.py ............                           [ 64%]
+tests/unit/test_rest_limiter.py ...........                              [ 72%]
+tests/unit/test_symbols_and_config.py ...............................    [ 93%]
+tests/property/test_features_properties.py .........                     [100%]
+
+=============================== warnings summary ===============================
+.venv/lib/python3.12/site-packages/fyers_apiv3/FyersWebsocket/data_ws.py:7
+  /home/nabbaazz/ShortCircuit/.venv/lib/python3.12/site-packages/fyers_apiv3/FyersWebsocket/data_ws.py:7: DeprecationWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html
+    from pkg_resources import resource_filename
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+================================ tests coverage ================================
+_______________ coverage: platform linux, python 3.12.3-final-0 ________________
+
+Name                         Stmts   Miss  Cover
+------------------------------------------------
+capital_manager.py             131     34    74%
+market_utils.py                  9      0   100%
+rest_limiter.py                107     10    91%
+strategy/__init__.py             0      0   100%
+strategy/back_to_vwap.py        90     90     0%
+strategy/features.py           149     16    89%
+strategy/htf_confluence.py      63     63     0%
+strategy/market_context.py     227    227     0%
+strategy/market_profile.py     101     58    43%
+symbols.py                      23      5    78%
+------------------------------------------------
+TOTAL                          900    503    44%
+======================= 143 passed, 1 warning in 14.08s ========================

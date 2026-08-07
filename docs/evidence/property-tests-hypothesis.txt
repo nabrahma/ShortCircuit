@@ -1,0 +1,21 @@
+============================= test session starts ==============================
+platform linux -- Python 3.12.3, pytest-9.0.2, pluggy-1.6.0 -- /home/nabbaazz/ShortCircuit/.venv/bin/python
+cachedir: .pytest_cache
+hypothesis profile 'default'
+rootdir: /home/nabbaazz/ShortCircuit
+configfile: pytest.ini
+plugins: cov-7.1.0, anyio-4.12.1, asyncio-1.3.0, hypothesis-6.165.2
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 9 items
+
+tests/property/test_features_properties.py::test_p1_vwap_lies_within_the_traded_range PASSED [ 11%]
+tests/property/test_features_properties.py::test_p2_rsi_divergence_is_always_a_bool PASSED [ 22%]
+tests/property/test_features_properties.py::test_p3_value_area_is_ordered_vah_ge_poc_ge_val PASSED [ 33%]
+tests/property/test_features_properties.py::test_p4_value_area_lies_within_the_traded_range PASSED [ 44%]
+tests/property/test_features_properties.py::test_p5_vwap_of_a_constant_series_is_that_price PASSED [ 55%]
+tests/property/test_features_properties.py::test_p6_appending_a_zero_volume_bar_does_not_move_vwap PASSED [ 66%]
+tests/property/test_features_properties.py::test_p7_read_only_features_are_pure_and_do_not_mutate_input PASSED [ 77%]
+tests/property/test_features_properties.py::test_atr_is_nan_or_a_finite_non_negative_number PASSED [ 88%]
+tests/property/test_features_properties.py::test_volume_fade_ratio_is_always_finite_and_non_negative PASSED [100%]
+
+============================== 9 passed in 5.49s ===============================

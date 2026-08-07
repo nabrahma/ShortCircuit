@@ -1,0 +1,37 @@
+Module purity audit — determines which tests need zero mocking
+Command: make audit-purity   (see Makefile)
+Date: 2026-08-07
+
+MODULE                         LOC    SIDE-EFFECT MARKERS
+------                         ---    -------------------
+analyzer.py                    502     net clock io
+capital_manager.py             328     net clock concurrency
+config.py                      147     net telegram clock io
+database.py                    261     db clock io concurrency
+dump_terminal_log.py           42      clock io
+eod_analyzer.py                520     net db clock io concurrency
+eod_scheduler.py               99      clock concurrency
+eod_watchdog.py                54      clock io concurrency
+focus_engine.py                1238    net telegram clock concurrency
+fyers_broker_interface.py      2454    net telegram clock io concurrency
+fyers_connect.py               343     net io concurrency
+gate_result_logger.py          577     db clock io concurrency
+main.py                        954     net db telegram clock io concurrency
+market_session.py              284     net telegram clock concurrency
+market_utils.py                16      clock
+ml_logger.py                   400     clock io concurrency
+order_manager.py               1546    net telegram clock concurrency
+reconciliation.py              844     net db telegram clock concurrency
+rest_limiter.py                234     clock concurrency
+scanner.py                     611     net clock io concurrency
+signal_manager.py              241     clock concurrency
+startup_recovery.py            154     net telegram clock concurrency
+symbols.py                     66      PURE
+telegram_bot.py                1217    telegram clock concurrency
+trade_manager.py               248     net concurrency
+strategy/__init__.py           1       PURE
+strategy/back_to_vwap.py       286     PURE
+strategy/features.py           324     PURE
+strategy/htf_confluence.py     123     net clock
+strategy/market_context.py     397     net clock
+strategy/market_profile.py     209     PURE
