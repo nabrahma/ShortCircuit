@@ -5,23 +5,36 @@ README traces to a file in [`evidence/`](evidence/); anything not done is here.
 
 ## Test coverage
 
-Measured 2026-08-07 — see [`evidence/coverage-by-package.txt`](evidence/coverage-by-package.txt).
+Measured 2026-08-08, see [`evidence/coverage-by-package.txt`](evidence/coverage-by-package.txt).
 
 | Module | Coverage | Status |
 |---|---|---|
 | `market_utils.py` | 100% | Complete |
+| `strategy/back_to_vwap.py` | 100% | Complete, statements and branches |
+| `strategy/htf_confluence.py` | 100% | Complete, statements and branches |
+| `strategy/market_context.py` | 97% | Complete |
 | `rest_limiter.py` | 91% | Complete |
-| `strategy/features.py` | 89% | Meets the 85% strategy floor |
+| `strategy/features.py` | 86% | Meets the 85% strategy floor |
 | `symbols.py` | 78% | Adequate |
-| `capital_manager.py` | 74% | Below the 80% floor — the async sync path is untested |
-| `strategy/market_profile.py` | 43% | Below floor — only the Dalton path is covered |
-| `strategy/back_to_vwap.py` | 0% | **Not yet tested** |
-| `strategy/htf_confluence.py` | 0% | **Not yet tested** |
-| `strategy/market_context.py` | 0% | **Not yet tested** |
+| `capital_manager.py` | 74% | Below the 80% floor, the async sync path is untested |
+| `strategy/market_profile.py` | 40% | Below floor, only the Dalton path is covered |
 
-The three untested strategy modules are the most valuable remaining test work.
-`back_to_vwap.py` is pure and needs no mocking; `htf_confluence.py` and
-`market_context.py` take an injected broker client and need only a stub.
+**`strategy/` package total: 86%**, which meets the PRD floor.
+
+The three previously untested strategy modules are now covered. `back_to_vwap.py`
+is tested as a rejection table: one golden input passes all six gates, and every
+other case perturbs a single variable and asserts rejection, so a gate that stops
+rejecting fails exactly one named row.
+
+Two findings came out of writing them, both recorded rather than changed, because
+fixing either means editing `strategy/`:
+
+- **G9 fails open twice.** `htf_confluence.check_trend_exhaustion` returns *allow*
+  when the frame has no recognisable close column, and again when a candle holds a
+  zero price. Everywhere else in the system, unusable data blocks. Both paths are
+  pinned by tests named `..._is_fail_open` so the behaviour is visible.
+- **Confidence tiers are genuinely inert.** Asserted directly: a signal at the
+  lowest tier still passes, and no tier value changes whether a signal is produced.
 
 `market_profile.py` sits at 43% because `calculate_market_profile()` — the
 non-Dalton TPO path — is only reached when `P65_AMT_ENABLED` is false, which is
@@ -53,21 +66,11 @@ repository places real orders and a convenience refactor is not worth the risk.
 | `fyers_broker_interface.py` | Constructor performs I/O (creates log directories, builds SDK clients), so the class cannot be instantiated in a unit test without patching |
 | `main.py` | Orchestration only — meaningful coverage would be an integration test |
 
-## Infrastructure not yet built
+## Infrastructure
 
-Sessions 3–6 of the PRD remain outstanding:
-
-- `pyproject.toml` replacing `pytest.ini`
-- GitHub Actions: CI, security, release workflows
-- `deploy/Dockerfile`, `docker-compose.yml`, `docker-compose.test.yml`
-- `Makefile`
-- `docs/`: `STRATEGY.md`, `OPERATIONS.md`, `TESTING.md`, `DATA_MODEL.md`,
-  `DECISIONS.md`, `DISCOVERIES.md`
-- README restructure
-- The `src/shortcircuit/` package layout (PRD Tier C)
-
-`pytest.ini` is still present and now has tests beside it, so it is no longer a
-negative signal — but it should be folded into `pyproject.toml`.
+Built. `pyproject.toml`, the CI, security and release workflows, `deploy/`,
+the `Makefile`, the full `docs/` set and the `src/shortcircuit/` layout are all
+in place.
 
 ## Open defect
 
