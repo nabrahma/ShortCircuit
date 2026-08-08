@@ -21,3 +21,30 @@
 CVE-2026-23949   # jaraco.context 5.3.0, vendored in setuptools
 CVE-2026-24049   # wheel 0.45.1, vendored in setuptools
 CVE-2025-47273   # setuptools 70.3.0, vendored copy
+
+
+# ── Advisories the broker SDK's exact pins make unfixable ────────────────────
+#
+# fyers_apiv3 declares its dependencies with == rather than >=:
+#   requests==2.31.0   aiohttp==3.9.3   protobuf==5.29.3   websocket-client==1.6.1
+#
+# Asking for a patched aiohttp or protobuf makes requirements.txt unsatisfiable
+# against every published fyers release - pip returns ResolutionImpossible, not
+# a warning. There is no version of the SDK that permits the fixed versions, so
+# this cannot be resolved on our side at all until the vendor relaxes the pins.
+#
+# Reachability, assessed rather than assumed:
+#   - The aiohttp advisories are server-side: malformed POST parsing and a
+#     zip bomb through auto_decompress. Nothing here runs an aiohttp server;
+#     it is a client against Fyers and Telegram.
+#   - The protobuf advisories are unbounded recursion while parsing untrusted
+#     messages. The only protobuf this process decodes arrives over an
+#     authenticated Fyers market data socket.
+#
+# Revisit whenever fyers_apiv3 publishes a release with relaxed pins.
+# Reviewed: 2026-08-08
+CVE-2024-30251   # aiohttp 3.9.3, pinned by fyers_apiv3
+CVE-2025-69223   # aiohttp 3.9.3, pinned by fyers_apiv3
+CVE-2026-69244   # aiohttp 3.9.3, pinned by fyers_apiv3
+CVE-2025-4565    # protobuf 5.29.3, pinned by fyers_apiv3
+CVE-2026-0994    # protobuf 5.29.3, pinned by fyers_apiv3

@@ -106,8 +106,28 @@ The exploit paths are archive extraction and package-index traversal. The
 trading runtime performs neither and never imports those modules. This is
 re-evaluated whenever `fyers_apiv3` drops its `pkg_resources` dependency.
 
-Everything actually fixable was fixed rather than suppressed: `aiohttp`,
-`protobuf` and `msgpack` were bumped past their advisories.
+Five further HIGH findings are suppressed for a different and harder reason:
+`fyers_apiv3` declares its dependencies with `==` rather than `>=`.
+
+| CVE | Package | Pinned by the SDK to |
+|---|---|---|
+| CVE-2024-30251, CVE-2025-69223, CVE-2026-69244 | `aiohttp` | `==3.9.3` |
+| CVE-2025-4565, CVE-2026-0994 | `protobuf` | `==5.29.3` |
+
+Requesting a patched version of either makes `requirements.txt` unsatisfiable
+against **every published fyers release**. pip returns `ResolutionImpossible`
+rather than a warning, so there is no version of the broker SDK that permits the
+fixed versions. This is not a decision we can make differently; it is a
+constraint the vendor imposes.
+
+Reachability was assessed rather than assumed. The aiohttp advisories are
+server-side, covering malformed POST parsing and a zip bomb through
+`auto_decompress`; nothing here runs an aiohttp server, it is a client against
+Fyers and Telegram. The protobuf advisories are unbounded recursion while parsing
+untrusted messages, and the only protobuf this process decodes arrives over an
+authenticated Fyers market data socket.
+
+`msgpack` was genuinely fixable and was bumped rather than suppressed.
 
 ## Reporting a vulnerability
 
