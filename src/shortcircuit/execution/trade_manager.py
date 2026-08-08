@@ -3,8 +3,8 @@ import asyncio
 from datetime import datetime
 
 
-import config
-from capital_manager import CapitalManager
+from shortcircuit import config
+from shortcircuit.capital.capital_manager import CapitalManager
 
 
 logger = logging.getLogger(__name__)
@@ -232,7 +232,7 @@ class TradeManager:
         Phase 69 [G13]: Record trade outcome in SignalManager.
         Updates daily PnL tracking and global stats.
         """
-        from signal_manager import get_signal_manager
+        from shortcircuit.execution.signal_manager import get_signal_manager
         sm = get_signal_manager()
         sm.record_outcome(symbol, pnl)
         logger.info(f"Phase 69 Outcome recorded for {symbol}: ₹{pnl:.2f}")

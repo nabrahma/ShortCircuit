@@ -2,8 +2,7 @@
 PY  ?= .venv/bin/python
 PIP ?= .venv/bin/pip
 
-COV_PKGS = --cov=strategy --cov=capital_manager --cov=rest_limiter \
-           --cov=symbols --cov=market_utils
+COV_PKGS = --cov=shortcircuit
 
 .PHONY: help
 help:  ## Show this help
@@ -26,7 +25,7 @@ fmt:  ## Auto-fix what ruff can fix safely
 
 .PHONY: typecheck
 typecheck:  ## Run mypy (advisory — never blocks)
-	-$(PY) -m mypy . --ignore-missing-imports
+	-$(PY) -m mypy src/ --ignore-missing-imports
 
 # ── tests ────────────────────────────────────────────────────────────────
 .PHONY: test
@@ -51,13 +50,13 @@ security:  ## gitleaks (full history) + pip-audit + bandit
 	  && gitleaks detect --source . --redact --log-opts="--all" \
 	  || echo "gitleaks not installed — see docs/SECURITY.md"
 	-$(PY) -m pip_audit -r requirements.txt --desc
-	-$(PY) -m bandit -r . -ll --exclude ./.venv,./tests,./scratch,./migrations
+	-$(PY) -m bandit -r src/ -ll
 
 # ── evidence ─────────────────────────────────────────────────────────────
 .PHONY: audit-purity
 audit-purity:  ## Regenerate the module purity audit
 	@printf "%-30s %-6s %s\n" "MODULE" "LOC" "SIDE-EFFECT MARKERS"; \
-	for f in *.py strategy/*.py; do \
+	for f in $$(find src/shortcircuit -name "*.py"); do \
 	  [ -f "$$f" ] || continue; loc=$$(wc -l < "$$f"); m=""; \
 	  grep -qE "^import requests|^from requests|fyers|aiohttp|httpx" "$$f" && m="$$m net"; \
 	  grep -qE "asyncpg|psycopg2|DatabaseManager" "$$f" && m="$$m db"; \

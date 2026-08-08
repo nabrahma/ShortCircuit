@@ -45,6 +45,6 @@ USER shortcircuit
 ENV FYERS_NO_INTERACTIVE=1
 
 HEALTHCHECK --interval=60s --timeout=10s --start-period=30s --retries=3 \
-  CMD python -c "import config, strategy.features" || exit 1
+  CMD python -c "import shortcircuit.config, shortcircuit.strategy.features" || exit 1
 
-ENTRYPOINT ["python", "main.py"]
+ENTRYPOINT ["python", "-m", "shortcircuit"]

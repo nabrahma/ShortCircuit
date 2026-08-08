@@ -21,15 +21,15 @@ from typing import Optional, Dict, Any, Tuple
 
 import pandas as pd
 
-import config
-from strategy import features as F
-from gate_result_logger import GateResult, get_gate_result_logger
-from strategy.htf_confluence import HTFConfluence
-from strategy.market_context import MarketContext
-from strategy.market_profile import ProfileAnalyzer
-from ml_logger import get_ml_logger
-from signal_manager import get_signal_manager
-from strategy.back_to_vwap import BackToVWAPShort
+from shortcircuit import config
+from shortcircuit.strategy import features as F
+from shortcircuit.observability.gate_result_logger import GateResult, get_gate_result_logger
+from shortcircuit.strategy.htf_confluence import HTFConfluence
+from shortcircuit.strategy.market_context import MarketContext
+from shortcircuit.strategy.market_profile import ProfileAnalyzer
+from shortcircuit.observability.ml_logger import get_ml_logger
+from shortcircuit.execution.signal_manager import get_signal_manager
+from shortcircuit.strategy.back_to_vwap import BackToVWAPShort
 
 logger = logging.getLogger(__name__)
 

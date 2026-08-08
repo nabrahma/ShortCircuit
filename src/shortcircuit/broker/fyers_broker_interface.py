@@ -8,7 +8,7 @@ Design:
 - Transparent caching layer to minimize REST API calls
 - Thread-safe, async-first design
 
-Usage (from order_manager.py):
+Usage (from shortcircuit.execution.order_manager):
     broker = FyersBrokerInterface(access_token, db_manager)
     await broker.initialize()
     
@@ -20,7 +20,7 @@ Usage (from order_manager.py):
 import os
 import asyncio
 import logging
-import config
+from shortcircuit import config
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -33,9 +33,9 @@ from enum import Enum
 from typing import Optional, Dict, List, Any, Callable, Set
 import time
 import threading
-from market_utils import is_market_hours as is_market_hours_ist
-from fyers_connect import ASYNC_CALL_TIMEOUT, ASYNC_RETRIED_TIMEOUT
-from rest_limiter import rest_limiter, Priority
+from shortcircuit.marketdata.market_utils import is_market_hours as is_market_hours_ist
+from shortcircuit.broker.fyers_connect import ASYNC_CALL_TIMEOUT, ASYNC_RETRIED_TIMEOUT
+from shortcircuit.broker.rest_limiter import rest_limiter, Priority
 
 logger = logging.getLogger(__name__)
 
@@ -426,7 +426,7 @@ class FyersBrokerInterface:
         # object (client.service.session). So the pool-size fix never applied, and
         # every broker REST call ran with library defaults and no timeout at all.
         # harden_fyers_session() resolves the real session and reports honestly.
-        from fyers_connect import harden_fyers_session
+        from shortcircuit.broker.fyers_connect import harden_fyers_session
         harden_fyers_session(self.rest_client, label="broker rest_client")
         
         # WebSocket clients
@@ -483,7 +483,7 @@ class FyersBrokerInterface:
         self._fill_qtys:   Dict[str, int]   = {}     # order_id -> cumulative filled qty
 
         # position_cache is written from the SDK's socket thread and read from the
-        # event loop and from reconciliation — guard it.
+        # event loop and from shortcircuit.state.reconciliation — guard it.
         self._position_cache_lock = threading.Lock()
         self._position_cache_last_event: float = 0.0
         
@@ -535,7 +535,7 @@ class FyersBrokerInterface:
         self._health_state_entered_at:       float = time.time()
 
         # PRD-3: Telegram hook for WS cache alerts
-        # Set via broker.set_telegram(bot) from main.py after both are constructed
+        # Set via broker.set_telegram(bot) from shortcircuit.runtime.supervisor.py after both are constructed
         self._telegram_bot = None
 
         # PRD-3: Severe-degraded tracking (fresh < 5% for > 30s triggers recovery)
@@ -1373,7 +1373,7 @@ class FyersBrokerInterface:
     def _get_readiness_threshold(self) -> float:
         """Returns readiness threshold based on market session timing."""
         try:
-            import config
+            from shortcircuit import config
             mins_open = config.minutes_since_market_open()
             if mins_open < 30:
                 return 0.85   # Opening: 85% (strict)
@@ -1392,7 +1392,7 @@ class FyersBrokerInterface:
                 or self._subscribed_count == 0:
             return
 
-        import config as _cfg
+        import shortcircuit.config as _cfg
         freshness_ttl = _cfg.WS_TICK_FRESHNESS_TTL_SECONDS
         now = time.time()
         fresh_count = sum(
@@ -1438,7 +1438,7 @@ class FyersBrokerInterface:
     def set_telegram(self, telegram_bot) -> None:
         """
         Wire Telegram bot for WS cache degradation alerts.
-        Called from main.py after both broker and bot are initialized:
+        Called from shortcircuit.runtime.supervisor after both broker and bot are initialized:
             broker.set_telegram(telegram_bot)
         """
         self._telegram_bot = telegram_bot
@@ -1484,7 +1484,7 @@ class FyersBrokerInterface:
 
     def cache_health_snapshot(self) -> dict:
         """Returns current cache health metrics dict."""
-        import config as _cfg
+        import shortcircuit.config as _cfg
         freshness_ttl = _cfg.WS_TICK_FRESHNESS_TTL_SECONDS
         with self._quote_cache_lock:
             now = time.time()
@@ -1520,7 +1520,7 @@ class FyersBrokerInterface:
         Used to validate reprime/reconnect actually restored live data flow.
         Returns True if freshness was restored within timeout, False otherwise.
         """
-        import config as _cfg
+        import shortcircuit.config as _cfg
         freshness_ttl = _cfg.WS_TICK_FRESHNESS_TTL_SECONDS
         threshold = self._get_readiness_threshold()
         deadline = time.time() + timeout_secs
@@ -2219,7 +2219,7 @@ class FyersBrokerInterface:
         Phase 88.1: Synchronous leverage fetch for Scanner thread.
         Leverage = Price / Margin_Required.
         """
-        import config
+        from shortcircuit import config
         if not symbol:
             return 1.0
 

@@ -18,8 +18,8 @@ import pytest
 from hypothesis import HealthCheck, assume, given, settings
 from hypothesis import strategies as st
 
-from strategy import features as F
-from strategy.market_profile import ProfileAnalyzer
+from shortcircuit.strategy import features as F
+from shortcircuit.strategy.market_profile import ProfileAnalyzer
 
 SETTINGS = settings(
     max_examples=60,

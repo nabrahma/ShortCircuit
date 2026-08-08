@@ -28,7 +28,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from reconciliation import ReconciliationEngine
+from shortcircuit.state.reconciliation import ReconciliationEngine
 
 
 # ──────────────────────────────────────────────────────────────────────────

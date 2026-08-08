@@ -12,7 +12,7 @@ import asyncio
 
 import pytest
 
-from capital_manager import CapitalManager
+from shortcircuit.capital.capital_manager import CapitalManager
 
 
 @pytest.fixture

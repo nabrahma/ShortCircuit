@@ -14,7 +14,7 @@ import itertools
 
 import pytest
 
-from rest_limiter import Priority, RateLimiter
+from shortcircuit.broker.rest_limiter import Priority, RateLimiter
 
 
 def _fixed_clock(monkeypatch, start=1_000_000.0):
@@ -23,8 +23,8 @@ def _fixed_clock(monkeypatch, start=1_000_000.0):
     so a test can advance time explicitly.
     """
     state = {"now": start}
-    monkeypatch.setattr("rest_limiter.time.time", lambda: state["now"])
-    monkeypatch.setattr("rest_limiter.time.monotonic", lambda: state["now"])
+    monkeypatch.setattr("shortcircuit.broker.rest_limiter.time.time", lambda: state["now"])
+    monkeypatch.setattr("shortcircuit.broker.rest_limiter.time.monotonic", lambda: state["now"])
     return state
 
 
@@ -127,7 +127,7 @@ def test_timeout_zero_never_blocks(monkeypatch):
 
 def test_the_shipped_limiter_sits_under_the_documented_broker_limits():
     """Fyers: 10/s, 200/min, 100k/day. Ours must be strictly below each."""
-    from rest_limiter import rest_limiter
+    from shortcircuit.broker.rest_limiter import rest_limiter
     snap = rest_limiter.snapshot()
     assert snap["cap_second"] <= 10
     assert snap["cap_minute"] <= 200

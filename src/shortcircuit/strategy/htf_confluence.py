@@ -7,8 +7,7 @@ import logging
 import time as _time
 import datetime
 import pandas as pd
-import config
-
+from shortcircuit import config
 logger = logging.getLogger(__name__)
 
 class HTFConfluence:

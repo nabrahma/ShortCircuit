@@ -7,8 +7,8 @@ import logging
 import time as _time
 from datetime import datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
-from symbols import NIFTY_50, validate_symbol
-import config
+from shortcircuit.marketdata.symbols import NIFTY_50, validate_symbol
+from shortcircuit import config
 import pandas as pd
 
 logger = logging.getLogger(__name__)
@@ -83,7 +83,7 @@ class MarketContext:
         }
 
         try:
-            from rest_limiter import rest_limiter
+            from shortcircuit.broker.rest_limiter import rest_limiter
             rest_limiter.acquire()
             response = self.fyers.history(data=data)
         except Exception as e:
@@ -233,7 +233,7 @@ class MarketContext:
         }
 
         try:
-            from rest_limiter import rest_limiter
+            from shortcircuit.broker.rest_limiter import rest_limiter
             rest_limiter.acquire()
             response = self.fyers.history(data=data)
             status = response.get('s') if isinstance(response, dict) else 'INVALID'

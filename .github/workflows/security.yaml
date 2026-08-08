@@ -46,7 +46,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install bandit
-      - run: bandit -r . -ll --exclude ./.venv,./tests,./scratch,./migrations
+      - run: bandit -r src/ -ll
 
   image:
     name: Container scan

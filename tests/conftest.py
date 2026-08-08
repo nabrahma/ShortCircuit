@@ -22,8 +22,8 @@ from datetime import datetime, timedelta, timezone
 import pandas as pd
 import pytest
 
-# The package still lives at the repository root, so tests import it directly.
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# src/ layout: the package lives under src/, so that is what goes on the path.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
 IST = timezone(timedelta(hours=5, minutes=30))
 

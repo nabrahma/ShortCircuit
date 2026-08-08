@@ -28,7 +28,7 @@ jobs:
       - name: ruff check
         run: ruff check .
       - name: mypy (advisory)
-        run: mypy . --ignore-missing-imports
+        run: mypy src/ --ignore-missing-imports
         continue-on-error: true
 
   test:
@@ -51,8 +51,7 @@ jobs:
       - name: Unit and property tests
         run: |
           pytest tests/unit tests/property -v \
-            --cov=strategy --cov=capital_manager --cov=rest_limiter \
-            --cov=symbols --cov=market_utils \
+            --cov=shortcircuit \
             --cov-report=xml --cov-report=term
       - name: Upload coverage
         if: matrix.python-version == '3.12'

@@ -1,6 +1,6 @@
 from fyers_apiv3 import fyersModel
 import os
-import config
+from shortcircuit import config
 import logging
 from pathlib import Path
 
@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 # repository root; relocating it into a package would have pointed the cached
 # broker token at a directory inside the package, and the bot would have tried to
 # re-authenticate interactively on every start. Pinned by tests/unit/test_paths.py.
-from paths import TOKEN_FILE  # noqa: E402
+from shortcircuit.paths import TOKEN_FILE  # noqa: E402
 
 # (connect, read) seconds. The Fyers SDK issues requests with NO timeout, so a
 # stalled socket blocks its caller forever. On 2026-07-29 that produced 41 scan
@@ -157,7 +157,7 @@ class FyersConnect:
                 return self.config.get(key)
             return getattr(self.config, key, None)
             
-        # Load Client ID from config or env
+        # Load Client ID from shortcircuit.config or env
         self.client_id = get_cfg('FYERS_CLIENT_ID') or os.getenv('FYERS_CLIENT_ID')
         self.secret_key = get_cfg('FYERS_SECRET_KEY') or get_cfg('FYERS_SECRET_ID') or os.getenv('FYERS_SECRET_KEY')
         self.redirect_uri = get_cfg('FYERS_REDIRECT_URI') or os.getenv('FYERS_REDIRECT_URI')
@@ -277,7 +277,7 @@ class FyersConnect:
         from fyers_apiv3 import fyersModel
         
         # Repository-anchored, for the same reason as TOKEN_FILE above.
-        from paths import FYERS_REST_LOG_DIR
+        from shortcircuit.paths import FYERS_REST_LOG_DIR
         FYERS_REST_LOG_DIR.mkdir(parents=True, exist_ok=True)
 
         client = fyersModel.FyersModel(

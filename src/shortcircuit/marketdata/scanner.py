@@ -5,10 +5,10 @@ from concurrent.futures import (
     as_completed,
     TimeoutError as FutureTimeout,
 )
-from fyers_connect import FyersConnect
+from shortcircuit.broker.fyers_connect import FyersConnect
 import time
-import config
-from rest_limiter import rest_limiter
+from shortcircuit import config
+from shortcircuit.broker.rest_limiter import rest_limiter
 
 logger = logging.getLogger(__name__)
 

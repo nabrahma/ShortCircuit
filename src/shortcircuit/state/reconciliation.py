@@ -3,9 +3,9 @@ import logging
 import json
 from datetime import datetime, date, time as dtime
 import math
-from fyers_connect import ASYNC_RETRIED_TIMEOUT
-from database import DatabaseManager
-from fyers_broker_interface import FyersBrokerInterface
+from shortcircuit.broker.fyers_connect import ASYNC_RETRIED_TIMEOUT
+from shortcircuit.state.database import DatabaseManager
+from shortcircuit.broker.fyers_broker_interface import FyersBrokerInterface
 
 logger = logging.getLogger(__name__)
 FORCE_REST_SYNC_INTERVAL = 300  # 5 minutes
@@ -718,7 +718,7 @@ class ReconciliationEngine:
                             qty = pos.get('qty', 0)
                             if entry_price > 0 and qty > 0:
                                 # Phase 94: Direction-aware PnL
-                                import config as _cfg
+                                import shortcircuit.config as _cfg
                                 _dir = pos.get('side', _cfg.TRADE_DIRECTION)
                                 if _dir == 'LONG':
                                     pnl = (exit_price - entry_price) * qty

@@ -1,41 +1,66 @@
 ============================= test session starts ==============================
 platform linux -- Python 3.12.3, pytest-9.0.2, pluggy-1.6.0
 rootdir: /home/nabbaazz/ShortCircuit
-configfile: pytest.ini
+configfile: pyproject.toml
 plugins: cov-7.1.0, anyio-4.12.1, asyncio-1.3.0, hypothesis-6.165.2
 asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
-collected 143 items
+collected 155 items
 
-tests/unit/strategy/test_features.py .................................   [ 23%]
-tests/unit/strategy/test_market_profile.py ............                  [ 31%]
-tests/unit/test_brain_isolation.py ..............                        [ 41%]
-tests/unit/test_capital_manager.py .....................                 [ 55%]
-tests/unit/test_reconciliation.py ............                           [ 64%]
-tests/unit/test_rest_limiter.py ...........                              [ 72%]
-tests/unit/test_symbols_and_config.py ...............................    [ 93%]
+tests/unit/strategy/test_features.py .................................   [ 21%]
+tests/unit/strategy/test_market_profile.py ............                  [ 29%]
+tests/unit/test_brain_isolation.py ..............                        [ 38%]
+tests/unit/test_capital_manager.py .....................                 [ 51%]
+tests/unit/test_paths.py ............                                    [ 59%]
+tests/unit/test_reconciliation.py ............                           [ 67%]
+tests/unit/test_rest_limiter.py ...........                              [ 74%]
+tests/unit/test_symbols_and_config.py ...............................    [ 94%]
 tests/property/test_features_properties.py .........                     [100%]
 
-=============================== warnings summary ===============================
-.venv/lib/python3.12/site-packages/fyers_apiv3/FyersWebsocket/data_ws.py:7
-  /home/nabbaazz/ShortCircuit/.venv/lib/python3.12/site-packages/fyers_apiv3/FyersWebsocket/data_ws.py:7: DeprecationWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html
-    from pkg_resources import resource_filename
-
--- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
 ================================ tests coverage ================================
 _______________ coverage: platform linux, python 3.12.3-final-0 ________________
 
-Name                         Stmts   Miss  Cover
-------------------------------------------------
-capital_manager.py             131     34    74%
-market_utils.py                  9      0   100%
-rest_limiter.py                107     10    91%
-strategy/__init__.py             0      0   100%
-strategy/back_to_vwap.py        90     90     0%
-strategy/features.py           149     16    89%
-strategy/htf_confluence.py      63     63     0%
-strategy/market_context.py     227    227     0%
-strategy/market_profile.py     101     58    43%
-symbols.py                      23      5    78%
-------------------------------------------------
-TOTAL                          900    503    44%
-======================= 143 passed, 1 warning in 14.08s ========================
+Name                                                   Stmts   Miss Branch BrPart  Cover   Missing
+--------------------------------------------------------------------------------------------------
+src/shortcircuit/__init__.py                               1      0      0      0   100%
+src/shortcircuit/__main__.py                               3      3      0      0     0%   7-10
+src/shortcircuit/broker/__init__.py                        0      0      0      0   100%
+src/shortcircuit/broker/fyers_broker_interface.py       1255   1090    352      0    10%   55-56, 96-101, 136-148, 154-164, 170-176, 182-199, 271-278, 282-334, 339-348, 355-382, 404-547, 555-572, 579-586, 590, 597-602, 647, 650-676, 681-706, 710-736, 740-745, 749-753, 757-765, 769-780, 784-791, 794-799, 802-806, 809-810, 813-814, 822-836, 842-919, 934-944, 953-1013, 1024-1058, 1068-1105, 1116-1165, 1169-1208, 1217-1273, 1280-1281, 1304-1358, 1361, 1365-1366, 1375-1383, 1391-1418, 1426, 1436, 1444-1445, 1468-1472, 1479-1480, 1483, 1487-1502, 1523-1545, 1550-1630, 1634-1682, 1686-1698, 1707-1811, 1815-1818, 1822-1834, 1852-1856, 1876-1945, 1948-1970, 1988-2058, 2067-2095, 2101-2117, 2130-2167, 2176-2214, 2222-2285, 2300-2322, 2345-2393, 2396-2402, 2408-2454
+src/shortcircuit/broker/fyers_connect.py                 165    132     42      0    16%   55-56, 59-61, 79-117, 135-138, 146-170, 177-207, 214-273, 277-292, 299-307, 311-315, 319-326, 333, 337, 342
+src/shortcircuit/broker/rest_limiter.py                  107     10     30      6    88%   111-113, 129, 182-183, 188, 194-197, 209
+src/shortcircuit/capital/__init__.py                       0      0      0      0   100%
+src/shortcircuit/capital/capital_manager.py              131     34     36      5    75%   63, 81-106, 135, 142, 146->152, 176, 252-267, 271-274, 293, 307
+src/shortcircuit/config.py                                65      1      2      0    99%   111
+src/shortcircuit/eod/__init__.py                           0      0      0      0   100%
+src/shortcircuit/eod/eod_analyzer.py                     254    254     86      0     0%   1-514
+src/shortcircuit/eod/eod_scheduler.py                     58     58     12      0     0%   2-99
+src/shortcircuit/eod/eod_watchdog.py                      25     25      8      0     0%   12-54
+src/shortcircuit/execution/__init__.py                     0      0      0      0   100%
+src/shortcircuit/execution/analyzer.py                   239    239     48      0     0%   15-502
+src/shortcircuit/execution/focus_engine.py               640    640    274      0     0%   1-1238
+src/shortcircuit/execution/order_manager.py              752    752    308      0     0%   11-1546
+src/shortcircuit/execution/signal_manager.py             104    104     30      0     0%   6-240
+src/shortcircuit/execution/trade_manager.py              116    116     36      0     0%   1-248
+src/shortcircuit/marketdata/__init__.py                    0      0      0      0   100%
+src/shortcircuit/marketdata/market_utils.py                9      0      2      0   100%
+src/shortcircuit/marketdata/scanner.py                   329    329    130      0     0%   1-601
+src/shortcircuit/marketdata/symbols.py                    23      5      8      0    77%   61-65
+src/shortcircuit/observability/__init__.py                 0      0      0      0   100%
+src/shortcircuit/observability/gate_result_logger.py     255    255     78      0     0%   15-575
+src/shortcircuit/observability/ml_logger.py              136    136     38      0     0%   20-400
+src/shortcircuit/observability/telegram_bot.py           604    604    172      0     0%   4-1217
+src/shortcircuit/paths.py                                 23      1      6      1    93%   40
+src/shortcircuit/runtime/__init__.py                       0      0      0      0   100%
+src/shortcircuit/runtime/market_session.py               159    159     46      0     0%   1-284
+src/shortcircuit/runtime/startup_recovery.py              66     66     18      0     0%   5-151
+src/shortcircuit/state/__init__.py                         0      0      0      0   100%
+src/shortcircuit/state/database.py                       119     87     22      0    23%   39-41, 48-62, 66-69, 73, 77, 81-83, 87-89, 93-95, 99-101, 113-149, 160-175, 187-189, 203-245, 261
+src/shortcircuit/state/reconciliation.py                 360    262    132     11    26%   32-47, 56, 63-66, 73-75, 79-81, 85-88, 92-98, 101-121, 150, 152->160, 175-177, 205-209, 225-229, 249, 267-275, 294-321, 337-348, 367-595, 612, 632-633, 637->645, 642->637, 647-664, 698-806, 818-823, 831-833, 836-844
+src/shortcircuit/strategy/__init__.py                      0      0      0      0   100%
+src/shortcircuit/strategy/back_to_vwap.py                 90     90     38      0     0%   19-286
+src/shortcircuit/strategy/features.py                    149     16     60     12    86%   50, 56, 131-132, 163, 165-166, 237->240, 246, 262, 266-267, 271, 275, 280, 291, 298
+src/shortcircuit/strategy/htf_confluence.py               63     63     22      0     0%   6-121
+src/shortcircuit/strategy/market_context.py              227    227     78      0     0%   6-397
+src/shortcircuit/strategy/market_profile.py              101     58     40      3    40%   54-56, 67-156, 170->exit, 205
+--------------------------------------------------------------------------------------------------
+TOTAL                                                   6628   5816   2154     38    11%
+============================= 155 passed in 14.54s =============================

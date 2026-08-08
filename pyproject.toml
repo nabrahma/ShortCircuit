@@ -31,21 +31,14 @@ Documentation = "https://github.com/nabrahma/ShortCircuit/tree/main/docs"
 [tool.setuptools.dynamic]
 dependencies = { file = ["requirements.txt"] }
 
-# The package still lives at the repository root. Modules are enumerated
-# explicitly rather than auto-discovered so that data/, logs/ and reports/ are
-# never mistaken for packages.
+# src/ layout: prevents tests importing from the working directory instead of
+# the installed package, which lets broken packaging pass CI unnoticed.
 [tool.setuptools]
-py-modules = [
-    "config", "main", "analyzer", "scanner", "order_manager", "focus_engine",
-    "trade_manager", "capital_manager", "signal_manager", "reconciliation",
-    "database", "ml_logger", "gate_result_logger", "telegram_bot",
-    "market_session", "market_utils", "startup_recovery", "symbols",
-    "rest_limiter", "fyers_connect", "fyers_broker_interface",
-    "eod_analyzer", "eod_scheduler", "eod_watchdog", "dump_terminal_log",
-]
+package-dir = { "" = "src" }
 
 [tool.setuptools.packages.find]
-include = ["strategy*"]
+where = ["src"]
+include = ["shortcircuit*"]
 
 # ── pytest ────────────────────────────────────────────────────────────────
 # Replaces pytest.ini. asyncio_mode=auto is preserved from the original.
@@ -67,9 +60,9 @@ filterwarnings = [
 [tool.coverage.run]
 branch = true
 omit = [
-    "tests/*", "scratch/*", "tools/*", ".venv/*",
-    "main.py",              # orchestration only; covered by integration, not units
-    "dump_terminal_log.py",
+    "tests/*", "scratch/*", "scripts/*", ".venv/*",
+    "src/shortcircuit/runtime/supervisor.py",   # orchestration; integration-covered
+    "src/shortcircuit/observability/dump_terminal_log.py",
 ]
 
 [tool.coverage.report]
@@ -117,13 +110,13 @@ ignore = [
 # B023 — closure over a loop variable. In both cases the closure is invoked
 #        within the same iteration, so the late-binding hazard does not
 #        materialise. Real fix is a default-arg bind; deferred.
-"focus_engine.py" = ["B023"]
-"main.py"         = ["B023", "B012"]   # B012: return inside finally, in the shutdown path
-"gate_result_logger.py" = ["B007"]     # unused loop variable, cosmetic
-"scanner.py"      = ["B007"]           # unused loop variable, cosmetic
+"src/shortcircuit/execution/focus_engine.py" = ["B023"]
+"src/shortcircuit/runtime/supervisor.py" = ["B023", "B012"]   # B012: return inside finally, in the shutdown path
+"src/shortcircuit/observability/gate_result_logger.py" = ["B007"]     # unused loop variable, cosmetic
+"src/shortcircuit/marketdata/scanner.py" = ["B007"]           # unused loop variable, cosmetic
 # F821 below is a genuine undefined name, but sits after an unconditional
 # `continue` and is therefore unreachable. Flagged in KNOWN_GAPS.md.
-"tools/analyze_session_log.py" = ["F821"]
+"scripts/analyze_session_log.py" = ["F821"]
 
 # ── mypy ──────────────────────────────────────────────────────────────────
 # Advisory only. Typing 26 untyped modules would be a code change, which the

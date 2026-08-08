@@ -5,11 +5,11 @@ import datetime
 import asyncio
 import pytz
 
-from fyers_connect import FyersConnect
-import config
-from order_manager import OrderManager
+from shortcircuit.broker.fyers_connect import FyersConnect
+from shortcircuit import config
+from shortcircuit.execution.order_manager import OrderManager
 
-from gate_result_logger import get_gate_result_logger
+from shortcircuit.observability.gate_result_logger import get_gate_result_logger
 
 # Setup Logger
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -731,7 +731,7 @@ class FocusEngine:
                            position_data.get('sl', 0)))
         actual_qty = position_data.get('qty', qty)
 
-        # Phase 94: Read direction from config
+        # Phase 94: Read direction from shortcircuit.config
         direction = config.TRADE_DIRECTION  # 'SHORT' or 'LONG'
         is_long = direction == 'LONG'
 

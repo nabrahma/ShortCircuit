@@ -7,8 +7,7 @@ import logging
 import threading
 from datetime import datetime, timedelta
 from collections import defaultdict
-import config
-
+from shortcircuit import config
 logger = logging.getLogger(__name__)
 
 class SignalManager:

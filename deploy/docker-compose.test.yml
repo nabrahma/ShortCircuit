@@ -29,11 +29,10 @@ services:
       DB_PASS: postgres
       DB_NAME: shortcircuit_test
       DB_PORT: "5432"
-      PYTHONPATH: /app
+      PYTHONPATH: /app/src
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
         pip install --no-cache-dir -q pytest pytest-asyncio pytest-cov hypothesis freezegun &&
         pytest tests/unit tests/property -v \
-          --cov=strategy --cov=capital_manager --cov=rest_limiter \
-          --cov=symbols --cov=market_utils --cov-report=term
+          --cov=shortcircuit --cov-report=term

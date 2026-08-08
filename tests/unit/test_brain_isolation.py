@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-STRATEGY_DIR = Path(__file__).resolve().parents[2] / "strategy"
+STRATEGY_DIR = Path(__file__).resolve().parents[2] / "src" / "shortcircuit" / "strategy"
 
 # Modules in the runtime layer. `strategy/` importing any of these would mean the
 # Brain has reached into the Muscle.

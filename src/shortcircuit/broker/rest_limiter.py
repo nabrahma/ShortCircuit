@@ -22,7 +22,7 @@ Two further properties matter for a live trading system:
     "the broker is throttling us" from "our own limiter is shaping us".
 
 Usage:
-    from rest_limiter import rest_limiter, Priority
+    from shortcircuit.broker.rest_limiter import rest_limiter, Priority
 
     rest_limiter.acquire()                                   # scanner / background
     rest_limiter.acquire(priority=Priority.HIGH)             # orders, SL, exits

@@ -102,7 +102,7 @@ class GateResultLogger:
         self._suppress_window    =  60.0   # Suppress within this window if key unchanged
 
     def set_dsn(self, dsn: str) -> None:
-        """Called once from main.py after DB pool init. Enables periodic flush."""
+        """Called once from the supervisor after DB pool init. Enables periodic flush."""
         self._db_dsn = dsn
         logger.info("[GateResultLogger] DSN configured — periodic flush enabled (every 100 records).")
 

@@ -7,8 +7,8 @@ import pandas as pd
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
-import config
-from database import DatabaseManager
+from shortcircuit import config
+from shortcircuit.state.database import DatabaseManager
 
 logging.basicConfig(
     level=logging.INFO,
@@ -78,7 +78,7 @@ class EODAnalyzer:
         Phase 73: Finds signals that passed validation but weren't traded.
         Simulates their path (SL/TP) to provide labeled data for the ML Trainer.
         """
-        from ml_logger import MLDataLogger, get_ml_logger
+        from shortcircuit.observability.ml_logger import MLDataLogger, get_ml_logger
         target_date_str = target_date.isoformat()
         active_logger = get_ml_logger()
         ml_logger = (

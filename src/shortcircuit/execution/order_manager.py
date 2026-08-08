@@ -15,14 +15,14 @@ import math
 import uuid
 from datetime import datetime, timedelta, UTC
 from typing import Dict, Optional, Any
-import config
-from fyers_connect import ASYNC_CALL_TIMEOUT, ASYNC_RETRIED_TIMEOUT
-from fyers_broker_interface import (
+from shortcircuit import config
+from shortcircuit.broker.fyers_connect import ASYNC_CALL_TIMEOUT, ASYNC_RETRIED_TIMEOUT
+from shortcircuit.broker.fyers_broker_interface import (
     FyersBrokerInterface,
     FyersOrderStatus,
     OrderPlacementTimeout,
 )
-from ml_logger import get_ml_logger
+from shortcircuit.observability.ml_logger import get_ml_logger
 
 
 logger = logging.getLogger(__name__)
@@ -439,7 +439,7 @@ class OrderManager:
                 if entry_price > 0 and qty > 0:
                     pnl_pct = (pnl / (entry_price * qty)) * 100
 
-                # ML Update — Phase 96: Include MFE/MAE from focus_engine
+                # ML Update — Phase 96: Include MFE/MAE from shortcircuit.execution.focus_engine
                 get_ml_logger().update_outcome(
                     obs_id=pos['obs_id'],
                     outcome=outcome,
@@ -488,7 +488,7 @@ class OrderManager:
                     self.trade_manager.record_trade_outcome(symbol, pnl)
                 else:
                     # Fallback to direct call if trade_manager not injected
-                    from signal_manager import get_signal_manager
+                    from shortcircuit.execution.signal_manager import get_signal_manager
                     get_signal_manager().record_outcome(symbol, pnl)
                     logger.info(f"Phase 69 Outcome recorded for {symbol} (direct): ₹{pnl:.2f}")
         except Exception as e:
@@ -797,7 +797,7 @@ class OrderManager:
                 self._set_exec_cooldown(symbol, reason='ZERO_QTY', seconds=300)
                 return None
 
-            # Phase 94: Read direction from config runtime switch
+            # Phase 94: Read direction from shortcircuit.config runtime switch
             signal_type = config.TRADE_DIRECTION
             side = 'SELL' if signal_type == 'SHORT' else 'BUY'
 

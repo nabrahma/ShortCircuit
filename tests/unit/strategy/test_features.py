@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from strategy import features as F
+from shortcircuit.strategy import features as F
 
 
 # ── enrich_dataframe / VWAP ───────────────────────────────────────────────

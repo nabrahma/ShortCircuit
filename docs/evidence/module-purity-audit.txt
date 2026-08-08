@@ -1,37 +1,43 @@
-Module purity audit — determines which tests need zero mocking
-Command: make audit-purity   (see Makefile)
-Date: 2026-08-07
-
 MODULE                         LOC    SIDE-EFFECT MARKERS
-------                         ---    -------------------
-analyzer.py                    502     net clock io
-capital_manager.py             328     net clock concurrency
-config.py                      147     net telegram clock io
-database.py                    261     db clock io concurrency
-dump_terminal_log.py           42      clock io
-eod_analyzer.py                520     net db clock io concurrency
-eod_scheduler.py               99      clock concurrency
-eod_watchdog.py                54      clock io concurrency
-focus_engine.py                1238    net telegram clock concurrency
-fyers_broker_interface.py      2454    net telegram clock io concurrency
-fyers_connect.py               343     net io concurrency
-gate_result_logger.py          577     db clock io concurrency
-main.py                        954     net db telegram clock io concurrency
-market_session.py              284     net telegram clock concurrency
-market_utils.py                16      clock
-ml_logger.py                   400     clock io concurrency
-order_manager.py               1546    net telegram clock concurrency
-reconciliation.py              844     net db telegram clock concurrency
-rest_limiter.py                234     clock concurrency
-scanner.py                     611     net clock io concurrency
-signal_manager.py              241     clock concurrency
-startup_recovery.py            154     net telegram clock concurrency
-symbols.py                     66      PURE
-telegram_bot.py                1217    telegram clock concurrency
-trade_manager.py               248     net concurrency
-strategy/__init__.py           1       PURE
-strategy/back_to_vwap.py       286     PURE
-strategy/features.py           324     PURE
-strategy/htf_confluence.py     123     net clock
-strategy/market_context.py     397     net clock
-strategy/market_profile.py     209     PURE
+src/shortcircuit/runtime/__init__.py 0       PURE
+src/shortcircuit/runtime/startup_recovery.py 154     net telegram clock concurrency
+src/shortcircuit/runtime/supervisor.py 965     net db telegram clock io concurrency
+src/shortcircuit/runtime/market_session.py 284     net telegram clock concurrency
+src/shortcircuit/__init__.py   2       PURE
+src/shortcircuit/__main__.py   13      concurrency
+src/shortcircuit/broker/__init__.py 0       PURE
+src/shortcircuit/broker/fyers_broker_interface.py 2454    net telegram clock io concurrency
+src/shortcircuit/broker/rest_limiter.py 234     clock concurrency
+src/shortcircuit/broker/fyers_connect.py 348     net io concurrency
+src/shortcircuit/capital/__init__.py 0       PURE
+src/shortcircuit/capital/capital_manager.py 328     net clock concurrency
+src/shortcircuit/state/reconciliation.py 844     net db telegram clock concurrency
+src/shortcircuit/state/__init__.py 0       PURE
+src/shortcircuit/state/database.py 261     db clock io concurrency
+src/shortcircuit/eod/__init__.py 0       PURE
+src/shortcircuit/eod/eod_scheduler.py 99      clock concurrency
+src/shortcircuit/eod/eod_analyzer.py 520     net db clock io concurrency
+src/shortcircuit/eod/eod_watchdog.py 54      clock io concurrency
+src/shortcircuit/execution/__init__.py 0       PURE
+src/shortcircuit/execution/signal_manager.py 240     clock concurrency
+src/shortcircuit/execution/analyzer.py 502     net clock io
+src/shortcircuit/execution/focus_engine.py 1238    net telegram clock concurrency
+src/shortcircuit/execution/order_manager.py 1546    net telegram clock concurrency
+src/shortcircuit/execution/trade_manager.py 248     net concurrency
+src/shortcircuit/observability/__init__.py 0       PURE
+src/shortcircuit/observability/ml_logger.py 400     clock io concurrency
+src/shortcircuit/observability/dump_terminal_log.py 42      clock io
+src/shortcircuit/observability/telegram_bot.py 1217    telegram clock concurrency
+src/shortcircuit/observability/gate_result_logger.py 577     db clock io concurrency
+src/shortcircuit/marketdata/__init__.py 0       PURE
+src/shortcircuit/marketdata/market_utils.py 16      clock
+src/shortcircuit/marketdata/scanner.py 611     net clock io concurrency
+src/shortcircuit/marketdata/symbols.py 66      PURE
+src/shortcircuit/config.py     147     net telegram clock io
+src/shortcircuit/paths.py      66      net io
+src/shortcircuit/strategy/__init__.py 1       PURE
+src/shortcircuit/strategy/back_to_vwap.py 286     PURE
+src/shortcircuit/strategy/market_profile.py 209     PURE
+src/shortcircuit/strategy/htf_confluence.py 122     net clock
+src/shortcircuit/strategy/features.py 324     PURE
+src/shortcircuit/strategy/market_context.py 397     net clock

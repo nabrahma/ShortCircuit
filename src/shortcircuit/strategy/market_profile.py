@@ -60,7 +60,7 @@ class ProfileAnalyzer:
         Calculates Market Profile.
         If mode is 'VOLUME' and Phase 65 is enabled, uses Dalton's algorithm.
         """
-        import config
+        from shortcircuit import config
         if getattr(config, 'P65_AMT_ENABLED', False) and mode == 'VOLUME':
             return self.calculate_dalton_value_area(df)
 

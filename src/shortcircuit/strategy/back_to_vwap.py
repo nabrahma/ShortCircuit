@@ -20,8 +20,8 @@ import logging
 from typing import Optional, Dict, Any
 
 import pandas as pd
-import config as cfg
-from strategy import features as F
+import shortcircuit.config as cfg
+from shortcircuit.strategy import features as F
 
 logger = logging.getLogger(__name__)
 

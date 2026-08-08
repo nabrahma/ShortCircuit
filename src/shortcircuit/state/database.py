@@ -4,7 +4,7 @@ import datetime
 import os
 import json
 import asyncio
-import config
+from shortcircuit import config
 from typing import Optional, List, Dict, Any
 try:
     import psycopg2

@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional, Dict, Any
 from zoneinfo import ZoneInfo
-import config
+from shortcircuit import config
 from telegram import (
     Update,
     InlineKeyboardButton,
@@ -227,7 +227,7 @@ class ShortCircuitBot:
         # which raises AttributeError on entry — and the second sat inside a
         # SYNCHRONOUS done-callback, where `async with` is not even possible.
         # The path survived only because EDITABLE_SIGNAL_FLOW_ENABLED is absent
-        # from config.py and defaults to False, so none of it has ever run.
+        # from shortcircuit.config.py and defaults to False, so none of it has ever run.
         #
         # The index is a plain dict guarded for short critical sections, so a
         # threading.Lock is the correct primitive: usable from both the loop and
@@ -1195,7 +1195,7 @@ class ShortCircuitBot:
         except Exception as e:
             logger.error(f"Failed to send error alert: {e}")
     def start_polling(self):
-        """Compatibility wrapper for running in a thread from main.py."""
+        """Compatibility wrapper for running in a thread from the supervisor."""
         raise RuntimeError(
             "BRIDGE REMOVED in Phase 44.5. Use ShortCircuitBot.run(shutdown_event)."
         )

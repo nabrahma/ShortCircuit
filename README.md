@@ -69,7 +69,7 @@ ShortCircuit is split into two components with an **enforced dependency
 boundary**: `strategy/` imports nothing from the runtime layer, and a test
 asserts it.
 
-### The Brain (`strategy/`)
+### The Brain (`src/shortcircuit/strategy/`)
 
 All trading intelligence is physically sealed inside `strategy/`. It knows
 nothing about brokers, websockets, or Telegram. It only knows math, risk, and
@@ -86,14 +86,14 @@ That boundary is verified, not asserted:
 the AST of every strategy module and fails if one imports the runtime layer, an
 I/O library, or opens a file.
 
-### The Muscle (root)
+### The Muscle (the rest of the package)
 
 The rest of the repository is the muscle, nervous system, and immune system. It
 fetches data, asks the Brain for decisions, and pulls the physical triggers.
 
-- `analyzer.py` — the orchestrator that asks the Brain what to do
-- `order_manager.py` / `fyers_broker_interface.py` — the hands that execute
-- `reconciliation.py` — the immune system verifying local state against the broker
+- `execution/analyzer.py` — the orchestrator that asks the Brain what to do
+- `execution/order_manager.py` / `broker/fyers_broker_interface.py` — the hands that execute
+- `state/reconciliation.py` — the immune system verifying local state against the broker
 
 ---
 
@@ -241,7 +241,7 @@ session, days later, in a way that looks like bad luck.
 
 ### Testing
 
-143 unit and property-based tests. Coverage is concentrated where an error is
+155 unit and property-based tests. Coverage is concentrated where an error is
 hardest to notice: the strategy math (`features.py` at 89%) and the capital
 layer (74%). Three strategy modules are not yet covered, and that is stated in
 [docs/KNOWN_GAPS.md](docs/KNOWN_GAPS.md) rather than hidden behind a global
@@ -319,7 +319,7 @@ Engineering metrics only. No performance, profitability, or return figures — s
 | Cache priming, cold start | 4–25 s observed |
 | Reconciliation cadence | every 6 s during market hours |
 | Gate rejections recorded | 878 across 27 sessions |
-| Tests / runtime | 143 / ~6.5 s |
+| Tests / runtime | 155 / ~6.5 s |
 
 **Rejection breakdown.** Of 878 recorded gate rejections: **98.7% were rejected
 by the strategy's six hard gates**, 1.0% by higher-timeframe confluence, 0.2% by
@@ -356,32 +356,30 @@ without credentials is the build and the full test suite.
 ## Project layout
 
 ```text
-main.py                      Runtime supervisor and task orchestration
-config.py                    Strategy, risk, mode, and infrastructure parameters
-scanner.py                   NSE-EQ scanner and candle prefetcher
-analyzer.py                  Orchestrator: data → Brain → signal
-focus_engine.py              Pending validation and active position monitoring
-order_manager.py             Entry, stops, exits, fill verification
-capital_manager.py           Funds sync, sizing, capital slot control
-fyers_broker_interface.py    Data/order WebSocket and broker abstraction
-telegram_bot.py              Operator command and alert interface
-database.py                  PostgreSQL access layer
-reconciliation.py            Broker/DB/internal-state reconciliation
-gate_result_logger.py        Gate audit trail and EOD rejection summary
-ml_logger.py                 Parquet/CSV ML observation logger
-eod_analyzer.py              EOD analytics, missed-signal audit, ML labelling
+main.py                       Entry-point shim — `python main.py` still works
+src/shortcircuit/
+├── config.py                 Strategy, risk, mode and infrastructure parameters
+├── paths.py                  Repository-anchored runtime paths
+├── runtime/                  Supervisor, market session, startup recovery
+├── marketdata/               Scanner, symbols, session helpers
+├── broker/                   Fyers REST + WebSocket, auth, rate limiter
+├── execution/                Analyzer, focus engine, order/signal/trade managers
+├── capital/                  Funds sync, sizing, capital slot
+├── state/                    PostgreSQL access, reconciliation
+├── observability/            Telegram, gate audit, ML logger
+├── eod/                      EOD analyzer, scheduler, watchdog
+└── strategy/                 The Brain — logic and math only
+    ├── back_to_vwap.py       Single unified strategy
+    ├── features.py           VWAP, RSI, volume, ATR, patterns
+    ├── market_profile.py     Dalton value areas
+    ├── market_context.py     Nifty regime
+    └── htf_confluence.py     Higher-timeframe gates
 
-strategy/                    The Brain — logic and math only
-├── back_to_vwap.py          Single unified strategy
-├── features.py              VWAP, RSI, volume, ATR, patterns
-├── market_profile.py        Dalton value areas
-├── market_context.py        Nifty regime
-└── htf_confluence.py        Higher-timeframe gates
-
-tests/                       143 unit, property and integration tests
-docs/                        Architecture, strategy, operations, decisions, evidence
-deploy/                      Dockerfile and compose stacks
-migrations/                  PostgreSQL schema migrations
+tests/                        155 unit and property tests
+docs/                         Architecture, strategy, operations, decisions, evidence
+deploy/                       Dockerfile and compose stacks
+scripts/                      Operational scripts
+migrations/                   PostgreSQL schema migrations
 ```
 
 ---

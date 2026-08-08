@@ -15,8 +15,7 @@ from pathlib import Path
 
 import pytest
 
-import paths
-
+from shortcircuit import paths
 REPO = Path(__file__).resolve().parents[2]
 
 
@@ -75,8 +74,8 @@ def test_paths_do_not_depend_on_the_working_directory():
     """
     result = subprocess.run(
         [sys.executable, "-c",
-         f"import sys; sys.path.insert(0, {str(REPO)!r}); "
-         "import paths; print(paths.TOKEN_FILE)"],
+         f"import sys; sys.path.insert(0, {str(REPO / 'src')!r}); "
+         "from shortcircuit import paths; print(paths.TOKEN_FILE)"],
         cwd="/tmp", capture_output=True, text=True,
     )
     assert result.returncode == 0, result.stderr

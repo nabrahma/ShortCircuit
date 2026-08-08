@@ -12,10 +12,9 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from freezegun import freeze_time
 
-import config
-import market_utils
-import symbols
-
+from shortcircuit import config
+from shortcircuit.marketdata import market_utils
+from shortcircuit.marketdata import symbols
 IST = timezone(timedelta(hours=5, minutes=30))
 
 

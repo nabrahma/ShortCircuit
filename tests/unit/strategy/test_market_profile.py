@@ -7,7 +7,7 @@ changes which setups qualify. These are pure computations over a DataFrame.
 import pandas as pd
 import pytest
 
-from strategy.market_profile import ProfileAnalyzer
+from shortcircuit.strategy.market_profile import ProfileAnalyzer
 
 
 @pytest.fixture

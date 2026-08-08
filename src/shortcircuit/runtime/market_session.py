@@ -2,7 +2,7 @@ import time
 import sys
 import logging
 import asyncio
-import config
+from shortcircuit import config
 from datetime import datetime, time as dtime, timedelta, timezone
 
 # Helper for IST Timezone
@@ -10,8 +10,8 @@ IST = timezone(timedelta(hours=5, minutes=30))
 
 logger = logging.getLogger(__name__)
 
-from config import MARKET_SESSION_CONFIG, set_trading_enabled
-from symbols import NIFTY_50
+from shortcircuit.config import MARKET_SESSION_CONFIG, set_trading_enabled
+from shortcircuit.marketdata.symbols import NIFTY_50
 
 class MarketSession:
     """
