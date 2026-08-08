@@ -1,5 +1,16 @@
 # syntax=docker/dockerfile:1
-# Multi-stage: build tools never reach the final image.
+#
+# Four stages. The runtime image carries the trading dependencies and nothing
+# else: no pytest, no linters, no security tooling.
+#
+# That separation is not only hygiene. Rust-built dev wheels (ruff, hypothesis)
+# ship PEP 770 SBOMs in .dist-info/sboms/ declaring the crates vendored inside
+# them, and scanners read those. A dev toolchain in the production image means
+# every vendored crate in every dev wheel becomes a finding against the process
+# that places orders.
+#
+#   docker build -f deploy/Dockerfile -t shortcircuit .                # runtime
+#   docker build -f deploy/Dockerfile --target test -t shortcircuit:test .
 
 FROM python:3.12-slim AS builder
 
@@ -10,16 +21,23 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends gcc python3-dev libpq-dev \
  && rm -rf /var/lib/apt/lists/*
 
-# Dev requirements are installed too so the image can run its own test suite.
-# They are small and pure-python; the alternative is pip-installing at container
-# start, which fails because /opt/venv is root-owned and the runtime user is not.
-COPY requirements.txt requirements-dev.txt ./
+COPY requirements.txt ./
 RUN python -m venv /opt/venv \
  && /opt/venv/bin/pip install --upgrade pip \
- && /opt/venv/bin/pip install -r requirements.txt -r requirements-dev.txt
+ && /opt/venv/bin/pip install -r requirements.txt
 
 
-FROM python:3.12-slim AS runtime
+# Dev dependencies layered on top, for the test image only. Installed at build
+# time rather than container start because /opt/venv is root-owned and the
+# runtime user is not.
+FROM builder AS builder-dev
+
+COPY requirements-dev.txt ./
+RUN /opt/venv/bin/pip install -r requirements-dev.txt
+
+
+# Everything both images share except the virtualenv.
+FROM python:3.12-slim AS base
 
 # Non-root. A process that places orders should not also be able to rewrite its
 # own code.
@@ -29,7 +47,6 @@ RUN groupadd --system --gid 1001 shortcircuit \
  && apt-get install -y --no-install-recommends libpq5 \
  && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /opt/venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
@@ -42,6 +59,23 @@ COPY --chown=shortcircuit:shortcircuit . /app
 RUN mkdir -p /app/logs /app/data /app/reports \
  && chown -R shortcircuit:shortcircuit /app/logs /app/data /app/reports
 
+
+FROM base AS test
+
+COPY --from=builder-dev /opt/venv /opt/venv
+USER shortcircuit
+
+# Both tools write state, and /app is root-owned by design.
+ENV COVERAGE_FILE=/tmp/.coverage \
+    HYPOTHESIS_STORAGE_DIRECTORY=/tmp/.hypothesis
+
+ENTRYPOINT ["python", "-m", "pytest"]
+
+
+# Last stage, so a plain `docker build` produces the runtime image.
+FROM base AS runtime
+
+COPY --from=builder /opt/venv /opt/venv
 USER shortcircuit
 
 # Credentials are injected at run time, never baked in.

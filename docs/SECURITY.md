@@ -129,6 +129,24 @@ authenticated Fyers market data socket.
 
 `msgpack` was genuinely fixable and was bumped rather than suppressed.
 
+## Dev tooling is not shipped to production
+
+The runtime image contains the trading dependencies and nothing else. This began
+as a scan finding and turned out to be worth fixing on its own terms.
+
+Rust-built dev wheels ship [PEP 770](https://peps.python.org/pep-0770/) SBOMs at
+`.dist-info/sboms/`, declaring the crates vendored inside them. `ruff`,
+`hypothesis` and `ast_serialize` all do. Scanners read those SBOMs, so a
+vulnerable crate vendored into a linter is reported against whatever image
+carries the linter. An earlier revision installed `requirements-dev.txt` into the
+same virtualenv the runtime used, which put pytest, ruff, mypy, bandit and
+pre-commit into the image that places orders.
+
+`deploy/Dockerfile` now builds two virtualenvs from a shared base. The default
+target is `runtime`; tests build `--target test`. Beyond the scan result, a
+process holding live broker credentials has no reason to carry a test framework
+or a package installer.
+
 ## Reporting a vulnerability
 
 Open a GitHub issue for anything non-sensitive. For anything involving a

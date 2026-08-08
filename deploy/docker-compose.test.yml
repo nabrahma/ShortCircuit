@@ -21,6 +21,9 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile
+      # Required. The default stage is `runtime`, which deliberately has no
+      # pytest — dev tooling is not shipped to production.
+      target: test
     depends_on:
       postgres: { condition: service_healthy }
     environment:
