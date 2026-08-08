@@ -1,0 +1,23 @@
+# Vulnerabilities in packages VENDORED INSIDE setuptools (setuptools/_vendor/).
+#
+# These cannot be fixed by bumping our own dependencies. Our direct pins are
+# already clean: wheel 0.47.0 and setuptools 79.0.1 both scan with zero
+# findings. What Trivy flags is the older copies setuptools bundles internally.
+#
+# The only way to replace them is to upgrade setuptools past 79.0.1, and that is
+# pinned for a hard runtime reason documented in requirements.txt: setuptools
+# 80.x removes the pkg_resources shim, Python 3.12 removed pkg_resources from
+# the standard library, and fyers_apiv3's WebSocket client imports it. Upgrading
+# breaks the market data feed outright.
+#
+# Reachability: these vendored modules are setuptools' own build-time machinery.
+# The trading runtime never imports jaraco.context or wheel, and the exploit
+# paths are archive extraction and package-index traversal, neither of which the
+# bot performs. Re-evaluate whenever fyers_apiv3 stops depending on
+# pkg_resources; at that point the setuptools pin can be lifted and this file
+# deleted.
+#
+# Reviewed: 2026-08-08
+CVE-2026-23949   # jaraco.context 5.3.0, vendored in setuptools
+CVE-2026-24049   # wheel 0.45.1, vendored in setuptools
+CVE-2025-47273   # setuptools 70.3.0, vendored copy

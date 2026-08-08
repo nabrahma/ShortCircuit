@@ -74,4 +74,4 @@ jobs:
       - name: Scan image
         run: |
           trivy image --severity HIGH,CRITICAL --ignore-unfixed \
-            --exit-code 1 --no-progress shortcircuit:scan
+            --exit-code 1 --no-progress --ignorefile .trivyignore shortcircuit:scan

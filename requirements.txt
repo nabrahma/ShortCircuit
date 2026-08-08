@@ -25,7 +25,7 @@ psycopg2-binary>=2.9.9
 python-dotenv>=1.0.0
 
 # ── Async / Networking ─────────────────────────────────────
-aiohttp>=3.9.0
+aiohttp>=3.14.3      # CVE-2024-30251, CVE-2025-69223, CVE-2026-69244
 websockets>=12.0
 # pytz is imported by config, market_utils, reconciliation and the supervisor.
 # It was never declared — it happened to be present transitively on the dev
@@ -41,13 +41,14 @@ requests>=2.31.0
 pandas>=2.0.0
 numpy>=1.26.0
 pyarrow>=14.0.0
+msgpack>=1.2.1       # GHSA-6v7p-g79w-8964 (pulled in transitively)
 optuna>=3.6.0
 
 # ── Telegram Alerts ────────────────────────────────────────
 python-telegram-bot>=21.0.0
 
 # ── Serialization ──────────────────────────────────────────
-protobuf>=4.25.0
+protobuf>=5.29.6     # CVE-2025-4565, CVE-2026-0994
 
 # ── Build Tools ────────────────────────────────────────────
 wheel>=0.47.0

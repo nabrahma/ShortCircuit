@@ -82,6 +82,33 @@ History rewriting is deliberately **not** part of the remediation. Rotating the
 credential renders the historical value worthless, and rewriting 227 commits
 would break every existing clone for no additional security benefit.
 
+## Accepted vulnerability exceptions
+
+Three HIGH findings from the container scan are suppressed in `.trivyignore`,
+with the reasoning recorded there rather than silently filtered.
+
+| CVE | Package | Why it is accepted |
+|---|---|---|
+| CVE-2026-23949 | `jaraco.context` 5.3.0 | Vendored inside setuptools |
+| CVE-2026-24049 | `wheel` 0.45.1 | Vendored inside setuptools |
+| CVE-2025-47273 | `setuptools` 70.3.0 | Vendored copy |
+
+None are our own dependencies. Our direct pins scan clean: `wheel` 0.47.0 and
+`setuptools` 79.0.1 both report zero findings. What Trivy flags is the older
+copies setuptools bundles in its `_vendor/` directory.
+
+Replacing them requires upgrading setuptools past 79.0.1, which is pinned for a
+hard runtime reason: setuptools 80.x removes the `pkg_resources` shim, Python
+3.12 removed `pkg_resources` from the standard library, and `fyers_apiv3`'s
+WebSocket client imports it. Upgrading breaks the market data feed outright.
+
+The exploit paths are archive extraction and package-index traversal. The
+trading runtime performs neither and never imports those modules. This is
+re-evaluated whenever `fyers_apiv3` drops its `pkg_resources` dependency.
+
+Everything actually fixable was fixed rather than suppressed: `aiohttp`,
+`protobuf` and `msgpack` were bumped past their advisories.
+
 ## Reporting a vulnerability
 
 Open a GitHub issue for anything non-sensitive. For anything involving a
