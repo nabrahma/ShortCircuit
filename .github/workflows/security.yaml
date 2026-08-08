@@ -63,7 +63,7 @@ jobs:
       # contrib install script, which exits non-zero on this runner.
       - name: Install trivy
         env:
-          TRIVY_VERSION: "0.58.1"
+          TRIVY_VERSION: "0.73.0"
         run: |
           set -euo pipefail
           curl -sSfL -o /tmp/trivy.tar.gz \
