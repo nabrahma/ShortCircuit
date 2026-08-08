@@ -57,10 +57,19 @@ jobs:
       # Installed directly rather than via aquasecurity/trivy-action: the pinned
       # action resolves an internal `setup-trivy@v0.2.2` that no longer exists,
       # so the job fails at "Set up job" before running anything.
+      # Installed from the vendor's own release tarball rather than via
+      # aquasecurity/trivy-action, whose pinned version resolves an internal
+      # setup-trivy@v0.2.2 that no longer exists, and rather than via the
+      # contrib install script, which exits non-zero on this runner.
       - name: Install trivy
+        env:
+          TRIVY_VERSION: "0.58.1"
         run: |
-          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
-            | sudo sh -s -- -b /usr/local/bin v0.58.1
+          set -euo pipefail
+          curl -sSfL -o /tmp/trivy.tar.gz \
+            "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          tar -xzf /tmp/trivy.tar.gz -C /tmp trivy
+          sudo install -m 0755 /tmp/trivy /usr/local/bin/trivy
           trivy --version
       - name: Scan image
         run: |
