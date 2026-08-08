@@ -48,7 +48,13 @@ optuna>=3.6.0
 python-telegram-bot>=21.0.0
 
 # ── Serialization ──────────────────────────────────────────
-protobuf>=5.29.6     # CVE-2025-4565, CVE-2026-0994
+# Upper bound is deliberate and load-bearing. fyers_apiv3's WebSocket decodes
+# market data through FyersWebsocket/msg_pb2.py, generated with protoc for
+# Protobuf Python 5.26.1. Left unbounded, pip resolves this to protobuf 7.x,
+# two major versions past what that gencode was built against. 5.29.6 clears
+# both advisories (fixed in 5.29.5 and 5.29.6 respectively) without crossing
+# a major boundary. Do not widen without re-testing the data feed.
+protobuf>=5.29.6,<6  # CVE-2025-4565, CVE-2026-0994
 
 # ── Build Tools ────────────────────────────────────────────
 wheel>=0.47.0
