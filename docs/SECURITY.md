@@ -134,18 +134,26 @@ authenticated Fyers market data socket.
 The runtime image contains the trading dependencies and nothing else. This began
 as a scan finding and turned out to be worth fixing on its own terms.
 
-Rust-built dev wheels ship [PEP 770](https://peps.python.org/pep-0770/) SBOMs at
-`.dist-info/sboms/`, declaring the crates vendored inside them. `ruff`,
-`hypothesis` and `ast_serialize` all do. Scanners read those SBOMs, so a
-vulnerable crate vendored into a linter is reported against whatever image
-carries the linter. An earlier revision installed `requirements-dev.txt` into the
-same virtualenv the runtime used, which put pytest, ruff, mypy, bandit and
-pre-commit into the image that places orders.
+An earlier revision installed `requirements-dev.txt` into the same virtualenv
+the runtime used, which put pytest, ruff, mypy, bandit and pre-commit into the
+image that places orders. Rust-built dev wheels also ship
+[PEP 770](https://peps.python.org/pep-0770/) SBOMs at `.dist-info/sboms/`
+declaring their vendored crates, which scanners read, so the dev toolchain
+brought its own reporting surface with it.
 
 `deploy/Dockerfile` now builds two virtualenvs from a shared base. The default
-target is `runtime`; tests build `--target test`. Beyond the scan result, a
-process holding live broker credentials has no reason to carry a test framework
-or a package installer.
+target is `runtime`; tests build `--target test`.
+
+The runtime stage also deletes pip. pip vendors its own dependencies under
+`pip/_vendor/` — including `msgpack` and `pkg_resources` — and scanners report
+those bundled copies by version. The `python:3.12-slim` base ships pip 25.0.1,
+whose vendored msgpack is 1.1.2, and no pin on our side reaches it: our own
+msgpack is 1.2.1 and scans clean. The same vendored tree was the source of the
+earlier `setuptools 70.3.0` finding. Removing pip resolves both, and a container
+that places real orders has no business being able to install packages.
+
+`setuptools` is deliberately kept: 79.0.1 supplies the `pkg_resources` shim that
+`fyers_apiv3`'s WebSocket client imports.
 
 ## Reporting a vulnerability
 

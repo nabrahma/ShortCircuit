@@ -76,6 +76,24 @@ ENTRYPOINT ["python", "-m", "pytest"]
 FROM base AS runtime
 
 COPY --from=builder /opt/venv /opt/venv
+
+# Remove pip. Nothing is installed at run time, and a container that places
+# real orders should not carry the ability to install arbitrary packages.
+#
+# It also removes a class of scan finding that is otherwise unfixable. pip
+# vendors its own dependencies under pip/_vendor/, including msgpack and
+# pkg_resources, and scanners report those vendored copies by version. The
+# base image ships pip 25.0.1, whose vendored msgpack is 1.1.2. No pin on our
+# side reaches it: our own msgpack is 1.2.1 and scans clean.
+#
+# setuptools is deliberately NOT removed — 79.0.1 provides the pkg_resources
+# shim that fyers_apiv3's WebSocket client imports.
+RUN rm -rf /usr/local/lib/python3.12/site-packages/pip \
+           /usr/local/lib/python3.12/site-packages/pip-*.dist-info \
+           /opt/venv/lib/python3.12/site-packages/pip \
+           /opt/venv/lib/python3.12/site-packages/pip-*.dist-info \
+ && python -c "import shortcircuit.paths" 2>/dev/null || true
+
 USER shortcircuit
 
 # Credentials are injected at run time, never baked in.

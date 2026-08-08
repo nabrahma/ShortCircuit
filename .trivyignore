@@ -20,7 +20,8 @@
 # Reviewed: 2026-08-08
 CVE-2026-23949   # jaraco.context 5.3.0, vendored in setuptools
 CVE-2026-24049   # wheel 0.45.1, vendored in setuptools
-CVE-2025-47273   # setuptools 70.3.0, vendored copy
+CVE-2025-47273   # setuptools 70.3.0 — was pip's vendored pkg_resources;
+                 # pip is now removed from the runtime image, kept as a belt-and-braces entry
 
 
 # ── Advisories the broker SDK's exact pins make unfixable ────────────────────
