@@ -80,13 +80,19 @@ async def test_orders_exchange_order_id_is_unique(conn):
 # ── round trips ───────────────────────────────────────────────────────────
 
 async def test_position_round_trips(conn):
+    """
+    `source` is CHECK-constrained to SIGNAL / MANUAL / ORPHAN_RECOVERY /
+    RECONCILIATION, and `status` on reconciliation_log to a similar fixed
+    vocabulary. Those constraints are the schema refusing to record a state the
+    system does not have a meaning for, so the tests use real values.
+    """
     symbol = f"NSE:TEST{uuid.uuid4().hex[:6].upper()}-EQ"
     today = datetime.date.today()
     try:
         await conn.execute(
             "INSERT INTO positions (symbol, qty, entry_price, state, session_date, "
             "source, opened_at, leverage) VALUES ($1,$2,$3,$4,$5,$6,NOW(),$7)",
-            symbol, 10, 100.50, "OPEN", today, "TEST", 5.0,
+            symbol, 10, 100.50, "OPEN", today, "RECONCILIATION", 5.0,
         )
         row = await conn.fetchrow(
             "SELECT symbol, qty, entry_price, state, leverage FROM positions "
@@ -111,7 +117,7 @@ async def test_position_qty_is_stored_as_a_positive_magnitude(conn):
         await conn.execute(
             "INSERT INTO positions (symbol, qty, entry_price, state, session_date, "
             "source, opened_at) VALUES ($1,$2,$3,$4,$5,$6,NOW())",
-            symbol, 7, 250.0, "OPEN", datetime.date.today(), "TEST",
+            symbol, 7, 250.0, "OPEN", datetime.date.today(), "RECONCILIATION",
         )
         qty = await conn.fetchval("SELECT qty FROM positions WHERE symbol=$1", symbol)
         assert qty > 0
@@ -124,9 +130,10 @@ async def test_gate_result_round_trips_with_a_verdict(conn):
     symbol = f"NSE:TEST{uuid.uuid4().hex[:6].upper()}-EQ"
     try:
         await conn.execute(
-            "INSERT INTO gate_results (symbol, session_date, verdict, first_fail_gate, "
-            "rejection_reason, data_tier) VALUES ($1,$2,$3,$4,$5,$6)",
-            symbol, datetime.date.today(), "REJECTED", "G5_STRATEGY",
+            "INSERT INTO gate_results (symbol, session_date, scan_id, evaluated_at, "
+            "verdict, first_fail_gate, rejection_reason, data_tier) "
+            "VALUES ($1,$2,$3,NOW(),$4,$5,$6,$7)",
+            symbol, datetime.date.today(), 1, "REJECTED", "G5_STRATEGY",
             "integration test", "WS_CACHE",
         )
         row = await conn.fetchrow(
@@ -159,13 +166,13 @@ async def test_reconciliation_log_accepts_a_divergence_record(conn):
     await conn.execute(
         f"INSERT INTO reconciliation_log (timestamp, {internal}, {broker}, status, "
         f"session_date, check_duration_ms) VALUES (NOW(), $1, $2, $3, $4, $5)",
-        1, 0, "INTEGRATION_TEST", datetime.date.today(), 12,
+        1, 0, "DIVERGENCE_DETECTED", datetime.date.today(), 12,
     )
     count = await conn.fetchval(
-        "SELECT COUNT(*) FROM reconciliation_log WHERE status='INTEGRATION_TEST'"
+        "SELECT COUNT(*) FROM reconciliation_log WHERE check_duration_ms = 12"
     )
     assert count >= 1
-    await conn.execute("DELETE FROM reconciliation_log WHERE status='INTEGRATION_TEST'")
+    await conn.execute("DELETE FROM reconciliation_log WHERE check_duration_ms = 12")
 
 
 # ── the guard itself ──────────────────────────────────────────────────────

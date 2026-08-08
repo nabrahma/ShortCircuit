@@ -30,6 +30,12 @@ services:
       DB_NAME: shortcircuit_test
       DB_PORT: "5432"
       PYTHONPATH: /app/src
+      # /app is root-owned and the container runs as a non-root user, so both
+      # coverage and hypothesis must write their state somewhere writable.
+      # Without this the suite passes and then pytest dies in teardown trying
+      # to open .coverage.
+      COVERAGE_FILE: /tmp/.coverage
+      HYPOTHESIS_STORAGE_DIRECTORY: /tmp/.hypothesis
     # Test tooling is baked into the image, so nothing is installed at run
     # time — /opt/venv is root-owned and the runtime user cannot write to it.
     entrypoint: ["/bin/sh", "-c"]

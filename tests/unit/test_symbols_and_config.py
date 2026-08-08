@@ -134,10 +134,13 @@ def test_dotenv_file_is_git_ignored():
     # src/ restructure those are no longer the same place.
     from shortcircuit import paths
 
-    result = subprocess.run(
-        ["git", "check-ignore", "-q", ".env"],
-        cwd=paths.PROJECT_ROOT, capture_output=True,
-    )
+    try:
+        result = subprocess.run(
+            ["git", "check-ignore", "-q", ".env"],
+            cwd=paths.PROJECT_ROOT, capture_output=True,
+        )
+    except FileNotFoundError:
+        pytest.skip("git not available (e.g. inside the runtime container)")
     if result.returncode == 128:
         pytest.skip("not a git working tree (e.g. running from a source archive)")
     assert result.returncode == 0, ".env is not git-ignored"
