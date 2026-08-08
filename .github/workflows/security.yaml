@@ -46,7 +46,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install bandit
-      - run: bandit -r src/ -ll
+      - run: bandit -c pyproject.toml -r src/ -ll
 
   image:
     name: Container scan
@@ -54,10 +54,15 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - run: docker build -f deploy/Dockerfile -t shortcircuit:scan .
-      - name: trivy
-        uses: aquasecurity/trivy-action@18f2510ee396bbf400402947b394f2dd8c87dbb0  # v0.29.0
-        with:
-          image-ref: shortcircuit:scan
-          severity: HIGH,CRITICAL
-          exit-code: "1"
-          ignore-unfixed: true
+      # Installed directly rather than via aquasecurity/trivy-action: the pinned
+      # action resolves an internal `setup-trivy@v0.2.2` that no longer exists,
+      # so the job fails at "Set up job" before running anything.
+      - name: Install trivy
+        run: |
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+            | sh -s -- -b /usr/local/bin v0.58.1
+          trivy --version
+      - name: Scan image
+        run: |
+          trivy image --severity HIGH,CRITICAL --ignore-unfixed \
+            --exit-code 1 --no-progress shortcircuit:scan

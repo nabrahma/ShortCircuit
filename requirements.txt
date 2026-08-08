@@ -27,6 +27,13 @@ python-dotenv>=1.0.0
 # ── Async / Networking ─────────────────────────────────────
 aiohttp>=3.9.0
 websockets>=12.0
+# pytz is imported by config, market_utils, reconciliation and the supervisor.
+# It was never declared — it happened to be present transitively on the dev
+# machine, so a clean `pip install -r requirements.txt` produced a bot that
+# could not start. CI caught it on the first clean install.
+pytz>=2024.1
+# urllib3 is imported directly for Retry; do not rely on requests pulling it in.
+urllib3>=2.0.0
 aiofiles>=25.1.0
 requests>=2.31.0
 

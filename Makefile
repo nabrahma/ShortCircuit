@@ -50,7 +50,7 @@ security:  ## gitleaks (full history) + pip-audit + bandit
 	  && gitleaks detect --source . --redact --log-opts="--all" \
 	  || echo "gitleaks not installed — see docs/SECURITY.md"
 	-$(PY) -m pip_audit -r requirements.txt --desc
-	-$(PY) -m bandit -r src/ -ll
+	-$(PY) -m bandit -c pyproject.toml -r src/ -ll
 
 # ── evidence ─────────────────────────────────────────────────────────────
 .PHONY: audit-purity

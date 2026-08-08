@@ -10,10 +10,13 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends gcc python3-dev libpq-dev \
  && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
+# Dev requirements are installed too so the image can run its own test suite.
+# They are small and pure-python; the alternative is pip-installing at container
+# start, which fails because /opt/venv is root-owned and the runtime user is not.
+COPY requirements.txt requirements-dev.txt ./
 RUN python -m venv /opt/venv \
  && /opt/venv/bin/pip install --upgrade pip \
- && /opt/venv/bin/pip install -r requirements.txt
+ && /opt/venv/bin/pip install -r requirements.txt -r requirements-dev.txt
 
 
 FROM python:3.12-slim AS runtime

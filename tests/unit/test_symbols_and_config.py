@@ -130,10 +130,16 @@ def test_dotenv_file_is_git_ignored():
     import subprocess
     from pathlib import Path
 
-    repo = Path(config.__file__).resolve().parent
+    # Anchor on the repository root, not on config.py's directory — after the
+    # src/ restructure those are no longer the same place.
+    from shortcircuit import paths
+
     result = subprocess.run(
-        ["git", "check-ignore", "-q", ".env"], cwd=repo, capture_output=True
+        ["git", "check-ignore", "-q", ".env"],
+        cwd=paths.PROJECT_ROOT, capture_output=True,
     )
+    if result.returncode == 128:
+        pytest.skip("not a git working tree (e.g. running from a source archive)")
     assert result.returncode == 0, ".env is not git-ignored"
 
 
