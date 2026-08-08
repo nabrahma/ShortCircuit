@@ -28,7 +28,7 @@ command and control, and parquet-based ML feedback loops.
 The design premise:
 
 > Setups are only acted on when extension, rejection, and liquidity decay
-> coincide — and only after execution can be verified.
+> coincide, and only once execution can be verified.
 
 It is built around one operating principle:
 
@@ -75,11 +75,11 @@ All trading intelligence is physically sealed inside `strategy/`. It knows
 nothing about brokers, websockets, or Telegram. It only knows math, risk, and
 logic.
 
-- `strategy/back_to_vwap.py` — the single unified execution logic
-- `strategy/features.py` — stateless math (VWAP, RSI, volume fade, ATR)
-- `strategy/market_profile.py` — Dalton value areas (VAH/VAL/POC)
-- `strategy/market_context.py` — Nifty regime and broader trend
-- `strategy/htf_confluence.py` — higher-timeframe risk gates
+- `strategy/back_to_vwap.py`: the single unified execution logic
+- `strategy/features.py`: stateless math (VWAP, RSI, volume fade, ATR)
+- `strategy/market_profile.py`: Dalton value areas (VAH/VAL/POC)
+- `strategy/market_context.py`: Nifty regime and broader trend
+- `strategy/htf_confluence.py`: higher-timeframe risk gates
 
 That boundary is verified, not asserted:
 [`tests/unit/test_brain_isolation.py`](tests/unit/test_brain_isolation.py) parses
@@ -91,9 +91,9 @@ I/O library, or opens a file.
 The rest of the repository is the muscle, nervous system, and immune system. It
 fetches data, asks the Brain for decisions, and pulls the physical triggers.
 
-- `execution/analyzer.py` — the orchestrator that asks the Brain what to do
-- `execution/order_manager.py` / `broker/fyers_broker_interface.py` — the hands that execute
-- `state/reconciliation.py` — the immune system verifying local state against the broker
+- `execution/analyzer.py`: the orchestrator that asks the Brain what to do
+- `execution/order_manager.py` / `broker/fyers_broker_interface.py`: the hands that execute
+- `state/reconciliation.py`: the immune system verifying local state against the broker
 
 ---
 
@@ -125,8 +125,8 @@ looks for evidence that the move is no longer being accepted:
 It is not "short everything that is up." It is "short only when an up-move has
 become statistically stretched, structurally rejected, and execution-confirmed."
 
-Full methodology — the stretch calculation, the Dalton value-area algorithm,
-volume-fade detection, and each gate's threshold — is in
+Full methodology, covering the stretch calculation, the Dalton value-area
+algorithm, volume-fade detection and each gate's threshold, is in
 [docs/STRATEGY.md](docs/STRATEGY.md).
 
 ---
@@ -146,9 +146,9 @@ UNINITIALIZED → PRIMING → READY → DEGRADED → REPRIME/RECOVER
 - Degraded cache can reprime. REST fallback is available during data stress.
 
 The system separates **"known" from "fresh."** A stale cached quote is not live
-market data. The bot treats that distinction as a first-class safety property —
-and it exists because a reconnect once looked healthy while no tick had arrived
-for the affected symbols ([D-002](docs/DISCOVERIES.md)).
+market data. The bot treats that distinction as a first-class safety property.
+It exists because a reconnect once looked healthy while no tick had arrived for
+the affected symbols ([D-002](docs/DISCOVERIES.md)).
 
 ---
 
@@ -167,10 +167,10 @@ Signal detected by the Brain
 ```
 
 Exits: the broker-side stop, or the 15:10 IST square-off. There is no
-take-profit — see [ADR-009](docs/DECISIONS.md) for why it was removed.
+take-profit. [ADR-009](docs/DECISIONS.md) explains why it was removed.
 
 **Manual override.** If the operator changes a stop directly at the broker, the
-bot detects the structural change, sets `manual_override`, and backs off — it
+bot detects the structural change, sets `manual_override` and backs off. It
 stops managing the stop and hands over without exiting the trade.
 
 The system holds one position at a time. This bounds the state space that
@@ -198,7 +198,7 @@ discovery, validation updates, `/auto on|off`, `/mode buy|sell`, `/status`,
 `/health`, broker health alerts, trade notifications, risk alerts, and EOD
 reports.
 
-There is no web UI in the runtime path — fewer services, fewer sockets, one
+There is no web UI in the runtime path. Fewer services, fewer sockets, one
 control plane ([ADR-001](docs/DECISIONS.md)).
 
 ---
@@ -210,7 +210,7 @@ signal log; daily session logs; a daily rejection summary; ML parquet
 observations; and an EOD markdown report.
 
 **Every candidate that reaches analyzer evaluation produces a gate result.** This
-matters because the bot is not only an execution engine — it is a research
+matters because the bot is not only an execution engine. It is also a research
 instrument. Schema: [docs/DATA_MODEL.md](docs/DATA_MODEL.md).
 
 ---
@@ -226,7 +226,7 @@ Recovery adopts orphans with emergency protection, releases capital for phantoms
 updates DB state, marks the cache dirty, alerts the operator, and avoids
 duplicate adoption.
 
-**Seven divergence categories, each with a test** — plus an eighth asserting
+**Seven divergence categories, each with a test.** Plus an eighth asserting
 adoption is idempotent, and two safety properties: a degraded broker API must not
 be classified as flat, and settlement lag must not raise a false orphan. The full
 table is in [docs/TESTING.md](docs/TESTING.md).
@@ -235,8 +235,7 @@ table is in [docs/TESTING.md](docs/TESTING.md).
 
 ## Engineering practices
 
-A system that places real orders is built differently from one that does not. A
-bug here does not raise an exception in CI — it loses money during a live
+A system that places real orders gets built differently. A bug here does not raise an exception in CI. It loses money during a live
 session, days later, in a way that looks like bad luck.
 
 ### Testing
@@ -249,11 +248,11 @@ average.
 
 The reconciliation divergence table is the highest-value file in the suite.
 Property-based tests assert invariants over generated series rather than
-examples — that VWAP stays inside the traded range, that a zero-volume bar does
+examples: that VWAP stays inside the traded range, that a zero-volume bar does
 not move it, and that read-only feature calls never mutate their input frame.
 
 Deliberately not tested: live broker connectivity, WebSocket transport, Telegram
-delivery, and **the strategy's profitability** — a test suite cannot validate an
+delivery, and **the strategy's profitability**. A test suite cannot validate an
 edge, and claiming otherwise would be dishonest.
 
 ### Continuous integration
@@ -265,7 +264,7 @@ Every GitHub Action is pinned to a commit SHA rather than a tag.
 ### Failure handling
 
 WebSocket drop, margin rejection, orphan detection, process death with a position
-open — each has a documented procedure in
+open. Each has a documented procedure in
 [docs/OPERATIONS.md](docs/OPERATIONS.md). Stops are placed broker-side
 specifically so protection survives local process death.
 
@@ -294,7 +293,7 @@ observations with outcome labelling, and a daily rejection breakdown.
 Eight real problems found while building and operating this system, with
 evidence: [docs/DISCOVERIES.md](docs/DISCOVERIES.md).
 
-Six of the eight share a shape — **something reported success while doing
+Six of the eight share a shape: **something reported success while doing
 nothing.** A websocket handler that parsed no messages. A cache with no writer. A
 connection-pool fix applied to an attribute that does not exist. A timeout that
 abandoned the request it was meant to bound.
@@ -306,7 +305,7 @@ asking whether the numbers agreed: 48 versus 0, 42 versus 42, 41 versus 41.
 
 ## System measurements
 
-Engineering metrics only. No performance, profitability, or return figures — see
+Engineering metrics only. No performance, profitability or return figures. See
 [DISCLOSURE.md](docs/DISCLOSURE.md). All traceable to
 [`docs/evidence/system-measurements.txt`](docs/evidence/system-measurements.txt).
 
@@ -316,7 +315,7 @@ Engineering metrics only. No performance, profitability, or return figures — s
 | Scan cycles recorded | 4,776 |
 | Scanner universe | ~2,400 symbols |
 | Scan latency (p50 / p99) | 9 ms / 501 ms |
-| Cache priming, cold start | 4–25 s observed |
+| Cache priming, cold start | 4 to 25 s observed |
 | Reconciliation cadence | every 6 s during market hours |
 | Gate rejections recorded | 878 across 27 sessions |
 | Tests / runtime | 155 / ~6.5 s |
@@ -326,7 +325,7 @@ by the strategy's six hard gates**, 1.0% by higher-timeframe confluence, 0.2% by
 the signal manager. 55 candidates passed all six gates across those sessions.
 
 That describes how the filter behaves, not what it earns. The pipeline is
-overwhelmingly rejection-dominated by design — the first stage does nearly all
+overwhelmingly rejection-dominated by design. The first stage does nearly all
 the work, and the later gates exist to catch what it lets through.
 
 ---
@@ -342,9 +341,9 @@ Create `.env` from [`.env.example`](.env.example) with your Fyers credentials,
 Telegram token, and PostgreSQL connection.
 
 ```bash
-python main.py      # live — requires credentials
-make test           # tests — no credentials needed
-make demo           # containerised test suite — no credentials needed
+python main.py      # live, requires credentials
+make test           # tests, no credentials needed
+make demo           # containerised suite, no credentials needed
 ```
 
 **Live operation requires broker credentials.** There is no offline or paper
@@ -356,7 +355,7 @@ without credentials is the build and the full test suite.
 ## Project layout
 
 ```text
-main.py                       Entry-point shim — `python main.py` still works
+main.py                       Entry-point shim, so `python main.py` still works
 src/shortcircuit/
 ├── config.py                 Strategy, risk, mode and infrastructure parameters
 ├── paths.py                  Repository-anchored runtime paths
@@ -368,7 +367,7 @@ src/shortcircuit/
 ├── state/                    PostgreSQL access, reconciliation
 ├── observability/            Telegram, gate audit, ML logger
 ├── eod/                      EOD analyzer, scheduler, watchdog
-└── strategy/                 The Brain — logic and math only
+└── strategy/                 The Brain: logic and math only
     ├── back_to_vwap.py       Single unified strategy
     ├── features.py           VWAP, RSI, volume, ATR, patterns
     ├── market_profile.py     Dalton value areas
@@ -386,7 +385,7 @@ migrations/                   PostgreSQL schema migrations
 
 ## Limitations
 
-Stated plainly, because their absence would be the more interesting signal.
+Worth stating plainly. A repo with no limitations section usually just has undocumented ones.
 
 - **One position at a time.** Deliberate ([ADR-002](docs/DECISIONS.md)), but it
   means concurrent opportunities are logged and skipped.
@@ -421,8 +420,8 @@ Stated plainly, because their absence would be the more interesting signal.
 
 ## Related work
 
-The reconciliation problem here — local records and an external system's records
-disagreeing with neither side raising an error — turns out to generalize.
+The reconciliation problem here, where local records and an external system's
+records disagree without either side raising an error, turns out to generalise.
 [driftwatch](https://github.com/nabrahma/driftwatch) is a Go tool that detects the
 same divergence class in event-sourced caches.
 
