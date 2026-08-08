@@ -1,0 +1,47 @@
+Import snapshot BEFORE restructure
+Date: 2026-08-07T23:59:14Z
+Commit: daba82e
+
+OK   analyzer
+OK   capital_manager
+OK   config
+OK   database
+OK   dump_terminal_log
+OK   eod_analyzer
+OK   eod_scheduler
+OK   eod_watchdog
+OK   focus_engine
+OK   fyers_broker_interface
+OK   fyers_connect
+OK   gate_result_logger
+OK   main
+OK   market_session
+OK   market_utils
+OK   ml_logger
+OK   order_manager
+OK   paths
+OK   reconciliation
+OK   rest_limiter
+OK   scanner
+OK   signal_manager
+OK   startup_recovery
+OK   symbols
+OK   telegram_bot
+OK   trade_manager
+OK   strategy.__init__
+OK   strategy.back_to_vwap
+OK   strategy.features
+OK   strategy.htf_confluence
+OK   strategy.market_context
+OK   strategy.market_profile
+
+--- resolved runtime paths ---
+PROJECT_ROOT   /home/nabbaazz/ShortCircuit
+LOGS_DIR       /home/nabbaazz/ShortCircuit/logs
+DATA_DIR       /home/nabbaazz/ShortCircuit/data
+TOKEN_FILE     /home/nabbaazz/ShortCircuit/data/access_token.txt
+ML_DIR         /home/nabbaazz/ShortCircuit/data/ml
+REPORTS_DIR    /home/nabbaazz/ShortCircuit/reports
+
+--- test suite ---
+155 passed in 6.33s
