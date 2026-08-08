@@ -11,7 +11,7 @@ mypy>=1.11.0
 bandit>=1.7.9
 
 # Security
-pip-audit>=2.7.0
+pip-audit>=2.10.1
 
 # Hooks
 pre-commit>=3.8.0
