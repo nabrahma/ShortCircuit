@@ -641,7 +641,7 @@ async def _cleanup_runtime(ctx: Optional[RuntimeContext]):
     logger.info("[SUPERVISOR] ✅ Cleanup complete.")
 
 
-def _validate_dependencies(ctx: RuntimeContext) -> None:
+async def _validate_dependencies(ctx: RuntimeContext) -> None:
     """Hard-fail if any critical dependency is None. Runs BEFORE trading loop."""
     checks = {
         "BrokerInterface": ctx.broker,
@@ -656,7 +656,14 @@ def _validate_dependencies(ctx: RuntimeContext) -> None:
         msg = f"[STARTUP FAIL] Critical dependencies not initialized: {failed}"
         logger.critical(msg)
         try:
-            ctx.bot.send_alert(f"🚨 STARTUP FAIL: {failed} are None. Bot cannot trade.")
+            # send_alert is a coroutine. Calling it without awaiting built the
+            # coroutine and dropped it, so this alert was never delivered — the
+            # failure was only ever visible in the log. Bounded, because the
+            # process is about to raise and a hung send must not wedge it.
+            await asyncio.wait_for(
+                ctx.bot.send_alert(f"🚨 STARTUP FAIL: {failed} are None. Bot cannot trade."),
+                timeout=10,
+            )
         except Exception:
             pass
         raise RuntimeError(msg)
@@ -733,7 +740,7 @@ async def main() -> int:
 
     try:
         ctx = await _initialize_runtime()
-        _validate_dependencies(ctx)
+        await _validate_dependencies(ctx)
         await _run_startup_validation(ctx)
 
         async def _notify(message: str):

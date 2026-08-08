@@ -207,6 +207,33 @@ what it *lacks*.
 
 ---
 
+## D-009 — A startup alert that was never sent
+
+**Found by:** mypy, running as an advisory step in CI.
+
+`runtime/supervisor.py` validates that every critical dependency was
+constructed before the bot is allowed to trade. When one is `None` it logs
+CRITICAL, notifies Telegram, and raises. The notification line read:
+
+```python
+ctx.bot.send_alert(f"🚨 STARTUP FAIL: {failed} are None. Bot cannot trade.")
+```
+
+`send_alert` is a coroutine. Calling it without `await` constructs the
+coroutine and discards it, so the alert was never delivered. The surrounding
+`except Exception: pass` could not help, because building a coroutine does not
+raise. The failure was visible in the log file and nowhere else.
+
+The enclosing function was synchronous, so the fix was to make it `async` and
+await the call with a timeout, since a hung send must not wedge a startup that
+is already failing.
+
+**Same shape as most of this list:** the code reported success while doing
+nothing, and raised no exception. What makes this one different is that a type
+checker found it in seconds, on a codebase with no annotations, running in a
+mode that does not even gate the build. Of 49 mypy findings, 48 were cosmetic
+and one was this.
+
 ## D-008 — A silent no-op that had been shipping for months
 
 **Found:** 2026-08-07, while trying to explain persistent REST timeouts.
