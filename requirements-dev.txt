@@ -14,4 +14,4 @@ bandit>=1.7.9
 pip-audit>=2.10.1
 
 # Hooks
-pre-commit>=3.8.0
+pre-commit>=4.6.1
