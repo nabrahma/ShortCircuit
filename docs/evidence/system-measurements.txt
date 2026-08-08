@@ -10,12 +10,8 @@ SCANNING
   Scan latency p99             : 501 ms
 
 GATE PIPELINE
-  Sessions with gate audit     : 27
-  Recorded gate rejections     : 878
-    G5 strategy (6 hard gates) : 867  (98.7%)
-    G9 HTF confluence          : 9  (1.0%)
-    G8 signal manager          : 2  (0.2%)
-  Reached all 6 strategy gates : 55
+  (Rejection distribution and per-gate volumes are deliberately not published.
+   They characterise how the filter behaves. See docs/DISCLOSURE.md.)
 
 DATA PLANE
   Cache priming, cold start    : 4.0 s to 25.3 s observed

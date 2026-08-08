@@ -77,12 +77,12 @@ Every live short must satisfy one sentence:
 
 | Gate | Name | Implementation | Threshold |
 |---|---|---|---|
-| C1 | VWAP Stretch | `vwap_sd >= STRATEGY_VWAP_SD_FLOOR` | **4.5 SD** minimum |
+| C1 | VWAP Stretch | `vwap_sd >= STRATEGY_VWAP_SD_FLOOR` | see `config.py` |
 | C2 | Value Location | Price above VAH, or profile rejection confirmed | VAH from Dalton algorithm |
 | C3 | Failed Auction | Profile rejection OR VAH Look-Above-And-Fail | No narrowing-highs proxy |
 | C4 | Divergence | Swing-based RSI divergence OR price lower-high | Real swing comparison |
-| C5 | Volume Fade | `vol_fade_ratio <= 0.65` | Absolute, no relaxation |
-| C6 | Momentum Decay | `slope_fast < slope_slow * 0.85` | Genuine velocity decay |
+| C5 | Volume Fade | `vol_fade_ratio <= STRATEGY_VOL_FADE_MAX_RATIO` | Absolute, no relaxation |
+| C6 | Momentum Decay | `slope_fast < slope_slow * DECAY_RATIO` | Genuine velocity decay |
 
 ### Forbidden Behaviors
 
@@ -96,8 +96,8 @@ Every live short must satisfy one sentence:
 
 | Tier | Criteria |
 |---|---|
-| EXTREME | VWAP SD ≥ 6.0 AND 5+ confluences |
-| HIGH | VWAP SD ≥ 5.0 OR 4+ confluences |
+| EXTREME | Highest stretch band, multiple confluences |
+| HIGH | Elevated stretch band, or several confluences |
 | MEDIUM | All 6 gates passed (default) |
 
 ---
@@ -326,11 +326,11 @@ All strategy parameters are centralized in `config.py`.
 
 | Key | Value | Purpose |
 |---|---|---|
-| `STRATEGY_VWAP_SD_FLOOR` | 4.5 | Minimum VWAP stretch for any signal |
-| `STRATEGY_VWAP_SD_HIGH` | 5.0 | HIGH confidence tier |
-| `STRATEGY_VWAP_SD_EXTREME` | 6.0 | EXTREME confidence tier |
-| `STRATEGY_VOL_FADE_MAX_RATIO` | 0.65 | Volume fade threshold (absolute) |
-| `STRATEGY_MOMENTUM_DECAY_RATIO` | 0.85 | Fast slope must be < slow × this |
+| `STRATEGY_VWAP_SD_FLOOR` | see `config.py` | Minimum VWAP stretch for any signal |
+| `STRATEGY_VWAP_SD_HIGH` | see `config.py` | HIGH confidence tier |
+| `STRATEGY_VWAP_SD_EXTREME` | see `config.py` | EXTREME confidence tier |
+| `STRATEGY_VOL_FADE_MAX_RATIO` | see `config.py` | Volume fade threshold (absolute) |
+| `STRATEGY_MOMENTUM_DECAY_RATIO` | see `config.py` | Fast slope must be < slow × this |
 | `STRATEGY_REQUIRE_FAILED_AUCTION` | True | Hard gate: require auction failure |
 
 ### Safety Parameters
@@ -347,8 +347,8 @@ All strategy parameters are centralized in `config.py`.
 
 | Key | Value | Purpose |
 |---|---|---|
-| `SCANNER_GAIN_MIN_PCT` | 7.5 | Minimum intraday gain to scan |
-| `SCANNER_GAIN_MAX_PCT` | 18.0 | Upper-circuit runner protection |
+| `SCANNER_GAIN_MIN_PCT` | see `config.py` | Minimum intraday gain to scan |
+| `SCANNER_GAIN_MAX_PCT` | see `config.py` | Upper-circuit runner protection |
 | `SCANNER_MIN_VOLUME` | 333,333 | Liquidity floor |
 | `SCANNER_MIN_LTP` | 40.0 | Sub-₹40 manipulation filter |
 

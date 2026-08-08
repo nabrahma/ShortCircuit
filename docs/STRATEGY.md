@@ -1,10 +1,14 @@
 # Strategy: BackToVWAPShort
 
-The quantitative methodology behind the gate pipeline — what each filter
-measures, why that measurement, and where the thresholds sit.
+What each filter measures, and why that measurement.
 
-**This document says nothing about whether the strategy makes money.** See
+**Scope.** This describes the *mechanism* of each filter, not its tuning. Gate
+thresholds live in `config.py` and are deliberately not reproduced here, and no
+statistic characterising how the filter behaves or performs is published. See
 [DISCLOSURE.md](DISCLOSURE.md).
+
+The strategy is not the point of this repository. It is documented because the
+engineering around it only makes sense once you know what it is protecting.
 
 ---
 
@@ -23,9 +27,7 @@ structural rather than predictive:
    grind sideways. The trade requires structural confirmation: price breaking
    the level that defined the setup.
 
-Every gate below exists to test one of those three conditions. The pipeline is
-deliberately rejection-dominated: across 27 recorded sessions, 98.7% of gate
-rejections occurred at the strategy's six hard gates.
+Every gate below exists to test one of those three conditions.
 
 ---
 
@@ -81,7 +83,7 @@ Algorithm:
 3. The heaviest bin is the **Point of Control (POC)** — the price with the most
    agreement.
 4. Expand outward from the POC, taking the heaviest remaining bin each step,
-   until **70% of total volume** is enclosed.
+   until a configured share of total volume is enclosed.
 5. The bounds of that region are the **Value Area High (VAH)** and **Value Area
    Low (VAL)**.
 
@@ -89,8 +91,8 @@ The invariant `VAH ≥ POC ≥ VAL` holds by construction and is asserted as a
 property test over generated series.
 
 **Why VAH matters.** Trading above VAH means trading above the range that
-contained 70% of the day's volume — a region the market has not agreed is fair.
-Price there is either discovering a new range or is about to be rejected back
+contained the bulk of the day's volume, a region the market has not agreed is
+fair. Price there is either discovering a new range or is about to be rejected back
 into the old one. The strategy is interested exclusively in the second case.
 
 **Look Above and Fail.** The specific pattern sought: price probes above VAH
@@ -172,9 +174,9 @@ if slope_slow > 0:   decaying = slope_fast < slope_slow × DECAY_RATIO
 else:                decaying = slope_fast <= slope_slow
 ```
 
-The branch is not cosmetic. `fast < slow × 0.85` inverts its meaning when
-`slow` is negative — with a slow slope of −10, the test becomes `fast < −8.5`,
-which *requires* steeper decline rather than detecting deceleration. When the
+The branch is not cosmetic. `fast < slow × ratio` inverts its meaning when
+`slow` is negative: the comparison then requires a steeper decline rather than
+detecting deceleration. When the
 premise (a real up-slope) is absent, the gate accepts continued roll-over only.
 
 ---

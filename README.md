@@ -125,9 +125,9 @@ looks for evidence that the move is no longer being accepted:
 It is not "short everything that is up." It is "short only when an up-move has
 become statistically stretched, structurally rejected, and execution-confirmed."
 
-Full methodology, covering the stretch calculation, the Dalton value-area
-algorithm, volume-fade detection and each gate's threshold, is in
-[docs/STRATEGY.md](docs/STRATEGY.md).
+The mechanism behind each filter is described in
+[docs/STRATEGY.md](docs/STRATEGY.md). Tuned thresholds live in `config.py` and
+are not published, and nor is any statistic describing how the filter behaves.
 
 ---
 
@@ -317,16 +317,11 @@ Engineering metrics only. No performance, profitability or return figures. See
 | Scan latency (p50 / p99) | 9 ms / 501 ms |
 | Cache priming, cold start | 4 to 25 s observed |
 | Reconciliation cadence | every 6 s during market hours |
-| Gate rejections recorded | 878 across 27 sessions |
 | Tests / runtime | 155 / ~6.5 s |
 
-**Rejection breakdown.** Of 878 recorded gate rejections: **98.7% were rejected
-by the strategy's six hard gates**, 1.0% by higher-timeframe confluence, 0.2% by
-the signal manager. 55 candidates passed all six gates across those sessions.
-
-That describes how the filter behaves, not what it earns. The pipeline is
-overwhelmingly rejection-dominated by design. The first stage does nearly all
-the work, and the later gates exist to catch what it lets through.
+These describe how the system runs, not how the strategy performs. Gate
+thresholds, rejection distributions and anything else that characterises the
+filter are deliberately not published.
 
 ---
 
