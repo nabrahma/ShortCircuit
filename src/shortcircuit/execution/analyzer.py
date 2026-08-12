@@ -76,6 +76,35 @@ SESSION_OPEN_IST = dtime(9, 15)
 SESSION_BARS_1M = 400          # 375 + slack; the aggregator's deque holds 500
 
 
+def keep_session_only(df: pd.DataFrame, session: datetime.date) -> pd.DataFrame:
+    """
+    Drop anything that is not from `session`.
+
+    BUG-2026-08-12: a history request with range_from == range_to == today came
+    back with 750 one-minute bars — two full sessions. Fyers' docs describe
+    cont_flag="1" as a continuous-contract flag, so it should be inert for an
+    equity, but the extra day arrives regardless. Rather than depend on the
+    broker honouring the range, the response is filtered here.
+
+    This matters because features.enrich_dataframe computes a cumulative VWAP.
+    Two sessions in the frame anchors it to *yesterday's* open, which is a
+    different and much worse error than the 100-bar window it replaced.
+
+    strategy/market_context.py already guards its own fetch the same way
+    (`ts_ist.date() == today`), so the failure mode was known in one place and
+    not the others.
+    """
+    if df is None or df.empty or 'datetime' not in df.columns:
+        return df
+    same_day = df[df['datetime'].dt.date == session]
+    if len(same_day) != len(df):
+        logger.warning(
+            "[HISTORY] broker returned %d bars spanning %d session(s); kept %d for %s",
+            len(df), df['datetime'].dt.date.nunique(), len(same_day), session,
+        )
+    return same_day.reset_index(drop=True)
+
+
 def frame_reaches_session_open(df: pd.DataFrame) -> bool:
     """
     True when the frame's first bar is at or before the session open, so a
@@ -179,6 +208,15 @@ class FyersAnalyzer:
                 df['datetime'] = pd.to_datetime(
                     df['epoch'], unit='s'
                 ).dt.tz_localize('UTC').dt.tz_convert('Asia/Kolkata')
+
+                # The broker can return more than the requested range. A
+                # cumulative VWAP computed over two sessions is anchored to
+                # yesterday's open, which is worse than the rolling window this
+                # path replaced.
+                df = keep_session_only(df, datetime.date.today())
+                if df is None or df.empty:
+                    logger.warning("No same-day history for %s", symbol)
+                    return None
                 return df
             else:
                 logger.warning(f"No history data for {symbol}")

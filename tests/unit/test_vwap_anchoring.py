@@ -139,3 +139,61 @@ def test_stretch_is_negative_when_price_is_below_the_session_vwap():
         'volume': np.full(200, 1000.0),
     })
     assert sd_of(falling) < 0
+
+
+# ── the broker returning more than it was asked for ───────────────────────
+
+def two_session_frame() -> pd.DataFrame:
+    """
+    What a range_from == range_to == today request actually came back with on
+    2026-08-12: 750 bars covering two full sessions.
+    """
+    import datetime as _dt
+    idx = pd.to_datetime(
+        [f"2026-08-11 {9 + i // 60:02d}:{i % 60:02d}" for i in range(15, 30)]
+        + [f"2026-08-12 {9 + i // 60:02d}:{i % 60:02d}" for i in range(15, 30)]
+    ).tz_localize("Asia/Kolkata")
+    return pd.DataFrame({
+        'datetime': idx,
+        'high': np.linspace(100, 140, len(idx)) * 1.002,
+        'low': np.linspace(100, 140, len(idx)) * 0.998,
+        'close': np.linspace(100, 140, len(idx)),
+        'volume': np.full(len(idx), 1000.0),
+    })
+
+
+def test_extra_sessions_are_dropped():
+    import datetime as _dt
+    from shortcircuit.execution.analyzer import keep_session_only
+
+    kept = keep_session_only(two_session_frame(), _dt.date(2026, 8, 12))
+    assert len(kept) == 15
+    assert set(kept['datetime'].dt.date) == {_dt.date(2026, 8, 12)}
+
+
+def test_a_two_session_frame_anchors_vwap_to_the_wrong_day():
+    """
+    Why the filter exists. Leaving yesterday's bars in moves the anchor further
+    than the 100-bar window ever did, so an unfiltered response is a worse bug
+    than the one it replaced.
+    """
+    import datetime as _dt
+    from shortcircuit.execution.analyzer import keep_session_only
+
+    both = two_session_frame().copy()
+    today_only = keep_session_only(two_session_frame(), _dt.date(2026, 8, 12)).copy()
+    enrich_dataframe(both)
+    enrich_dataframe(today_only)
+
+    assert both['vwap'].iloc[-1] < today_only['vwap'].iloc[-1], (
+        "yesterday's cheaper bars drag the anchor down and inflate the stretch"
+    )
+
+
+def test_filtering_a_single_session_frame_changes_nothing():
+    import datetime as _dt
+    from shortcircuit.execution.analyzer import keep_session_only
+
+    one = two_session_frame()
+    one = one[one['datetime'].dt.date == _dt.date(2026, 8, 12)].reset_index(drop=True)
+    assert len(keep_session_only(one, _dt.date(2026, 8, 12))) == len(one)
