@@ -15,6 +15,7 @@ All strategy logic lives in strategy/back_to_vwap.py.
 import concurrent.futures
 import csv
 import datetime
+from datetime import time as dtime
 import logging
 import os
 from typing import Optional, Dict, Any, Tuple
@@ -67,6 +68,31 @@ def log_signal(symbol: str, ltp: float, pattern: str, stop_loss: float,
         ])
 
 
+
+# 09:15 to 15:30 IST is 375 one-minute bars. Request the full session so the
+# cumulative VWAP in features.enrich_dataframe() is anchored to the open rather
+# than to wherever a truncated frame happens to begin.
+SESSION_OPEN_IST = dtime(9, 15)
+SESSION_BARS_1M = 400          # 375 + slack; the aggregator's deque holds 500
+
+
+def frame_reaches_session_open(df: pd.DataFrame) -> bool:
+    """
+    True when the frame's first bar is at or before the session open, so a
+    cumulative VWAP over it is the session VWAP.
+
+    One minute of slack: the 09:15 bar can be stamped 09:15:00 or arrive as the
+    first tick a few seconds later.
+    """
+    if df is None or df.empty or 'datetime' not in df.columns:
+        return False
+    try:
+        first = df['datetime'].iloc[0]
+        return first.time() <= dtime(9, 16)
+    except Exception:
+        return False
+
+
 class FyersAnalyzer:
     """
     Thin orchestrator: data fetch → enrich → pre-filter → strategy.evaluate() → finalize.
@@ -91,9 +117,23 @@ class FyersAnalyzer:
         Prefers local candle aggregator (1-minute). Falls back to REST.
         """
         # 1. Try local aggregator first (1-minute only)
+        #
+        # BUG-2026-08-12 (C1 was measuring the wrong thing):
+        # features.enrich_dataframe() computes a CUMULATIVE vwap over whatever
+        # frame it is handed:
+        #     df['vwap'] = (tp * v).cumsum() / v.cumsum()
+        # That is only the session VWAP if the frame starts at the session open.
+        # This asked for 100 bars, so the anchor slid forward every minute and
+        # C1 measured stretch against a ~100-minute rolling VWAP instead.
+        #
+        # NSE:ORISSAMINE-EQ on 12 Aug is the worked example. At 11:56 IST the
+        # anchor sat at ~10:16 — the day's peak — so price read as 1.52 SD BELOW
+        # VWAP while a session-anchored VWAP had it above. Every one of that
+        # day's 295 WS_CACHE scans used this path. The REST fallback below
+        # fetches range_from=today and was always correct, so the definition of
+        # "VWAP" silently depended on which data tier answered.
         if interval == "1" and getattr(config, 'P82_LOCAL_CANDLES_ENABLED', False) and self.broker:
-            n_bars = max(100, getattr(config, 'RVOL_MIN_CANDLES', 15) + 5)
-            local_candles = self.broker.get_local_candles(symbol, n=n_bars)
+            local_candles = self.broker.get_local_candles(symbol, n=SESSION_BARS_1M)
 
             min_required = getattr(config, 'RVOL_MIN_CANDLES', 15) + 3
             if local_candles and len(local_candles) >= min_required:
@@ -105,7 +145,20 @@ class FyersAnalyzer:
                 df['datetime'] = pd.to_datetime(
                     df['epoch'], unit='s'
                 ).dt.tz_localize('UTC').dt.tz_convert('Asia/Kolkata')
-                return df
+
+                # Asking for enough bars is necessary but not sufficient: the
+                # aggregator only holds candles observed since the process
+                # started. After a mid-session restart the buffer begins at
+                # restart time, and its cumulative VWAP would be anchored there.
+                # Fall through to REST in that case — it returns the whole
+                # session, which is the only anchor C1 is defined against.
+                if frame_reaches_session_open(df):
+                    return df
+                logger.debug(
+                    "[HISTORY] %s local buffer starts %s, past the open — "
+                    "using REST so VWAP stays session-anchored",
+                    symbol, df['datetime'].iloc[0].strftime('%H:%M'),
+                )
 
         # 2. Fallback to REST
         today = datetime.date.today().strftime("%Y-%m-%d")

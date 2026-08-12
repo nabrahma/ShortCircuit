@@ -51,7 +51,12 @@ MAX_HOLD_TIME_MINUTES = 0
 # Gain Floors & Limits
 SCANNER_GAIN_MIN_PCT: float = 7.5  # Phase 65: Synchronized with P65_G1 floor
 SCANNER_GAIN_MAX_PCT: float = 18.0 # Protection against upper-circuit runners
-SCANNER_MIN_VOLUME:   int   = 333333 # Phase 91.3: Adjusted to 333K as requested
+# 2026-08-12: halved from 333,333. NSE:ORISSAMINE-EQ ran and broke down that
+# morning but only crossed the old floor at 11:56 IST, ~26 min after the move,
+# because it is a low-float name whose whole-day volume is small. Lower floor =
+# illiquid movers become visible in time; it also admits thinner books, so watch
+# slippage. SCANNER_MIN_LTP is the remaining guard against manipulation vehicles.
+SCANNER_MIN_VOLUME:   int   = 161616
 SCANNER_MIN_LTP:      float = 40.0   # Filter sub-₹40 manipulation vehicles
 CANDLE_BODY_RATIO_MIN: float = 0.382   # Phase 91.3: Scientific threshold (Fibonacci 0.382) for "clean" bodies
 
