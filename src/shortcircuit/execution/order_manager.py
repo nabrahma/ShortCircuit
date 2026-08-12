@@ -38,6 +38,9 @@ FYERS_ORDER_STATUS_TRANSIT = int(FyersOrderStatus.TRANSIT)   # 4
 FYERS_STATUS_WORKING = (FYERS_ORDER_STATUS_PENDING, FYERS_ORDER_STATUS_TRANSIT)
 
 EXEC_COOLDOWN_SECONDS      = 900   # 15 minutes after any failed entry
+# Permanent-for-the-session broker rejections (RMS basket rules, risk CUG).
+# Long enough to outlast any trading day, so the symbol is not retried.
+SESSION_BLOCK_SECONDS      = 8 * 3600
 
 
 class OrderManager:
@@ -983,64 +986,34 @@ class OrderManager:
                     self._set_exec_cooldown(symbol, reason='UNSAFE_STOP', seconds=EXEC_COOLDOWN_SECONDS)
                     return None
 
-                try:
-                    # Calculate safe limit price (2% buffer) to satisfy Fyers type=3 requirements
-                    # BUY SL (covering a short): limit price > stop price
-                    # SELL SL (covering a long): limit price < stop price
-                    buffer_pct = 0.02
-                    if sl_side == 'BUY':
-                        limit_price = stop_price * (1 + buffer_pct)
-                    else:
-                        limit_price = stop_price * (1 - buffer_pct)
-                    
-                    limit_price = round(round(limit_price / tick) * tick, 2)
-
-                    sl_id = await self.broker.place_order(
-                        symbol=symbol,
-                        side=sl_side,
-                        qty=qty,
-                        order_type='SL_LIMIT',
-                        price=limit_price,
-                        trigger_price=stop_price
-                    )
-                except Exception as sl_exc:
-                    sl_id = None
-                    sl_error = str(sl_exc)
-                    logger.critical(
-                        f"🚨 [SL-FAIL] SL placement raised exception for {symbol}: {sl_error}"
-                    )
-                    if self.telegram and hasattr(self.telegram, 'send_alert'):
-                        await self.telegram.send_alert(
-                            f"🚨 *SL PLACEMENT FAILED*\n\n"
-                            f"Symbol: `{symbol}`\n"
-                            f"Entry filled @ ₹{ltp:.2f} — SL order threw exception.\n"
-                            f"Error: `{sl_error[:150]}`\n"
-                            f"StopPrice attempted: ₹{stop_price:.2f}\n"
-                            f"⚡ Emergency exit triggered. Capital slot released."
-                        )
-                    await self._emergency_exit(symbol, qty, sl_side)
-                    if self.capital:
-                        await self.capital.release_slot(broker=self.broker)
-                    self._set_exec_cooldown(symbol, reason='SL_EXCEPTION', seconds=EXEC_COOLDOWN_SECONDS)
-                    return None
+                sl_id, sl_attempts = await self._place_protective_stop(
+                    symbol, sl_side, qty, stop_price, tick, signal
+                )
 
                 if not sl_id:
+                    # Every shape was rejected, including SL-Market. A naked
+                    # position is worse than a closed one, so exiting is the last
+                    # resort here — not the first response to one rejection.
                     logger.critical(
-                        f"🚨 [SL-FAIL] SL placement returned None for {symbol} "
-                        f"(stop_price=₹{stop_price:.2f})"
+                        "🚨 [SL-FAIL] %s: every stop placement was rejected: %s",
+                        symbol, " | ".join(sl_attempts),
                     )
                     if self.telegram and hasattr(self.telegram, 'send_alert'):
                         await self.telegram.send_alert(
-                            f"🚨 *SL PLACEMENT FAILED*\n\n"
+                            f"🚨 *SL PLACEMENT FAILED — ALL RETRIES EXHAUSTED*\n\n"
                             f"Symbol: `{symbol}`\n"
-                            f"Entry filled @ ₹{ltp:.2f} — SL returned no order ID.\n"
+                            f"Entry filled @ ₹{ltp:.2f}\n"
                             f"StopPrice attempted: ₹{stop_price:.2f}\n"
+                            f"Tried {len(sl_attempts)} order shapes incl. SL-Market.\n"
+                            f"Last error: `{(sl_attempts[-1] if sl_attempts else 'unknown')[:150]}`\n"
                             f"⚡ Emergency exit triggered. Capital slot released."
                         )
                     await self._emergency_exit(symbol, qty, sl_side)
                     if self.capital:
                         await self.capital.release_slot(broker=self.broker)
-                    self._set_exec_cooldown(symbol, reason='SL_NO_ID', seconds=EXEC_COOLDOWN_SECONDS)
+                    self._set_exec_cooldown(
+                        symbol, reason='SL_ALL_RETRIES_FAILED', seconds=EXEC_COOLDOWN_SECONDS
+                    )
                     return None
 
                 logger.info(f"🛡️ SL Placed: {sl_id} @ ₹{stop_price:.2f}")
@@ -1099,7 +1072,26 @@ class OrderManager:
                 logger.error(f"❌ [ENTRY] Exception for {symbol}: {error_msg}")
 
                 # Set cooldown on broker exception
-                self._set_exec_cooldown(symbol, reason=f'BROKER_EXCEPTION: {error_msg[:50]}')
+                # Some broker rejections are permanent for the session, not
+                # transient. On 2026-08-11 NSE:SINGERIND-EQ was refused with
+                # "RED:RULE:{Allowed Basket} ... NSE_MIS_BASKET" — the symbol is
+                # simply not permitted for intraday margin that day. A 15-minute
+                # cooldown just retries something that cannot succeed, burning a
+                # signal and a rate-limit slot each time.
+                _permanent = any(
+                    marker in error_msg
+                    for marker in ('Allowed Basket', 'NSE_MIS_BASKET', 'FYERS_RISK_CUG')
+                )
+                self._set_exec_cooldown(
+                    symbol,
+                    reason=f'BROKER_EXCEPTION: {error_msg[:50]}',
+                    seconds=SESSION_BLOCK_SECONDS if _permanent else EXEC_COOLDOWN_SECONDS,
+                )
+                if _permanent:
+                    logger.warning(
+                        "[EXEC] %s blocked for the session: broker RMS rule, not a transient error",
+                        symbol,
+                    )
 
                 # CRITICAL: Release capital if slot was acquired before this exception
                 # (slot is acquired after fill, before SL — so SL exceptions reach here with slot held)
@@ -1538,6 +1530,100 @@ class OrderManager:
             logger.error(f"[MOVE_SL] Exception for {symbol}: {e}")
             return False
 
+
+    async def _place_protective_stop(
+        self,
+        symbol: str,
+        sl_side: str,
+        qty: int,
+        stop_price: float,
+        tick: float,
+        signal: Optional[dict] = None,
+    ):
+        """
+        Place the broker-side stop, escalating through progressively safer order
+        shapes instead of abandoning the position on the first rejection.
+
+        BUG-2026-08-12: NSE:ELLEN-EQ was force-closed at a loss because a single
+        SL-Limit attempt was rejected. The stop itself (₹325.10) was perfectly
+        valid — it was the 2% limit buffer that put the *limit* price at ₹331.60,
+        outside the symbol's circuit band. The broker's error quoted that exact
+        number. One rejection, position gone.
+
+        The ladder, in order of preference:
+          1-3. SL_LIMIT with shrinking buffers, clamped to the circuit band when
+               the signal carries one. A tighter buffer risks the limit not
+               filling in a fast move, which is why it is not the first choice.
+          4.   SL_MARKET (Fyers type 3). It carries no limit price at all, so it
+               cannot breach a circuit band. Fills are not price-guaranteed,
+               which is an acceptable trade for being protected at all.
+
+        Returns (order_id, attempt_log). order_id is None only if every shape
+        failed, which is the one case where the caller should exit the position.
+        """
+        upper = float((signal or {}).get('upper_circuit') or 0.0)
+        lower = float((signal or {}).get('lower_circuit') or 0.0)
+        attempts: list = []
+
+        for buffer_pct in (0.02, 0.01, 0.003):
+            if sl_side == 'BUY':
+                limit_price = stop_price * (1 + buffer_pct)
+                if upper > 0:
+                    limit_price = min(limit_price, upper)
+            else:
+                limit_price = stop_price * (1 - buffer_pct)
+                if lower > 0:
+                    limit_price = max(limit_price, lower)
+            limit_price = round(round(limit_price / tick) * tick, 2)
+
+            try:
+                sl_id = await self.broker.place_order(
+                    symbol=symbol,
+                    side=sl_side,
+                    qty=qty,
+                    order_type='SL_LIMIT',
+                    price=limit_price,
+                    trigger_price=stop_price,
+                )
+                if sl_id:
+                    if attempts:
+                        logger.warning(
+                            "[SL-RETRY] %s stop placed on attempt %d "
+                            "(buffer %.1f%%, limit ₹%.2f) after %d rejection(s)",
+                            symbol, len(attempts) + 1, buffer_pct * 100,
+                            limit_price, len(attempts),
+                        )
+                    return sl_id, attempts
+                attempts.append(
+                    f"SL_LIMIT buf={buffer_pct:.1%} limit=₹{limit_price:.2f}: no order id"
+                )
+            except Exception as exc:
+                attempts.append(
+                    f"SL_LIMIT buf={buffer_pct:.1%} limit=₹{limit_price:.2f}: {str(exc)[:120]}"
+                )
+            logger.warning("[SL-RETRY] %s attempt failed: %s", symbol, attempts[-1])
+
+        # No limit price, so no circuit band to breach.
+        try:
+            sl_id = await self.broker.place_order(
+                symbol=symbol,
+                side=sl_side,
+                qty=qty,
+                order_type='SL_MARKET',
+                trigger_price=stop_price,
+            )
+            if sl_id:
+                logger.warning(
+                    "[SL-RETRY] %s protected by SL_MARKET after %d SL_LIMIT rejection(s)",
+                    symbol, len(attempts),
+                )
+                return sl_id, attempts
+            attempts.append("SL_MARKET: no order id")
+        except Exception as exc:
+            attempts.append(f"SL_MARKET: {str(exc)[:120]}")
+        logger.critical("[SL-RETRY] %s SL_MARKET also failed: %s", symbol, attempts[-1])
+
+        return None, attempts
 
     async def _emergency_exit(self, symbol: str, qty: int, side: str):
         try:

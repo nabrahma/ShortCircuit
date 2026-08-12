@@ -560,12 +560,16 @@ class FocusEngine:
                         self.start_focus(symbol, pos)
 
                     else:
-                        logger.warning(f"⚠️ [EXECUTION FAILED] {symbol} — enter_position returned: {pos}")
-                        if self.telegram_bot:
-                            asyncio.create_task(self.telegram_bot.send_alert(
-                                f"⚠️ ORDER FAILED: {symbol} — broker returned {pos}\n"
-                                f"⏳ 15-min execution cooldown set."
-                            ))
+                        # No Telegram alert here. enter_position already sent one
+                        # carrying the broker's actual rejection text, the payload
+                        # and the cooldown. This second message duplicated it and
+                        # said "broker returned None", which is enter_position's
+                        # return value, not anything the broker said — on
+                        # 2026-08-11 that hid a real RMS rule behind a null.
+                        logger.warning(
+                            "⚠️ [EXECUTION FAILED] %s — enter_position returned: %s",
+                            symbol, pos,
+                        )
 
                     del self.pending_signals[symbol]
                     continue
@@ -770,9 +774,7 @@ class FocusEngine:
             # Phase 89.9: Precalculated True Breakeven (3.5% profit @ 5x)
             # SHORT: Trigger = 0.7% drop, BE SL = 0.25% drop
             # LONG:  Trigger = 0.7% rise, BE SL = 0.25% rise
-            'be_trigger':      entry_price * 1.007 if is_long else entry_price * 0.993,
-            'be_sl':           entry_price * 1.0025 if is_long else entry_price * 0.9975,
-            'be_activated':    False,
+            # be_trigger / be_sl / be_activated removed with the breakeven stop.
 
             # Phase 96: MFE/MAE tracking for ML trainer
             'mfe_pct':         0.0,  # Max Favorable Excursion (% from entry)
@@ -1026,8 +1028,25 @@ class FocusEngine:
                                 pnl = (exit_p - entry_p) * qty if entry_p > 0 else 0
                             else:
                                 pnl = (entry_p - exit_p) * qty if entry_p > 0 else 0
+                            # BUG-2026-08-11: the bot's own 15:10 square-off closed
+                            # NSE:DEVYANI-EQ and this branch reported it as a MANUAL
+                            # CLOSE, because all it can see is that the broker
+                            # position vanished. Past the square-off deadline that
+                            # is the scheduler's doing, not the operator's, and
+                            # mislabelling it corrupts exit-reason attribution in
+                            # both the EOD report and the ML log.
+                            from shortcircuit.eod.eod_scheduler import EOD_TIME
+                            _now_ist = datetime.datetime.now(
+                                pytz.timezone('Asia/Kolkata')
+                            ).time()
+                            _is_eod_window = _now_ist >= EOD_TIME
+                            _close_label = (
+                                "🌆 **EOD SQUARE-OFF CLOSED**" if _is_eod_window
+                                else "👻 **MANUAL CLOSE DETECTED**"
+                            )
                             logger.info(
-                                f"💰 [MANUAL EXIT] {symbol} {_dir} | Entry ₹{entry_p:.2f} → Exit ~₹{exit_p:.2f} | "
+                                f"💰 [{'EOD EXIT' if _is_eod_window else 'MANUAL EXIT'}] "
+                                f"{symbol} {_dir} | Entry ₹{entry_p:.2f} → Exit ~₹{exit_p:.2f} | "
                                 f"PnL ≈ ₹{pnl:.2f}"
                             )
 
@@ -1040,7 +1059,8 @@ class FocusEngine:
                                     future = asyncio.run_coroutine_threadsafe(
                                         self.order_manager._finalize_closed_position(
                                             symbol=symbol,
-                                            reason='MANUAL_CLOSE_DETECTED',
+                                            reason=('EOD_SQUAREOFF' if _is_eod_window
+                                                    else 'MANUAL_CLOSE_DETECTED'),
                                             exit_price=exit_p,
                                             pnl=pnl,
                                             send_alert=True
@@ -1065,7 +1085,7 @@ class FocusEngine:
                             if self.telegram_bot and self._event_loop:
                                 asyncio.run_coroutine_threadsafe(
                                     self.telegram_bot.send_alert(
-                                        f"👻 **MANUAL CLOSE DETECTED**\n\n"
+                                        f"{_close_label}\n\n"
                                         f"Symbol: `{symbol}`\n"
                                         f"Entry: ₹{entry_p:.2f}\n"
                                         f"Exit: ~₹{exit_p:.2f}\n"
@@ -1076,7 +1096,9 @@ class FocusEngine:
                                     self._event_loop
                                 )
 
-                            self.stop_focus("MANUAL_CLOSE")
+                            self.stop_focus(
+                                "EOD_SQUAREOFF" if _is_eod_window else "MANUAL_CLOSE"
+                            )
                             return
 
                     else:
@@ -1085,53 +1107,17 @@ class FocusEngine:
                         self._api_fail_streak = 0
 
 
-                # ── Phase 89.9: TRUE BREAKEVEN (3.5% Trigger) ──────────────
-                # Phase 94: Direction-aware comparison
-                _trade_dir = t.get('direction', 'SHORT')
-                _be_hit = (ltp >= t['be_trigger']) if _trade_dir == 'LONG' else (ltp <= t['be_trigger'])
-                if not manual_override and not t.get('be_activated', False) and _be_hit:
-                    new_sl = t['be_sl']
-                    old_sl = t['sl']
-                    t['sl'] = new_sl
-                    t['be_activated'] = True
-                    
-                    logger.info(f"🛡️ [PROTECTION] {symbol} up 3.5% (leveraged)! SL → ₹{new_sl:.2f} (Fee-Protected BE)")
-
-                    # Phase 98: Move the ACTUAL broker SL-M order and WAIT for confirmation
-                    sl_moved = False
-                    if self.order_manager and self._event_loop:
-                        try:
-                            future = asyncio.run_coroutine_threadsafe(
-                                self.order_manager.move_hard_stop(symbol, new_sl),
-                                self._event_loop
-                            )
-                            sl_moved = future.result(timeout=10)
-                        except Exception as be_err:
-                            logger.error(f"[PROTECTION] move_hard_stop failed for {symbol}: {be_err}")
-                    
-                    if self.telegram_bot and self._event_loop:
-                        if sl_moved:
-                            msg = (
-                                f"🛡️ **Fee-Protected BE Activated**\n"
-                                f"Symbol: `{symbol}`\n"
-                                f"Target: +3.5% hit (0.7% move)\n"
-                                f"New SL: ₹{new_sl:.2f} (+0.25% profit zone)\n"
-                                f"✅ Broker SL updated.\n"
-                                f"_Your fees are now covered._"
-                            )
-                        else:
-                            msg = (
-                                f"⚠️ **BE Triggered — SL Move FAILED**\n"
-                                f"Symbol: `{symbol}`\n"
-                                f"Target: +3.5% hit (0.7% move)\n"
-                                f"Attempted SL: ₹{new_sl:.2f}\n"
-                                f"❌ Broker rejected modification.\n"
-                                f"_Original SL still active. Monitor manually._"
-                            )
-                        asyncio.run_coroutine_threadsafe(
-                            self.telegram_bot.send_alert(msg),
-                            self._event_loop
-                        )
+                # ── Breakeven stop: REMOVED 2026-08-12 ────────────────────
+                # The automatic breakeven move is gone at the operator's
+                # request, for the same reason the take-profit went: it is a
+                # profit-side decision, and profit-side decisions are manual.
+                # A position now exits on its broker-side stop or the 15:10
+                # square-off, and on nothing else the bot decides by itself.
+                #
+                # It also never worked reliably: the 2026-08-11 DEVYANI move
+                # was rejected by the broker, leaving the original stop in
+                # place while the alert claimed a change had been attempted.
+                # Do not reintroduce without evidence from data/ml/.
                 
                 # ── PHASE 98: HYBRID VWAP 50% SCALE-OUT (TP 1) ────────────────────
                 # DISABLED: User requested 100% exit at TP_1 (Midpoint). 
