@@ -2,6 +2,7 @@ import asyncio
 import logging
 import json
 from datetime import datetime, date, time as dtime
+import pytz
 import math
 from shortcircuit.broker.fyers_connect import ASYNC_RETRIED_TIMEOUT
 from shortcircuit.state.database import DatabaseManager
@@ -74,6 +75,93 @@ class ReconciliationEngine:
         self._recently_modified[symbol] = time.time()
         logger.debug(f"[RECONCILE] {symbol} marked recently modified — grace period active")
     # ──────────────────────────────────────────────────────────────────
+
+
+    async def _classify_exit(self, sym: str, pos: dict):
+        """
+        Work out *why* a position disappeared, from evidence rather than assumption.
+
+        BUG-2026-08-12: NSE:TARSONS-EQ was reported as a manual close with "PnL
+        for this trade not tracked". The log shows the bot had watched its own
+        emergency stop fill:
+
+            [ADOPT] Emergency SL placed: sl_id=26081200125796 | stop=₹326.40
+            💹 TRADE | BUY 10 NSE:TARSONS-EQ @ ₹327.2 | order=26081200125796
+            Order 26081200125796: FILLED ✅ | price=₹327.20
+
+        It held the order id, saw the fill and knew the price, then discarded all
+        of it. Every exit that follows is classified from what is observable:
+
+          SL_HIT          the tracked stop order reached a fill
+          EOD_SQUAREOFF   position vanished at or after the 15:10 deadline
+          MANUAL_TP_EXIT  operator closed it, and the close was favourable
+          MANUAL_EXIT     operator closed it, and it was not
+
+        Returns (reason, exit_price, pnl). PnL is always computed when entry,
+        quantity and an exit price are known — "not tracked" is not an outcome.
+        """
+        import shortcircuit.config as _cfg
+        from shortcircuit.broker.fyers_broker_interface import FyersOrderStatus
+
+        entry = float(pos.get('entry_price') or 0.0)
+        qty = int(pos.get('qty') or 0)
+        direction = str(pos.get('side') or getattr(_cfg, 'TRADE_DIRECTION', 'SHORT')).upper()
+
+        exit_price = 0.0
+        reason = None
+
+        # 1. Did our own stop fill? Strongest evidence available, so checked first.
+        sl_id = self.order_manager.hard_stops.get(sym) if self.order_manager else None
+        if sl_id:
+            try:
+                cached = getattr(self.broker, 'order_status_cache', {}).get(str(sl_id))
+                is_filled = (
+                    cached is not None
+                    and int(getattr(cached, 'status', 0)) == int(FyersOrderStatus.FILLED)
+                )
+                avg = await self.broker.get_order_avg_price(sl_id)
+                if is_filled or (avg and avg > 0):
+                    exit_price = float(avg or 0.0)
+                    reason = 'SL_HIT'
+                    logger.info(
+                        "[EXIT-CLASSIFY] %s stop order %s filled @ ₹%.2f — this was a stop hit, "
+                        "not a manual exit", sym, sl_id, exit_price,
+                    )
+            except Exception as exc:
+                logger.warning("[EXIT-CLASSIFY] %s could not read stop %s: %s", sym, sl_id, exc)
+
+        # 2. Past the square-off deadline the scheduler is the likely closer.
+        if reason is None:
+            try:
+                from shortcircuit.eod.eod_scheduler import EOD_TIME
+                if datetime.now(pytz.timezone('Asia/Kolkata')).time() >= EOD_TIME:
+                    reason = 'EOD_SQUAREOFF'
+            except Exception:
+                pass
+
+        if exit_price <= 0:
+            try:
+                exit_price = float(await self.broker.get_ltp(sym) or 0.0)
+            except Exception:
+                exit_price = 0.0
+
+        pnl = 0.0
+        if entry > 0 and qty > 0 and exit_price > 0:
+            pnl = ((exit_price - entry) * qty) if direction == 'LONG' else ((entry - exit_price) * qty)
+
+        # 3. Nothing else explains it, so the operator closed it. Which way it went
+        #    is the only thing distinguishing a taken profit from a bail-out.
+        if reason is None:
+            reason = 'MANUAL_TP_EXIT' if pnl > 0 else 'MANUAL_EXIT'
+
+        return reason, exit_price, pnl
+
+    EXIT_LABELS = {
+        'SL_HIT':         '🛑 *STOP-LOSS FILLED*',
+        'EOD_SQUAREOFF':  '🌆 *EOD SQUARE-OFF*',
+        'MANUAL_TP_EXIT': '💰 *MANUAL PROFIT EXIT*',
+        'MANUAL_EXIT':    '👻 *MANUAL EXIT*',
+    }
 
     async def start(self):
         if self.running:
@@ -697,8 +785,16 @@ class ReconciliationEngine:
         for phantom in phantoms:
             sym = phantom['symbol']
             logger.critical(
-                f"👻 MANUAL CLOSE DETECTED: {sym} — broker is flat but internal "
+                f"👻 POSITION VANISHED: {sym} — broker is flat but internal "
                 f"registry says open. Running full close path."
+            )
+
+            # Snapshot before the close path pops it from active_positions.
+            # The exit classifier below needs entry price, qty and side, and by
+            # Step 4 the registry entry is already gone.
+            _closed_snapshot = dict(
+                (self.order_manager.active_positions.get(sym) or {})
+                if self.order_manager else {}
             )
 
             # Step 1: Use _finalize_closed_position if order_manager has this symbol.
@@ -803,14 +899,36 @@ class ReconciliationEngine:
 
             # Step 4: Alert operator
             if self.telegram:
+                _pos = (self.order_manager.active_positions.get(sym, {})
+                        if self.order_manager else {}) or _closed_snapshot or {}
+                try:
+                    _reason, _exit_px, _pnl = await self._classify_exit(sym, _pos)
+                except Exception as _cls_err:
+                    logger.warning("[EXIT-CLASSIFY] %s failed: %s", sym, _cls_err)
+                    _reason, _exit_px, _pnl = 'MANUAL_EXIT', 0.0, 0.0
+
+                _label = self.EXIT_LABELS.get(_reason, '👻 *POSITION CLOSED*')
+                _entry = float(_pos.get('entry_price') or 0.0)
+                _sign = '🟢' if _pnl >= 0 else '🔴'
+                _detail = (
+                    "Closed by the stop order the bot placed."
+                    if _reason == 'SL_HIT' else
+                    "Closed by the 15:10 square-off."
+                    if _reason == 'EOD_SQUAREOFF' else
+                    "You closed this position outside the bot."
+                )
                 await self.telegram.send_alert(
-                    f"👻 *MANUAL CLOSE DETECTED*\n\n"
+                    f"{_label}\n\n"
                     f"Symbol: `{sym}`\n"
-                    f"You closed this position manually outside the bot.\n"
+                    + (f"Entry:  ₹{_entry:.2f}\n" if _entry > 0 else "")
+                    + (f"Exit:   ₹{_exit_px:.2f}\n" if _exit_px > 0 else "")
+                    + (f"PnL:    {_sign} ₹{_pnl:.2f}\n" if _exit_px > 0 and _entry > 0
+                       else "PnL:    not computable (entry or exit price unknown)\n")
+                    + f"Reason: `{_reason}`\n\n"
+                    f"{_detail}\n"
                     f"✅ Bot state synced.\n"
                     f"✅ Capital slot released.\n"
-                    f"✅ DB position marked CLOSED.\n"
-                    f"⚠️ PnL for this trade not tracked (manual exit)."
+                    f"✅ DB position marked CLOSED."
                 )
     
         # ── MISMATCHED: qty differs ───────────────────────────────────────
