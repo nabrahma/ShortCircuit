@@ -89,13 +89,20 @@ def keep_session_only(df: pd.DataFrame, session: datetime.date) -> pd.DataFrame:
     One session, but each bar roughly twice and out of order. The date filter
     alone cannot see this, which is why the dedupe and sort below exist.
 
-    Both halves matter, and both fail silently:
-      * features.enrich_dataframe computes a CUMULATIVE VWAP, so it must be fed
-        one ordered session starting at the open;
-      * duplicated bars double-count volume, which feeds RVOL, the volume-fade
-        ratio and the scanner's volume floor;
-      * df.iloc[-1] is treated as "the current bar" throughout the codebase and
-        is not the latest bar when epochs are unsorted.
+    Measured impact, after checking rather than assuming: the duplication is
+    block-structured — [session in order][session in order] — not interleaved.
+    That makes most of it harmless. iloc[-1..-3] still land on the true last
+    bars, and VWAP is Sum(tp*v)/Sum(v), so doubling both sides cancels exactly.
+    G9 was tested on eight symbols and returned an identical verdict either way.
+
+    What it does break is any bare sum of volume: 35,294,738 against a true
+    17,647,369 on NSE:SBIN-EQ. The scanner is unaffected because it reads volume
+    from quotes, not from history.
+
+    So this normalisation is defensive rather than load-bearing today. It is kept
+    because every consumer of this frame assumes one ordered session with no
+    repeats, and if the duplication ever becomes interleaved instead of blocked,
+    that assumption fails silently and everything above stops being true.
 
     The date filter is kept as well: Fyers documents cont_flag="1" as a
     continuous-contract flag that should be inert for an equity, so relying on
