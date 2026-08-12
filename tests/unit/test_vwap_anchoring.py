@@ -197,3 +197,27 @@ def test_filtering_a_single_session_frame_changes_nothing():
     one = two_session_frame()
     one = one[one['datetime'].dt.date == _dt.date(2026, 8, 12)].reset_index(drop=True)
     assert len(keep_session_only(one, _dt.date(2026, 8, 12))) == len(one)
+
+
+def test_duplicate_and_unordered_bars_are_repaired():
+    """
+    A single-session request returned 750 rows for 375 unique epochs, out of
+    order. Volume double-counts and df.iloc[-1] stops being the latest bar.
+    """
+    import datetime as _dt
+    from shortcircuit.execution.analyzer import keep_session_only
+
+    idx = pd.date_range("2026-08-12 09:15", periods=5, freq="1min", tz="Asia/Kolkata")
+    base = pd.DataFrame({
+        'epoch': [int(t.timestamp()) for t in idx],
+        'datetime': idx,
+        'volume': [100.0] * 5,
+        'close': [10.0, 11, 12, 13, 14],
+    })
+    scrambled = pd.concat([base.iloc[[3, 1]], base, base.iloc[[0, 4]]], ignore_index=True)
+
+    out = keep_session_only(scrambled, _dt.date(2026, 8, 12))
+    assert len(out) == 5, "duplicates survived"
+    assert out['epoch'].is_monotonic_increasing, "bars not sorted"
+    assert out['volume'].sum() == 500.0, "volume was double-counted"
+    assert out['close'].iloc[-1] == 14.0, "iloc[-1] must be the latest bar"

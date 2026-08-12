@@ -78,31 +78,58 @@ SESSION_BARS_1M = 400          # 375 + slack; the aggregator's deque holds 500
 
 def keep_session_only(df: pd.DataFrame, session: datetime.date) -> pd.DataFrame:
     """
-    Drop anything that is not from `session`.
+    Return only `session`'s bars, deduplicated and in chronological order.
 
-    BUG-2026-08-12: a history request with range_from == range_to == today came
-    back with 750 one-minute bars — two full sessions. Fyers' docs describe
-    cont_flag="1" as a continuous-contract flag, so it should be inert for an
-    equity, but the extra day arrives regardless. Rather than depend on the
-    broker honouring the range, the response is filtered here.
+    BUG-2026-08-12, verified against the live API: a request with
+    range_from == range_to == today for NSE:ORISSAMINE-EQ returned
 
-    This matters because features.enrich_dataframe computes a cumulative VWAP.
-    Two sessions in the frame anchors it to *yesterday's* open, which is a
-    different and much worse error than the 100-bar window it replaced.
+        750 rows · 375 unique epochs · 303 fully duplicated rows
+        is_monotonic_increasing = False · volume 1,193,078 vs a true ~594,000
 
-    strategy/market_context.py already guards its own fetch the same way
-    (`ts_ist.date() == today`), so the failure mode was known in one place and
-    not the others.
+    One session, but each bar roughly twice and out of order. The date filter
+    alone cannot see this, which is why the dedupe and sort below exist.
+
+    Both halves matter, and both fail silently:
+      * features.enrich_dataframe computes a CUMULATIVE VWAP, so it must be fed
+        one ordered session starting at the open;
+      * duplicated bars double-count volume, which feeds RVOL, the volume-fade
+        ratio and the scanner's volume floor;
+      * df.iloc[-1] is treated as "the current bar" throughout the codebase and
+        is not the latest bar when epochs are unsorted.
+
+    The date filter is kept as well: Fyers documents cont_flag="1" as a
+    continuous-contract flag that should be inert for an equity, so relying on
+    the range being honoured is not safe either way.
+    strategy/market_context.py already guarded its own fetch by date
+    (`ts_ist.date() == today`), so half of this was known in one place and
+    nowhere else.
     """
     if df is None or df.empty or 'datetime' not in df.columns:
         return df
-    same_day = df[df['datetime'].dt.date == session]
-    if len(same_day) != len(df):
+
+    original = len(df)
+    out = df[df['datetime'].dt.date == session]
+
+    # Same request also returns each bar roughly twice, out of order: 750 rows
+    # for 375 unique epochs, is_monotonic_increasing False. Two consequences,
+    # both silent:
+    #   * volume is double-counted, so RVOL, the volume-fade ratio and the
+    #     scanner's volume floor all read against an inflated total;
+    #   * df.iloc[-1] is used throughout as "the current bar" and is simply not
+    #     the latest bar when epochs are unsorted.
+    # Dedupe on the timestamp, keeping the last copy, then sort.
+    if 'epoch' in out.columns:
+        out = out.drop_duplicates(subset='epoch', keep='last').sort_values('epoch')
+    else:
+        out = out.drop_duplicates(subset='datetime', keep='last').sort_values('datetime')
+
+    if len(out) != original:
         logger.warning(
-            "[HISTORY] broker returned %d bars spanning %d session(s); kept %d for %s",
-            len(df), df['datetime'].dt.date.nunique(), len(same_day), session,
+            "[HISTORY] broker returned %d bars → %d after same-session filter, "
+            "dedupe and sort (%d sessions seen)",
+            original, len(out), df['datetime'].dt.date.nunique(),
         )
-    return same_day.reset_index(drop=True)
+    return out.reset_index(drop=True)
 
 
 def frame_reaches_session_open(df: pd.DataFrame) -> bool:

@@ -116,6 +116,29 @@ def harden_fyers_session(client, label: str = "fyers") -> bool:
     )
     return True
 
+
+def _token_expired(token: str, skew_s: int = 60) -> bool:
+    """
+    True when the JWT's `exp` claim is in the past.
+
+    A local check first, so a token that cannot possibly work does not consume a
+    network round trip — and so the log says *why* it was skipped rather than
+    reporting a generic validation failure. Undecodable tokens return False: that
+    is not evidence of expiry, and the API call remains the authority.
+    """
+    try:
+        import base64
+        import json
+        import time as _t
+
+        body = token.split(".")[1]
+        body += "=" * (-len(body) % 4)
+        exp = json.loads(base64.urlsafe_b64decode(body)).get("exp")
+        return bool(exp) and (_t.time() + skew_s) >= float(exp)
+    except Exception:
+        return False
+
+
 class FyersConnect:
     """
     Singleton Fyers connection manager.
@@ -176,21 +199,37 @@ class FyersConnect:
         """
         from fyers_apiv3 import fyersModel
 
-        # Step 1: Try loading saved token
-        saved_token = self._load_token()
-        
-        # Also check env var as priority override
-        env_token = os.getenv("FYERS_ACCESS_TOKEN")
-        if env_token and len(env_token) > 20:
-             logger.info("✅ Found Valid Token in Env Var. Using it.")
-             saved_token = env_token
+        # Step 1: Try every token source, and *validate* each before using it.
+        #
+        # BUG-2026-08-12: this preferred FYERS_ACCESS_TOKEN over the cached file
+        # unconditionally, on the strength of `len(token) > 20`, and logged
+        # "✅ Found Valid Token in Env Var" without checking anything. A token
+        # left in .env from 2026-01-09 therefore beat a token cached minutes ago
+        # and still valid for hours, so every start burned a full interactive
+        # re-login. Under FYERS_NO_INTERACTIVE (the container) it raises instead,
+        # meaning a stale .env line stops the bot from starting at all.
+        candidates = []
+        env_token = (os.getenv("FYERS_ACCESS_TOKEN") or "").strip()
+        if len(env_token) > 20:
+            candidates.append(("env FYERS_ACCESS_TOKEN", env_token))
+        file_token = self._load_token()
+        if file_token:
+            candidates.append((str(TOKEN_FILE), file_token))
 
-        if saved_token and self._validate_token(saved_token):
-            logger.info("✅ Loaded valid token from file/env. Skipping auth flow.")
-            self._access_token = saved_token
-            self._fyers = self._build_fyers_client(saved_token)
-            logger.info("✅ Fyers Connected Successfully")
-            return
+        for source, token in candidates:
+            if _token_expired(token):
+                logger.warning(
+                    "Token from %s is past its exp claim — skipping without an API call.",
+                    source,
+                )
+                continue
+            if self._validate_token(token):
+                logger.info("✅ Using valid token from %s. Skipping auth flow.", source)
+                self._access_token = token
+                self._fyers = self._build_fyers_client(token)
+                logger.info("✅ Fyers Connected Successfully")
+                return
+            logger.warning("Token from %s failed validation — trying next source.", source)
 
         # Step 2: Saved token invalid/missing - run auth flow ONCE
         if os.getenv("FYERS_NO_INTERACTIVE"):
