@@ -201,6 +201,18 @@ class FyersConnect:
 
         # Step 1: Try every token source, and *validate* each before using it.
         #
+        # NOT a way around the daily login. SEBI requires re-authentication each
+        # trading day and Fyers expires the access token nightly (~00:30 IST), so
+        # a fresh interactive login every morning is mandatory and correct. Do
+        # not "improve" this by persisting a token across days — it cannot work,
+        # and attempting it would be circumventing a regulatory control.
+        #
+        # What this fixes is narrower: choosing between token sources *within*
+        # one day, so a restart at 11:00 reuses the token obtained at 09:10
+        # instead of demanding another login, and so a dead value cannot beat a
+        # live one. FYERS_ACCESS_TOKEN still takes priority when it is valid,
+        # which keeps the manual-override workflow intact.
+        #
         # BUG-2026-08-12: this preferred FYERS_ACCESS_TOKEN over the cached file
         # unconditionally, on the strength of `len(token) > 20`, and logged
         # "✅ Found Valid Token in Env Var" without checking anything. A token
