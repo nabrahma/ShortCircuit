@@ -1137,7 +1137,10 @@ class FocusEngine:
                 partial_enabled = False  # Phase 93: Partial exit not currently active
                 if not manual_override and not partial_enabled and self.discretionary_engine and self.order_manager:
                     soft_sl = t['soft_sl']
-                    # Phase 94: Direction-aware soft stop
+                    # Phase 94: Direction-aware soft stop.
+                    # _trade_dir used to be defined by the breakeven block above;
+                    # that block is gone, so it is resolved here where it is used.
+                    _trade_dir = t.get('direction', 'SHORT')
                     _soft_hit = (ltp <= soft_sl) if _trade_dir == 'LONG' else (ltp >= soft_sl)
                     if _soft_hit:
                         decision = self.discretionary_engine.evaluate_soft_stop(symbol, t)
