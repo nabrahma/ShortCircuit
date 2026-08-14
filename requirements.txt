@@ -44,7 +44,7 @@ requests>=2.31.0
 # ── Data Processing ────────────────────────────────────────
 pandas>=2.0.0
 numpy>=1.26.0
-pyarrow>=14.0.0
+pyarrow>=25.0.1
 msgpack>=1.2.1       # GHSA-6v7p-g79w-8964 (pulled in transitively)
 optuna>=3.6.0
 
