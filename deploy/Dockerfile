@@ -12,7 +12,7 @@
 #   docker build -f deploy/Dockerfile -t shortcircuit .                # runtime
 #   docker build -f deploy/Dockerfile --target test -t shortcircuit:test .
 
-FROM python:3.12-slim AS builder
+FROM python:3.14-slim AS builder
 
 ENV PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1
 WORKDIR /build
@@ -37,7 +37,7 @@ RUN /opt/venv/bin/pip install -r requirements-dev.txt
 
 
 # Everything both images share except the virtualenv.
-FROM python:3.12-slim AS base
+FROM python:3.14-slim AS base
 
 # Non-root. A process that places orders should not also be able to rewrite its
 # own code.
