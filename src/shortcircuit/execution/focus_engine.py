@@ -822,6 +822,7 @@ class FocusEngine:
             'tp_1':            tp_1,       # midpoint — partial (SCALE) or full (SINGLE) exit
             'tp':              tp_2,       # VWAP target — final exit under SCALE
             'tp_1_hit':        False,      # state tracker for the partial
+            'be_moved':        False,      # did the breakeven stop actually land?
             'status':          'OPEN',
             'highest_profit':  -999,
             'message_id':      message_id,
@@ -1258,19 +1259,71 @@ class FocusEngine:
                         else:
                             logger.info("[TP-1] %s has 1 share left — no partial to take", symbol)
 
-                        # Breakeven is the one restored piece that contradicts the
-                        # standing "no breakeven SL" rule, so it sits behind its
-                        # own flag. Note the 2026-08-11 DEVYANI move was rejected
-                        # by the broker while the alert claimed success — treat a
-                        # silent failure here as possible, not impossible.
+                        # Breakeven is on its own flag because it contradicts the
+                        # standing "no breakeven SL" rule — but it is also the half
+                        # of the June policy that made a 41% win rate profitable:
+                        # once this lands, the trade cannot lose.
+                        #
+                        # So the result is CHECKED, not dispatched and forgotten.
+                        # move_hard_stop returns False on a broker rejection and
+                        # leaves the ORIGINAL stop in place. On 2026-08-11 DEVYANI
+                        # that happened while the alert implied the stop had moved,
+                        # and the operator was told a trade was risk-free when it
+                        # was not. A wrong belief about risk is worse than no move.
+                        #
+                        # Blocking here stalls the 5Hz loop for up to 24s across both
+                        # attempts (a normal modify returns in ~1s). That is acceptable:
+                        # the original broker-side stop is live at the broker the whole
+                        # time, so the position stays protected throughout — just not at
+                        # breakeven yet. The EOD square-off has ~5 min of slack before
+                        # the exchange's own 15:15-15:20 auto-squareoff, so a stall here
+                        # cannot cause a missed close.
                         if getattr(config, 'P52_BREAKEVEN_AFTER_TP1', False):
-                            asyncio.run_coroutine_threadsafe(
-                                self.order_manager.move_hard_stop(
-                                    symbol, t['entry'],
-                                    new_qty=t['remaining_qty'] if exit_qty > 0 else None,
-                                ),
-                                self._event_loop,
-                            )
+                            be_qty = t['remaining_qty'] if exit_qty > 0 else None
+                            t['be_moved'] = False
+                            for attempt in (1, 2):
+                                try:
+                                    be_future = asyncio.run_coroutine_threadsafe(
+                                        self.order_manager.move_hard_stop(
+                                            symbol, t['entry'], new_qty=be_qty,
+                                        ),
+                                        self._event_loop,
+                                    )
+                                    if be_future.result(timeout=12):
+                                        t['be_moved'] = True
+                                        logger.info(
+                                            "🔒 [BE] %s stop moved to breakeven ₹%.2f — "
+                                            "remainder is now risk-free",
+                                            symbol, t['entry'],
+                                        )
+                                        break
+                                    logger.error(
+                                        "[BE] %s move_hard_stop returned False (attempt %d)",
+                                        symbol, attempt,
+                                    )
+                                except Exception as be_err:
+                                    logger.error(
+                                        "[BE] %s move_hard_stop raised on attempt %d: %s",
+                                        symbol, attempt, be_err,
+                                    )
+
+                            if not t['be_moved']:
+                                logger.error(
+                                    "❌ [BE] %s STILL ON ORIGINAL STOP ₹%.2f after 2 attempts",
+                                    symbol, t['sl'],
+                                )
+                                if self.telegram_bot and self._event_loop:
+                                    asyncio.run_coroutine_threadsafe(
+                                        self.telegram_bot.send_alert(
+                                            f"⚠️ *BREAKEVEN MOVE FAILED*\n\n"
+                                            f"Symbol: `{symbol}`\n"
+                                            f"Took 50% at ₹{t['tp_1']:.2f}\n"
+                                            f"Stop is STILL ₹{t['sl']:.2f}, not "
+                                            f"breakeven ₹{t['entry']:.2f}\n\n"
+                                            f"The remainder is *not* risk-free."
+                                        ),
+                                        self._event_loop,
+                                    )
 
 
                 # ── SOFT STOP (existing logic — keep for non-partial-exit fallback) ──
