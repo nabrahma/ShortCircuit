@@ -62,6 +62,11 @@ class TimeoutHTTPAdapter(HTTPAdapter):
 
 
 
+# Set once enforce_rest_timeouts() succeeds, so the 'no Session' path can tell
+# an expected 3.1.7 layout from a genuinely unprotected client.
+_REST_BOUNDED = False
+
+
 class _TimeoutInjectingRequests:
     """
     Proxy around the `requests` module that forces a default timeout.
@@ -154,7 +159,8 @@ def harden_fyers_session(client, label: str = "fyers") -> bool:
     # 2026-08-06 log still shows "no .session to harden" plus 25 position-fetch
     # timeouts and "Connection pool is full" warnings.
     # 3.1.7 has no Session; bound the module-level calls instead.
-    enforce_rest_timeouts()
+    global _REST_BOUNDED
+    _REST_BOUNDED = enforce_rest_timeouts()
 
     session = None
     for path in ("session", "service.session", "_service.session"):
@@ -167,6 +173,16 @@ def harden_fyers_session(client, label: str = "fyers") -> bool:
             session = obj
             logger.debug("[HTTP] %s: session found at client.%s", label, path)
             break
+
+    if session is None and _REST_BOUNDED:
+        # 3.1.7 has no Session, but the module-level calls are now bounded, so
+        # this is expected and harmless — not the UNBOUNDED emergency the old
+        # message announced twice a session for eighteen days.
+        logger.debug(
+            "[HTTP] %s: no requests.Session on this client (fyers-apiv3 3.1.7); "
+            "calls are bounded by the module-level timeout instead.", label,
+        )
+        return
 
     if session is None:
         logger.error(

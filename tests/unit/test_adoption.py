@@ -165,3 +165,75 @@ def test_an_unreadable_orderbook_reports_no_protection():
     assert asyncio.run(
         ReconciliationEngine._find_live_protective_order(engine, "NSE:X-EQ", "BUY")
     ) is None
+
+
+# ── tick size looked up, not guessed ──────────────────────────────────────
+
+def test_broker_tick_lookup_caches_and_falls_back():
+    """
+    Verified against the live API on 2026-08-30:
+        NSE:TIINDIA-EQ 0.1 · NSE:SBIN-EQ 0.1 · NSE:CAMLINFINE-EQ 0.01
+    The old 0.05 default is wrong in both directions, and NSE revised its tick
+    bands in 2025, so it cannot be inferred from price.
+    """
+    import asyncio
+    import types
+
+    from shortcircuit.broker.fyers_broker_interface import FyersBrokerInterface
+
+    calls = []
+
+    class Client:
+        def depth(self, data=None):
+            calls.append(data["symbol"])
+            return {"d": {data["symbol"]: {"tick_Size": 0.1, "ltp": 2840}}}
+
+    stub = types.SimpleNamespace(
+        rest_client=Client(),
+        _rate_limit_wait=lambda *a, **k: asyncio.sleep(0),
+    )
+    get_tick = FyersBrokerInterface.get_tick_size.__get__(stub, FyersBrokerInterface)
+
+    assert asyncio.run(get_tick("NSE:TIINDIA-EQ")) == 0.1
+    assert asyncio.run(get_tick("NSE:TIINDIA-EQ")) == 0.1
+    assert calls == ["NSE:TIINDIA-EQ"], "second call should be served from cache"
+
+
+def test_tick_lookup_returns_none_rather_than_a_wrong_guess():
+    """
+    None lets the caller fall back explicitly. Returning 0.05 here would
+    reintroduce the exact defect: a plausible number that gets orders rejected.
+    """
+    import asyncio
+    import types
+
+    from shortcircuit.broker.fyers_broker_interface import FyersBrokerInterface
+
+    class Broken:
+        def depth(self, data=None):
+            raise ConnectionError("depth unavailable")
+
+    stub = types.SimpleNamespace(
+        rest_client=Broken(),
+        _rate_limit_wait=lambda *a, **k: asyncio.sleep(0),
+    )
+    get_tick = FyersBrokerInterface.get_tick_size.__get__(stub, FyersBrokerInterface)
+    assert asyncio.run(get_tick("NSE:X-EQ")) is None
+
+
+def test_a_missing_tick_field_is_not_treated_as_a_value():
+    import asyncio
+    import types
+
+    from shortcircuit.broker.fyers_broker_interface import FyersBrokerInterface
+
+    class NoTick:
+        def depth(self, data=None):
+            return {"d": {data["symbol"]: {"ltp": 100}}}
+
+    stub = types.SimpleNamespace(
+        rest_client=NoTick(),
+        _rate_limit_wait=lambda *a, **k: asyncio.sleep(0),
+    )
+    get_tick = FyersBrokerInterface.get_tick_size.__get__(stub, FyersBrokerInterface)
+    assert asyncio.run(get_tick("NSE:X-EQ")) is None

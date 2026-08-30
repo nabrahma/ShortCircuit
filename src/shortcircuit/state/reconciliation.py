@@ -591,7 +591,17 @@ class ReconciliationEngine:
         # `broker_pos.get('tick_size', 0.05)` was always 0.05. NSE:TIINDIA-EQ
         # trades on a 0.10 tick, so its stop was rejected — twice — and the
         # position sat naked. A tick learned from a previous rejection wins.
-        tick_size = _LEARNED_TICKS.get(symbol) or broker_pos.get('tick_size') or 0.05
+        # Order of authority: what a rejection already taught us, then the
+        # broker's own depth feed, then whatever the payload claimed, then a
+        # default that is known to be wrong for 0.1-tick symbols.
+        tick_size = _LEARNED_TICKS.get(symbol)
+        if not tick_size:
+            try:
+                tick_size = await self.broker.get_tick_size(symbol)
+            except Exception:
+                tick_size = None
+        if not tick_size:
+            tick_size = broker_pos.get('tick_size') or 0.05
         sl_side = 'BUY' if side == 'SHORT' else 'SELL'
 
         try:

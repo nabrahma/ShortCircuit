@@ -2057,6 +2057,51 @@ class FyersBrokerInterface:
         finally:
             self.order_fill_events.pop(order_id, None)
 
+    async def get_tick_size(self, symbol: str) -> Optional[float]:
+        """
+        The symbol's real minimum price increment, from the broker.
+
+        BUG-2026-08-30: the adoption path defaulted to 0.05 because the position
+        payload carries no tick size. Verified against the live API, that is
+        wrong in both directions:
+
+            NSE:TIINDIA-EQ     0.1     NSE:SBIN-EQ    0.1
+            NSE:CAMLINFINE-EQ  0.01
+
+        A 0.05-rounded stop on a 0.1-tick symbol is rejected outright
+        ("StopPrice not a multiple of tick size 0.1000"), which on 18 Aug left a
+        position naked for 27 minutes. NSE revised its tick bands in April 2025,
+        so this cannot be inferred from price and must be looked up.
+
+        Cached for the session; ticks do not change intraday. Returns None when
+        unavailable so the caller can fall back rather than assume.
+        """
+        symbol = str(symbol)
+        if not hasattr(self, "_tick_cache"):
+            self._tick_cache = {}
+        if symbol in self._tick_cache:
+            return self._tick_cache[symbol]
+
+        try:
+            await self._rate_limit_wait("depth")
+            resp = await asyncio.wait_for(
+                asyncio.to_thread(
+                    self.rest_client.depth,
+                    data={"symbol": symbol, "ohlcv_flag": "1"},
+                ),
+                timeout=ASYNC_CALL_TIMEOUT,
+            )
+            rec = ((resp or {}).get("d") or {}).get(symbol) or {}
+            tick = rec.get("tick_Size")
+            if tick and float(tick) > 0:
+                self._tick_cache[symbol] = float(tick)
+                logger.info("[TICK] %s tick_size=%s (from broker depth)", symbol, tick)
+                return float(tick)
+            logger.warning("[TICK] depth for %s carried no tick_Size", symbol)
+        except Exception as exc:
+            logger.warning("[TICK] could not read tick size for %s: %s", symbol, exc)
+        return None
+
     async def get_order_avg_price(self, order_id: str) -> float:
         """
         Average fill price.
