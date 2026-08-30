@@ -1,7 +1,8 @@
 # syntax=docker/dockerfile:1
 #
-# Four stages. The runtime image carries the trading dependencies and nothing
-# else: no pytest, no linters, no security tooling.
+# Five stages: builder, builder-dev, base, test, runtime. The runtime image
+# carries the trading dependencies and nothing else: no pytest, no linters, no
+# security tooling.
 #
 # That separation is not only hygiene. Rust-built dev wheels (ruff, hypothesis)
 # ship PEP 770 SBOMs in .dist-info/sboms/ declaring the crates vendored inside
@@ -41,10 +42,22 @@ FROM python:3.12-slim AS base
 
 # Non-root. A process that places orders should not also be able to rewrite its
 # own code.
+#
+# --only-upgrade pulls OS security fixes that the base image tag has not been
+# rebuilt for yet. python:3.12-slim shipped openssl 3.5.6-1~deb13u2 while Debian
+# had already published 3.5.7-1~deb13u2 for CVE-2026-14456, so the scan failed
+# on a CVE that was fixed upstream and simply absent from the image.
+#
+# Only packages already installed are touched — --only-upgrade never adds new
+# ones, and it is a no-op when no candidate exists, so it cannot break a build.
+# Prefer adding a package here over adding a line to .trivyignore: an ignore is
+# for advisories that cannot be fixed on our side, not for ones needing an apt
+# upgrade.
 RUN groupadd --system --gid 1001 shortcircuit \
  && useradd  --system --uid 1001 --gid shortcircuit --create-home shortcircuit \
  && apt-get update \
  && apt-get install -y --no-install-recommends libpq5 \
+ && apt-get install -y --only-upgrade openssl libssl3t64 openssl-provider-legacy \
  && rm -rf /var/lib/apt/lists/*
 
 ENV PATH="/opt/venv/bin:$PATH" \
