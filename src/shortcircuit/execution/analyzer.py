@@ -195,8 +195,18 @@ class FyersAnalyzer:
         # day's 295 WS_CACHE scans used this path. The REST fallback below
         # fetches range_from=today and was always correct, so the definition of
         # "VWAP" silently depended on which data tier answered.
+        #
+        # RESTORED 2026-08-30: VWAP_ANCHOR_MODE selects which of the two readings
+        # C1 gets. 'SESSION' is the fix described above. 'ROLLING' reinstates the
+        # sliding anchor the profitable run was measured on — see the note on
+        # VWAP_ANCHOR_MODE in config for why that is a deliberate choice and what
+        # it costs. The ORISSAMINE defect above is real and returns with ROLLING.
+        _anchor = str(getattr(config, 'VWAP_ANCHOR_MODE', 'SESSION')).upper()
+        _rolling = _anchor == 'ROLLING'
+        _bars = int(getattr(config, 'VWAP_ROLLING_BARS', 100)) if _rolling else SESSION_BARS_1M
+
         if interval == "1" and getattr(config, 'P82_LOCAL_CANDLES_ENABLED', False) and self.broker:
-            local_candles = self.broker.get_local_candles(symbol, n=SESSION_BARS_1M)
+            local_candles = self.broker.get_local_candles(symbol, n=_bars)
 
             min_required = getattr(config, 'RVOL_MIN_CANDLES', 15) + 3
             if local_candles and len(local_candles) >= min_required:
@@ -215,6 +225,13 @@ class FyersAnalyzer:
                 # restart time, and its cumulative VWAP would be anchored there.
                 # Fall through to REST in that case — it returns the whole
                 # session, which is the only anchor C1 is defined against.
+                # Under ROLLING the anchor is *meant* to sit mid-session, so
+                # there is nothing to verify and no reason to fall through to
+                # REST — which would hand back a session-anchored frame and
+                # silently reintroduce the very split this flag exists to end.
+                if _rolling:
+                    return df
+
                 if frame_reaches_session_open(df):
                     return df
                 logger.debug(
@@ -251,6 +268,15 @@ class FyersAnalyzer:
                 if df is None or df.empty:
                     logger.warning("No same-day history for %s", symbol)
                     return None
+
+                # Keep the anchor definition independent of which data tier
+                # answered. Before 12 Aug the local path was rolling while this
+                # one was session-anchored, so "VWAP" meant different things on
+                # different scans of the same symbol — 295 of one session's 340
+                # scans took the local path and the rest did not. Whatever
+                # VWAP_ANCHOR_MODE says, it should say it here too.
+                if _rolling and len(df) > _bars:
+                    df = df.iloc[-_bars:].reset_index(drop=True)
                 return df
             else:
                 logger.warning(f"No history data for {symbol}")

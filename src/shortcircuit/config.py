@@ -39,11 +39,12 @@ INTRADAY_LEVERAGE = 5.0    # Fixed 5× leverage (NSE standard requirement)
 TRADE_DIRECTION = 'SHORT'  # 'SHORT' or 'LONG'
 
 # Timing (IST)
-# 0 disables the time-based exit. Positions run until the stop-loss or the EOD
-# square-off — the same reasoning that removed the take-profit: a 45-minute cap
-# closed winners early, and the only profitable trade in the first two live days
-# needed 67 minutes to develop. Set a positive value to re-enable.
-MAX_HOLD_TIME_MINUTES = 0
+# Restored to 45 on 2026-08-30. The reasoning that set this to 0 rested on two
+# live days and one trade (NSE:BAJAJELEC-EQ) that needed 67 minutes. Replaying
+# all 46 LIVE trades since 11 Jun against real 1-minute candles put the 45-minute
+# cap ahead of no cap in every phase: +2.75pp over the green era, +3.61pp across
+# 7-11 Aug, and level afterwards. 0 disables the exit entirely.
+MAX_HOLD_TIME_MINUTES = 45
 
 # ============================================================================
 # 3. SCANNER & G5 STRETCH CONSTANTS
@@ -86,6 +87,29 @@ SL_ATR_MULTIPLIER = 0.5
 SL_MIN_TICK_BUFFER = 3
 
 P52_CLEANUP_ON_STOP_FOCUS: bool = True 
+
+# ── Take-profit engine (restored 2026-08-30) ────────────────────────────────
+# Removed on 6 Aug by f6eae88 on the strength of two live days. Replaying all
+# 46 LIVE trades since 11 Jun on real 1-minute candles reversed that read: over
+# the green era, running no take-profit scored -3.10 against +3.15 for the
+# single midpoint TP and +3.27 for the scale-out. Losing trades are untouched
+# by any of it — 11 of 15 August trades hit the stop first and score identically
+# under every policy. The TP only ever changes winners.
+#
+#   'SCALE'  — 50% at the midpoint, remainder runs to the VWAP target.
+#              This is the pre-30-Jun policy and the best of the replayed set.
+#   'SINGLE' — 100% at the midpoint. The 30 Jun - 6 Aug policy.
+#   'OFF'    — no take-profit; stop-loss and EOD only (6-30 Aug behaviour).
+#
+# Caveat worth keeping in view: n=46, and the paired confidence intervals span
+# zero. The ranking is a point estimate, not a proven result.
+TP_MODE: str = 'SCALE'
+
+# Moves the stop to breakeven once the partial fills under TP_MODE='SCALE'.
+# This is the one piece of the restored engine that contradicts the standing
+# "no breakeven SL" rule, so it is on its own switch. Setting it False keeps
+# the scale-out and leaves the original stop where it is.
+P52_BREAKEVEN_AFTER_TP1: bool = True
 
 # ============================================================================
 # 7. LOGGING (PHASE 70-74)
@@ -134,6 +158,30 @@ P81_TELEGRAM_RATE_LIMIT_HZ       = 2
 # ============================================================================
 P82_LOCAL_CANDLES_ENABLED = True
 P82_MAX_LOCAL_CANDLES = 500
+
+# ── VWAP anchor (restored to ROLLING 2026-08-30) ────────────────────────────
+# features.enrich_dataframe computes a cumulative VWAP over whatever frame it
+# receives, so the frame length IS the anchor.
+#
+#   'ROLLING' — hand it VWAP_ROLLING_BARS bars. The anchor slides forward each
+#               minute, so C1 measures stretch against roughly the last 100
+#               minutes: a fresh impulsive extension.
+#   'SESSION' — hand it the whole session. C1 measures distance from the day's
+#               average, which stays elevated all day on a strong trender.
+#
+# SESSION is the textbook-correct reading and 90a2998 switched to it on 12 Aug
+# to fix a real defect: NSE:ORISSAMINE-EQ read -1.52 SD, below VWAP, while the
+# session anchor had it above. That defect is real and returns with ROLLING.
+#
+# It is also what the entire profitable run was measured on. The 11 LIVE trades
+# after the switch averaged 0.572 MFE against 1.088 in the 4 before it, and no
+# exit policy in the replay rescues that window — the entries themselves got
+# worse. Same shape as the Dalton VAH reverted in July: correct by the book,
+# load-bearing in its broken form.
+#
+# Sample sizes are 4 and 11. This is a deliberate bet, not a demonstrated fact.
+VWAP_ANCHOR_MODE: str = 'ROLLING'
+VWAP_ROLLING_BARS: int = 100
 
 # ============================================================================
 # RESTORED MISSING PHASE CONSTANTS (Fixes runtime crashes)

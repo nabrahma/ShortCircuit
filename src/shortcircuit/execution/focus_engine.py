@@ -15,6 +15,44 @@ from shortcircuit.observability.gate_result_logger import get_gate_result_logger
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("FocusEngine")
 
+
+def target_reached(ltp: float, level, direction: str = 'SHORT') -> bool:
+    """
+    Has price reached a take-profit level?
+
+    A SHORT target sits below entry and is reached on the way down; a LONG
+    target sits above and is reached on the way up. `level` is None whenever
+    TP_MODE is 'OFF' or the computed target landed on the wrong side of entry,
+    and None is never "reached" — that is what lets a trade run on its stop
+    alone instead of closing the instant it opens.
+    """
+    if level is None or not ltp:
+        return False
+    return (ltp >= level) if direction == 'LONG' else (ltp <= level)
+
+
+def compute_tp_levels(entry_price: float, vwap_target, tick: float, is_long: bool):
+    """
+    Turn the VWAP mean-reversion target into the two levels the engine trades.
+
+    Returns (tp_1, tp_2): the midpoint between entry and the target, and the
+    target itself, both snapped to the instrument's tick.
+
+    Returns (None, None) when the target is not strictly beyond entry — which
+    happens when VWAP has already been crossed by the time the fill lands. A
+    target on the wrong side of entry would be "reached" on the first tick and
+    close the position immediately; None means the trade runs on its stop.
+    """
+    if not entry_price or entry_price <= 0 or vwap_target is None:
+        return None, None
+    if (is_long and vwap_target <= entry_price) or (not is_long and vwap_target >= entry_price):
+        return None, None
+    t = tick if tick and tick > 0 else 0.05
+    tp_2 = round(round(vwap_target / t) * t, 2)
+    tp_1 = round(round((entry_price + (vwap_target - entry_price) / 2.0) / t) * t, 2)
+    return tp_1, tp_2
+
+
 class FocusEngine:
     def __init__(self, trade_manager=None, order_manager=None, discretionary_engine=None):
         self.fyers = FyersConnect().authenticate()
@@ -748,15 +786,42 @@ class FocusEngine:
         else:
             soft_sl = entry_price * (1 + soft_stop_pct)
 
-        # Take-profit removed — see the note in focus_loop. Trades exit on the
-        # stop-loss or at EOD; nothing caps the upside.
         tick = position_data.get('tick_size', 0.05)
+
+        # Take-profit levels (restored 2026-08-30, see config.TP_MODE).
+        #   tp_2 — the VWAP mean-reversion target, from OrderManager.
+        #   tp_1 — the midpoint between entry and tp_2.
+        # Under 'SCALE' the position sheds 50% at tp_1 and runs the rest to tp_2;
+        # under 'SINGLE' it closes 100% at tp_1. Both are None when TP_MODE is
+        # 'OFF', and every consumer below treats None as "no target".
+        tp_mode = str(getattr(config, 'TP_MODE', 'OFF')).upper()
+        tp_1 = tp_2 = None
+        if tp_mode in ('SCALE', 'SINGLE'):
+            tps = {}
+            if self.order_manager and entry_price > 0:
+                try:
+                    tps = self.order_manager.compute_take_profits(entry_price, position_data)
+                except Exception as tp_err:
+                    logger.error("[TP] compute_take_profits failed for %s: %s", symbol, tp_err)
+            tp_default = entry_price * (1.01 if is_long else 0.99)
+            tp_1, tp_2 = compute_tp_levels(
+                entry_price, tps.get('tp', tp_default), tick, is_long
+            )
+            if tp_1 is None:
+                logger.warning(
+                    "[TP] %s VWAP target is not beyond entry ₹%.2f — running without a TP",
+                    symbol, entry_price,
+                )
 
         self.active_trade = {
             'symbol':          symbol,
             'entry':           entry_price,
             'sl':              sl_price,
             'soft_sl':         soft_sl,
+            'tp_mode':         tp_mode,
+            'tp_1':            tp_1,       # midpoint — partial (SCALE) or full (SINGLE) exit
+            'tp':              tp_2,       # VWAP target — final exit under SCALE
+            'tp_1_hit':        False,      # state tracker for the partial
             'status':          'OPEN',
             'highest_profit':  -999,
             'message_id':      message_id,
@@ -798,9 +863,15 @@ class FocusEngine:
         self._flat_check_not_before = time.time() + 10.0
 
         self.is_running = True
+        if tp_1 is None:
+            _tp_desc = "no TP — runs to SL or EOD"
+        elif tp_mode == 'SINGLE':
+            _tp_desc = f"tp=₹{tp_1:.2f} (100% at midpoint)"
+        else:
+            _tp_desc = f"tp1=₹{tp_1:.2f} (50%) tp2=₹{tp_2:.2f}"
         logger.info(
             f"[FOCUS] Started {symbol} qty={actual_qty} entry=₹{entry_price:.2f} "
-            f"sl=₹{sl_price:.2f} (no TP — runs to SL or EOD)"
+            f"sl=₹{sl_price:.2f} {_tp_desc}"
         )
         
         # Start Loop
@@ -1119,19 +1190,88 @@ class FocusEngine:
                 # place while the alert claimed a change had been attempted.
                 # Do not reintroduce without evidence from data/ml/.
                 
-                # ── PHASE 98: HYBRID VWAP 50% SCALE-OUT (TP 1) ────────────────────
-                # DISABLED: User requested 100% exit at TP_1 (Midpoint). 
-                # The Phase 78 engine below will now handle the 100% exit at TP_1.
-
-                # ── TAKE-PROFIT: REMOVED ───────────────────────────────────────────
-                # The target sat at the midpoint between entry and VWAP, which is
-                # far too tight for this strategy: it capped every winner while
-                # leaving losers to run to the stop. The only profitable trade in
-                # the first two live days (NSE:BAJAJELEC-EQ, +₹76.30) made its money
-                # precisely because no TP fired and it ran to the EOD square-off.
+                # ── TAKE-PROFIT ENGINE (restored 2026-08-30) ──────────────────────
+                # Removed on 6 Aug because the midpoint target "capped every
+                # winner". Replaying all 46 LIVE trades since 11 Jun on real
+                # 1-minute candles does not support that: no-TP scored -3.10 over
+                # the green era against +3.15 (SINGLE) and +3.27 (SCALE). Losers
+                # are untouched either way — 11 of 15 August trades hit the stop
+                # first and score identically under every policy. The TP only
+                # ever changes what happens to winners.
                 #
-                # Positions now exit on the stop-loss or at EOD. Nothing else caps
-                # the upside.
+                # Both stages respect manual_override: if the operator has taken
+                # the wheel, the bot does not exit underneath them.
+                _tp_mode = t.get('tp_mode', 'OFF')
+                _tp_dir = t.get('direction', 'SHORT')
+
+                # Which level closes the position outright:
+                #   SINGLE — the midpoint, 100%.
+                #   SCALE  — the VWAP target, closing whatever the partial left.
+                _full_exit_level = t.get('tp_1') if _tp_mode == 'SINGLE' else t.get('tp')
+
+                # ── Stage 1: the full exit, checked FIRST ─────────────────────
+                # Order matters. A fast mover can gap through the midpoint and the
+                # VWAP target inside one 5Hz tick. Taking the partial first would
+                # dispatch partial_exit(half) and safe_exit(remaining) into the
+                # loop together — for a short both are BUYs, so 1.5x gets bought
+                # and the position flips net long. Checking the far level first
+                # makes the two branches mutually exclusive, and the trade closes
+                # at the better price anyway.
+                if (not manual_override and _tp_mode in ('SINGLE', 'SCALE')
+                        and target_reached(ltp, _full_exit_level, _tp_dir)):
+                    logger.info(
+                        "🎯 [TP] %s hit ₹%.2f — closing %s shares",
+                        symbol, _full_exit_level, t['remaining_qty'],
+                    )
+                    if self.order_manager and self._event_loop:
+                        future = asyncio.run_coroutine_threadsafe(
+                            self.order_manager.safe_exit(symbol, "TP_HIT"), self._event_loop
+                        )
+                        try:
+                            logger.info("[TP] safe_exit completed for %s: success=%s",
+                                        symbol, future.result(timeout=30))
+                        except Exception as tp_exit_err:
+                            logger.error("[TP] safe_exit failed/timed out for %s: %s",
+                                         symbol, tp_exit_err)
+                    self.stop_focus("TP_HIT")
+                    return
+
+                # ── Stage 2: the midpoint partial (SCALE only) ────────────────
+                if (not manual_override and _tp_mode == 'SCALE'
+                        and not t.get('tp_1_hit') and target_reached(ltp, t.get('tp_1'), _tp_dir)):
+                    exit_qty = t['remaining_qty'] // 2
+                    logger.info(
+                        "🎯 [TP-1 HIT] %s hit midpoint ₹%.2f — scaling out %s of %s",
+                        symbol, t['tp_1'], exit_qty, t['remaining_qty'],
+                    )
+                    # Latch before dispatching. These are fire-and-forget, so a
+                    # slow broker must not let the next 5Hz tick fire a second
+                    # partial against the same fill.
+                    t['tp_1_hit'] = True
+                    if self.order_manager and self._event_loop:
+                        if exit_qty > 0:
+                            asyncio.run_coroutine_threadsafe(
+                                self.order_manager.partial_exit(symbol, exit_qty, "TP_1_HIT"),
+                                self._event_loop,
+                            )
+                            t['remaining_qty'] -= exit_qty
+                        else:
+                            logger.info("[TP-1] %s has 1 share left — no partial to take", symbol)
+
+                        # Breakeven is the one restored piece that contradicts the
+                        # standing "no breakeven SL" rule, so it sits behind its
+                        # own flag. Note the 2026-08-11 DEVYANI move was rejected
+                        # by the broker while the alert claimed success — treat a
+                        # silent failure here as possible, not impossible.
+                        if getattr(config, 'P52_BREAKEVEN_AFTER_TP1', False):
+                            asyncio.run_coroutine_threadsafe(
+                                self.order_manager.move_hard_stop(
+                                    symbol, t['entry'],
+                                    new_qty=t['remaining_qty'] if exit_qty > 0 else None,
+                                ),
+                                self._event_loop,
+                            )
+
 
                 # ── SOFT STOP (existing logic — keep for non-partial-exit fallback) ──
                 partial_enabled = False  # Phase 93: Partial exit not currently active
