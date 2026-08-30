@@ -61,6 +61,83 @@ class TimeoutHTTPAdapter(HTTPAdapter):
         return super().send(request, **kwargs)
 
 
+
+class _TimeoutInjectingRequests:
+    """
+    Proxy around the `requests` module that forces a default timeout.
+
+    BUG-2026-08-30: fyers-apiv3 3.1.7 — the version our dependency pins resolve
+    to — does not use a `requests.Session` at all. `fyersModel` calls the module
+    functions directly:
+
+        response = requests.post(URL, data=json.dumps(data), headers={...})
+
+    with no `timeout=` anywhere in the file. `harden_fyers_session` searches for
+    a Session on the client and finds none, logs "calls will be UNBOUNDED", and
+    every REST call is then free to hang forever. That fix was written against
+    3.1.13's internals and has been inert since the version pin.
+
+    Logs for 17–25 Aug show the consequence: 383 `[SAFETY] Could not fetch
+    positions` on 20 Aug alone, escalating through the session (13 → 120 → 119),
+    with reconciliation discrepancies tracking them about 2:1.
+
+    Since the library exposes no seam, the module object it imported is replaced
+    with this proxy. Only fyersModel's view of `requests` changes; the global
+    module is untouched, so nothing else in the process is affected. An explicit
+    `timeout=` passed by a caller always wins.
+    """
+
+    _WRAPPED = ("get", "post", "put", "delete", "patch", "head", "request")
+
+    def __init__(self, inner, timeout):
+        self._inner = inner
+        self._timeout = timeout
+
+    def __getattr__(self, name):
+        attr = getattr(self._inner, name)
+        if name not in self._WRAPPED or not callable(attr):
+            return attr
+
+        def _with_timeout(*args, **kwargs):
+            kwargs.setdefault("timeout", self._timeout)
+            return attr(*args, **kwargs)
+
+        _with_timeout.__name__ = name
+        return _with_timeout
+
+
+def enforce_rest_timeouts(timeout=None) -> bool:
+    """
+    Bound every REST call fyers-apiv3 makes. Idempotent.
+
+    Returns True if the module is now bounded. This is a hard requirement, not a
+    nicety: an unbounded call inside the 5 Hz position monitor or the EOD
+    square-off blocks a path that must not block.
+    """
+    if timeout is None:
+        timeout = DEFAULT_HTTP_TIMEOUT
+    try:
+        from fyers_apiv3 import fyersModel
+
+        current = getattr(fyersModel, "requests", None)
+        if isinstance(current, _TimeoutInjectingRequests):
+            return True
+        if current is None:
+            logger.error("[HTTP] fyersModel has no `requests` attribute — cannot bound calls.")
+            return False
+
+        fyersModel.requests = _TimeoutInjectingRequests(current, timeout)
+        logger.info(
+            "[HTTP] fyers REST calls bounded at connect=%.2fs read=%.1fs "
+            "(3.1.7 uses bare requests.*, so there is no Session to mount on).",
+            float(timeout[0]), float(timeout[1]),
+        )
+        return True
+    except Exception as exc:
+        logger.error("[HTTP] could not bound fyers REST calls: %s", exc)
+        return False
+
+
 def harden_fyers_session(client, label: str = "fyers") -> bool:
     """
     Attach connection pooling, bounded retries and a hard timeout to a FyersModel.
@@ -76,6 +153,9 @@ def harden_fyers_session(client, label: str = "fyers") -> bool:
     # the broker's own pool-size fix — silently did nothing, which is why the
     # 2026-08-06 log still shows "no .session to harden" plus 25 position-fetch
     # timeouts and "Connection pool is full" warnings.
+    # 3.1.7 has no Session; bound the module-level calls instead.
+    enforce_rest_timeouts()
+
     session = None
     for path in ("session", "service.session", "_service.session"):
         obj = client

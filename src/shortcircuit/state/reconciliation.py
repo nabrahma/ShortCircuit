@@ -4,12 +4,48 @@ import json
 from datetime import datetime, date, time as dtime
 import pytz
 import math
+import re
+import time
 from shortcircuit.broker.fyers_connect import ASYNC_RETRIED_TIMEOUT
 from shortcircuit.state.database import DatabaseManager
 from shortcircuit.broker.fyers_broker_interface import FyersBrokerInterface
 
 logger = logging.getLogger(__name__)
 FORCE_REST_SYNC_INTERVAL = 300  # 5 minutes
+
+
+
+# Tick sizes learned from the broker's own rejection messages, per session.
+# NSE revised its tick bands in April 2025 and the position payload does not
+# carry a tick size, so guessing is not viable — but a rejection states the
+# exact value, which makes this self-correcting after one failed attempt.
+_LEARNED_TICKS: dict = {}
+_TICK_SIZE_RE = re.compile(r"tick\s*size\s*([0-9]*\.?[0-9]+)", re.I)
+
+
+def learn_tick_from_error(symbol: str, error: str):
+    """Extract the true tick size from a broker rejection and remember it."""
+    m = _TICK_SIZE_RE.search(str(error or ""))
+    if not m:
+        return None
+    try:
+        tick = float(m.group(1))
+    except ValueError:
+        return None
+    if tick <= 0:
+        return None
+    _LEARNED_TICKS[symbol] = tick
+    logger.warning("[TICK] learned %s tick=%.4f from broker rejection", symbol, tick)
+    return tick
+
+
+def round_stop_away_from_entry(raw: float, tick: float, side: str) -> float:
+    """Round a stop away from the position, so rounding never tightens it."""
+    if tick <= 0:
+        tick = 0.05
+    if side == 'SHORT':
+        return round(math.ceil(raw / tick) * tick, 2)
+    return round(math.floor(raw / tick) * tick, 2)
 
 
 class ReconciliationEngine:
@@ -46,6 +82,14 @@ class ReconciliationEngine:
         self._recently_closed:   dict = {}  # Phase 98.1: symbol → close_timestamp (grace period)
         self._recently_modified: dict = {}  # symbol → timestamp (grace period for entry/partial exit)
         self._orphan_grace_secs: float = 30.0  # Ignore orphans for 30s after internal close
+
+        # Adoption bookkeeping. A manually-entered position is adopted ONCE.
+        # symbol -> {'sl_id', 'qty', 'adopted_at', 'naked_alerted_at'}
+        # Without this, NSE:TIINDIA-EQ was re-adopted three times on 18 Aug and
+        # a fresh emergency stop was attempted each time. The operator is
+        # entitled to manage their own stop; the bot must not fight them for it.
+        self._adoptions: dict = {}
+        self._naked_alert_cooldown: float = 900.0   # re-warn at most every 15 min
         # ─────────────────────────────────────────────────────────────
 
     # ── Called by TradeManager when trade opens or closes ─────────────
@@ -435,6 +479,56 @@ class ReconciliationEngine:
         logger.debug(f"🗄️ DB positions refreshed: {len(self._db_positions)} open.")
         return self._db_positions
 
+
+    async def _find_live_protective_order(self, symbol: str, sl_side: str):
+        """
+        Return the id of a live stop already protecting `symbol`, or None.
+
+        The operator is entitled to run their own stop, move it, or replace ours.
+        This is what stops the bot fighting them: before placing an emergency
+        stop it asks the broker whether the position is already covered, and by
+        whom it does not care.
+
+        Fyers status 6 = PENDING, 4 = TRANSIT — both are live. A stop that has
+        already filled or been cancelled protects nothing and is ignored.
+        """
+        try:
+            client = getattr(self.broker, 'rest_client', None) or getattr(self.broker, 'fyers', None)
+            if client is None:
+                return None
+            book = await asyncio.to_thread(client.orderbook)
+            orders = (book or {}).get('orderBook') or []
+        except Exception as exc:
+            # Fail open: not knowing is not evidence of protection. Placing a
+            # duplicate stop is recoverable; leaving a position naked is not.
+            logger.warning("[ADOPT] could not read orderbook for %s: %s", symbol, exc)
+            return None
+
+        for o in orders:
+            try:
+                if o.get('symbol') != symbol:
+                    continue
+                if int(o.get('status', 0)) not in (4, 6):        # TRANSIT / PENDING
+                    continue
+                # side is -1 SELL / 1 BUY in Fyers; a protective order for a
+                # short is a BUY, and vice versa.
+                want = 1 if sl_side == 'BUY' else -1
+                if int(o.get('side', 0)) != want:
+                    continue
+                # type 3 = SL-Market, 4 = SL-Limit. A plain limit order sitting
+                # in the book is a target, not a stop, and must not be mistaken
+                # for protection.
+                if int(o.get('type', 0)) not in (3, 4):
+                    continue
+                return str(o.get('id'))
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    def forget_adoption(self, symbol: str):
+        """Clear adoption state once a position is genuinely closed."""
+        self._adoptions.pop(symbol, None)
+
     async def adopt_orphan(self, broker_pos: dict):
         """
         Phase 44.9.3: Adopt an orphaned broker position (manual trade detection).
@@ -493,54 +587,112 @@ class ReconciliationEngine:
             f"@ avg ₹{avg_price:.2f} — starting adoption."
         )
 
-        # Phase 95: Get tick_size from signal metadata or default
-        tick_size = broker_pos.get('tick_size', 0.05)
+        # Tick size is NOT in the broker's position payload, so the old
+        # `broker_pos.get('tick_size', 0.05)` was always 0.05. NSE:TIINDIA-EQ
+        # trades on a 0.10 tick, so its stop was rejected — twice — and the
+        # position sat naked. A tick learned from a previous rejection wins.
+        tick_size = _LEARNED_TICKS.get(symbol) or broker_pos.get('tick_size') or 0.05
+        sl_side = 'BUY' if side == 'SHORT' else 'SELL'
 
         try:
+            # ── Step 0: is this position already protected? ──────────────────
+            # The operator may be running their own stop, or ours may still be
+            # live from an earlier adoption. Either way, do not place a second.
+            existing = await self._find_live_protective_order(symbol, sl_side)
+            if existing:
+                prior = self._adoptions.get(symbol, {})
+                self._adoptions[symbol] = {
+                    **prior, 'sl_id': existing, 'qty': qty,
+                    'adopted_at': prior.get('adopted_at', time.time()),
+                }
+                logger.info(
+                    "[ADOPT] %s already protected by live order %s — "
+                    "adopting without placing another.", symbol, existing,
+                )
+                sl_id = existing
+                sl_price = 0.0
+
             # ── Step 1: Compute tick-safe SL price ───────────────────────────
             sl_pct  = 0.01   # emergency 1% SL for adopted orphan
             raw_sl  = (
                 avg_price * (1 + sl_pct) if side == 'SHORT'
                 else avg_price * (1 - sl_pct)
             )
-            # Round away from entry (same logic as OrderManager._round_sl_to_tick)
-            if side == 'SHORT':
-                sl_price = round(math.ceil(raw_sl / tick_size) * tick_size, 2)
+            sl_id = existing
+            last_err = None
+            if not existing:
+                sl_price = round_stop_away_from_entry(raw_sl, tick_size, side)
+                logger.info(
+                    f"[ADOPT] SL calc: raw=₹{raw_sl:.4f} → tick_rounded=₹{sl_price:.2f} "
+                    f"(tick={tick_size})"
+                )
+
+            # ── Step 2: Place emergency SL, learning the tick if rejected ────
+            for attempt in ((1, 2) if not existing else ()):
+                try:
+                    sl_id = await self.broker.place_order(
+                        symbol=symbol,
+                        side=sl_side,
+                        qty=qty,
+                        order_type='SL_MARKET',
+                        trigger_price=sl_price,
+                    )
+                    if sl_id:
+                        logger.critical(
+                            f"[ADOPT] ✅ Emergency SL placed: {symbol} | "
+                            f"sl_id={sl_id} | stop=₹{sl_price:.2f}"
+                        )
+                        break
+                    last_err = "broker returned no order id"
+                except Exception as e:
+                    last_err = str(e)
+                    sl_id = None
+
+                # The rejection states the true tick. Re-round and try once more.
+                learned = learn_tick_from_error(symbol, last_err) if attempt == 1 else None
+                if learned:
+                    tick_size = learned
+                    sl_price = round_stop_away_from_entry(raw_sl, tick_size, side)
+                    logger.warning(
+                        "[ADOPT] retrying %s stop at ₹%.2f on learned tick %.4f",
+                        symbol, sl_price, tick_size,
+                    )
+                    continue
+                break
+
+            if sl_id:
+                prior = self._adoptions.get(symbol, {})
+                self._adoptions[symbol] = {
+                    **prior, 'sl_id': sl_id, 'qty': qty,
+                    'adopted_at': prior.get('adopted_at', time.time()),
+                    'naked_alerted_at': 0.0,
+                }
             else:
-                sl_price = round(math.floor(raw_sl / tick_size) * tick_size, 2)
-
-            sl_side = 'BUY' if side == 'SHORT' else 'SELL'
-
-            logger.info(
-                f"[ADOPT] SL calc: raw=₹{raw_sl:.4f} → tick_rounded=₹{sl_price:.2f}"
-            )
-
-            # ── Step 2: Place emergency SL order ─────────────────────────────
-            sl_id = None
-            try:
-                sl_id = await self.broker.place_order(
-                    symbol=symbol,
-                    side=sl_side,
-                    qty=qty,
-                    order_type='SL_MARKET',
-                    trigger_price=sl_price,
-                )
+                # Alert once per cooldown rather than on every 6s reconcile pass.
+                prior = self._adoptions.get(symbol, {})
+                last_alert = prior.get('naked_alerted_at', 0.0)
+                _alert_before = last_alert
+                self._adoptions[symbol] = {
+                    **prior, 'sl_id': None, 'qty': qty,
+                    'adopted_at': prior.get('adopted_at', time.time()),
+                    'naked_alerted_at': (
+                        time.time() if time.time() - last_alert > self._naked_alert_cooldown
+                        else last_alert
+                    ),
+                }
                 logger.critical(
-                    f"[ADOPT] ✅ Emergency SL placed: {symbol} | "
-                    f"sl_id={sl_id} | stop=₹{sl_price:.2f}"
-                )
-            except Exception as e:
-                sl_id = None
-                logger.critical(
-                    f"[ADOPT] ❌ Emergency SL FAILED for {symbol}: {e} | "
+                    f"[ADOPT] ❌ Emergency SL FAILED for {symbol}: {last_err} | "
                     f"POSITION IS NAKED — manual close required immediately"
                 )
-                if self.telegram:
+                # Only alert when the cooldown allows it. Reconciliation runs
+                # every 6s; on 18 Aug that would have meant hundreds of
+                # identical "position is naked" messages.
+                if self.telegram and self._adoptions[symbol]['naked_alerted_at'] >= _alert_before:
                     await self.telegram.send_alert(
                         f"🚨 *ORPHAN SL FAILED*\n\n"
                         f"Symbol: `{symbol}` {side} ×{qty}\n"
                         f"Avg: ₹{avg_price:.2f} | SL attempted: ₹{sl_price:.2f}\n"
-                        f"Error: `{str(e)[:100]}`\n"
+                        f"Error: `{str(last_err)[:100]}`\n"
                         f"⚠️ **Position is NAKED. Close manually NOW.**"
                     )
 
