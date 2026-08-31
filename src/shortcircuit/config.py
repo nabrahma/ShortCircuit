@@ -57,7 +57,7 @@ SCANNER_GAIN_MAX_PCT: float = 18.0 # Protection against upper-circuit runners
 # because it is a low-float name whose whole-day volume is small. Lower floor =
 # illiquid movers become visible in time; it also admits thinner books, so watch
 # slippage. SCANNER_MIN_LTP is the remaining guard against manipulation vehicles.
-SCANNER_MIN_VOLUME:   int   = 161616
+SCANNER_MIN_VOLUME:   int   = 111111
 SCANNER_MIN_LTP:      float = 40.0   # Filter sub-₹40 manipulation vehicles
 
 # Minimum intraday (MIS) leverage the broker must grant before a symbol is worth
