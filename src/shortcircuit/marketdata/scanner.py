@@ -33,19 +33,14 @@ class FyersScanner:
         # NOTE: Do NOT use TYPO_PATCHES to suppress symbols.
         # Zero-volume symbols are handled by quality_reject_counts blacklist.
         # Both NSE:AKASH-EQ and NSE:AAKASH-EQ are separate listed entities.
-        self.quality_reject_counts = {} # Phase 42.4: Track 0-volume rejects
+        self.quality_reject_counts = {} # Track 0-volume rejects
 
     def fetch_nse_symbols(self):
         """
         Downloads NSE Equity Master list and filters for EQ series.
         """
         try:
-            # NSE Equity URL provided by Fyers or standard source
-            # For robustness, we will try to read a local CSV first or download
-            # Using a public list URL for now or if Fyers offers a symbol master API
-            # Fyers typically provides a CSV. 
-            
-            # Fyers CSV URL
+            # Fyers publishes the NSE cash symbol master as a CSV.
             url = "https://public.fyers.in/sym_details/NSE_CM.csv"
             
             # Columns (Official Fyers V3 Spec):
@@ -124,18 +119,17 @@ class FyersScanner:
             # No local import needed anymore
             import datetime as _dt
             
-            # Phase 98.4: Define date vars at top — needed by both 1m REST fallback and 15m fetch
+            # Define date vars at top — needed by both 1m REST fallback and 15m fetch
             today     = _dt.date.today()
             five_back = today - _dt.timedelta(days=5)
             
-            # --- Phase 82: Local Candle Engine ---
+            # Local Candle Engine
             candles = None
             if getattr(config, 'P82_LOCAL_CANDLES_ENABLED', False) and self.broker:
                 n_bars = max(100, getattr(config, 'RVOL_MIN_CANDLES', 15) + 5)
                 local_data = self.broker.get_local_candles(symbol, n=n_bars)
                 if local_data and len(local_data) >= getattr(config, 'RVOL_MIN_CANDLES', 15):
                     candles = [[c.epoch, c.open, c.high, c.low, c.close, c.volume] for c in local_data]
-                    # logger.debug(f"[Phase 82] Scanner using local candles for {symbol}")
 
             if not candles:
                 # Fallback to REST history
@@ -152,14 +146,14 @@ class FyersScanner:
                 candles = response.get('candles', [])
 
                 if not candles:
-                     # BUG-03 debug — one-shot per session
+                     # One-shot per session
                      if not hasattr(self, '_candle_debug_done'):
                          logger.info(f"[CANDLE DEBUG] {symbol} → status={response.get('s')} | bars=0")
                          self._candle_debug_done = True
                      logger.warning(f"SKIP {symbol} — Insufficient candle data (0). Blocking.")
                      return False, None, None
 
-            # BUG-03 debug — one-shot per session, remove after first successful trading day
+            # One-shot per session; scaffolding, safe to remove.
             if not hasattr(self, '_candle_debug_done'):
                 logger.info(
                     f"[CANDLE DEBUG] {symbol} → bars={len(candles)}"
@@ -180,7 +174,6 @@ class FyersScanner:
             if config.RVOL_VALIDITY_GATE_ENABLED:
                 if not _rvol_valid:
                     logger.warning(f"SKIP {symbol} — RVOL_VALIDITY_GATE: {_mins_open:.1f} min since open — need {config.RVOL_MIN_CANDLES} min for valid RVOL. Skip.")
-                    # self.quality_reject_counts[symbol] = self.quality_reject_counts.get(symbol, 0) + 1 # DEPRECATED Phase 64 (Transient skip)
                     return False, None, None
                 # Candle count: keep as absolute floor for API data integrity only
                 min_candles = 10  # No longer varies by time — cliff-edge removed
@@ -207,8 +200,8 @@ class FyersScanner:
                     self.quality_reject_counts[symbol] = self.quality_reject_counts.get(symbol, 0) + 1
                     return False, None, None
                 
-                # Threshold 2 (Phase 91.3): Candle Body Ratio (Filters choppy/wick-heavy charts)
-                # Calculates avg(body/range) over the last 10 candles to ensure 'clean' movement.
+                # Candle body ratio: mean(body/range) over the last 10 candles,
+                # which rejects choppy, wick-heavy charts.
                 try:
                     recent_candles = candles[-10:]
                     ratios = []
@@ -237,8 +230,8 @@ class FyersScanner:
                 df = pd.DataFrame(candles, columns=cols)
                 df['datetime'] = pd.to_datetime(df['epoch'], unit='s').dt.tz_localize('UTC').dt.tz_convert('Asia/Kolkata')
                 
-                # Phase 51: Pre-fetch 15m candles for G9 trend exhaustion
-                # Phase 98.3: Add timeout protection — slow 15m fetch was causing 90s scan timeout
+                # Pre-fetch 15m candles for G9 trend exhaustion
+                # Add timeout protection — slow 15m fetch was causing 90s scan timeout
                 df_15m = None
                 try:
                     today_str     = today.strftime("%Y-%m-%d")
@@ -273,9 +266,8 @@ class FyersScanner:
                 
                 return True, df, df_15m
             
-            # Fix #4: Hard block 0-candle data instead of allowing
+            # Hard block 0-candle data instead of allowing
             logger.warning(f"SKIP {symbol} — Insufficient candle data ({len(candles)}). Blocking.")
-            # self.quality_reject_counts[symbol] = self.quality_reject_counts.get(symbol, 0) + 1 # DEPRECATED Phase 64 (Transient skip)
             return False, None, None
             
         except Exception as e:
@@ -290,7 +282,7 @@ class FyersScanner:
         3. Filter (Gain 6-18%, Vol > 100k, LTP > 5)
         4. Parallel fetch history + quality check for all candidates
         """
-        # PRD-3: DEGRADED MODE scan banner (fires every 10 scans while WS is severely degraded)
+        # DEGRADED MODE scan banner (fires every 10 scans while WS is severely degraded)
         if hasattr(self, 'broker') and self.broker.is_cache_severely_degraded():
             scan_num = self.broker.increment_degraded_scan_count()
             if scan_num % 10 == 0:
@@ -316,7 +308,7 @@ class FyersScanner:
         symbol_list = list(self.symbols.keys()) # EXTRACT KEYS
         pre_candidates = []  # Pass gain/volume/price filter, pending quality
         
-        # ── PRD-007: Tiered Data Provider ─────────────────────────
+        # Tiered Data Provider
         import time as _time
         scan_start_ms = _time.monotonic() * 1000
 
@@ -329,7 +321,7 @@ class FyersScanner:
         data_tier = "REST_EMERGENCY"   # Will be overridden below
 
         if self.broker and hasattr(self.broker, 'is_cache_ready') and self.broker.is_cache_ready():
-            # ── Tier 1: Full WS Cache ────────────────────────────────
+            # Tier 1: Full WS Cache
             snapshot = self.broker.get_quote_cache_snapshot()
             fresh = {}
             stale_symbols = []
@@ -356,7 +348,7 @@ class FyersScanner:
             if fresh_pct >= 0.85:
                 # Pure Tier 1
                 data_tier = "WS_CACHE"
-                # FIX-PRD-007: Use full snapshot (fresh + stale) to avoid missing consolidated stocks
+                # Use full snapshot (fresh + stale) to avoid missing consolidated stocks
                 all_quotes = snapshot 
 
             elif known_pct >= 0.90:
@@ -445,7 +437,7 @@ class FyersScanner:
                 )
 
         if data_tier == "REST_EMERGENCY" or not (self.broker and hasattr(self.broker, 'is_cache_ready')):
-            # ── Tier 3 / No-broker fallback: original REST batch path ────
+            # Tier 3 / No-broker fallback: original REST batch path
             if self.broker:
                 # Already logged CRITICAL above; just do the REST scan
                 pass
@@ -502,14 +494,14 @@ class FyersScanner:
                 f"Scan_ms: {tier_ms} | Pre-candidates: {len(pre_candidates)}"
             )
 
-        # PRD-008: Store tier for main.py gate audit trail correlation
+        # Store tier for main.py gate audit trail correlation
         self._last_data_tier = data_tier
 
         if not pre_candidates:
             logger.info("No pre-candidates passed filter.")
             return []
 
-        # ── PHASE 44.4: ETF CLUSTER DEDUPLICATION (Section 7) ──────
+        # ETF CLUSTER DEDUPLICATION (Section 7)
         # Silver ETFs (and future: GOLD, NIFTY) often fire simultaneously.
         # Keep highest-volume member per cluster, suppress duplicates.
         if getattr(config, 'ETF_CLUSTER_DEDUP_ENABLED', False):
@@ -535,7 +527,7 @@ class FyersScanner:
 
         logger.info(f"Pre-filter: {len(pre_candidates)} candidates. Starting parallel quality check...")
 
-        # ── MIS leverage screen ───────────────────────────────────────────────
+        # MIS leverage screen
         # Runs BEFORE the quality checks below, which are the expensive part —
         # each one fetches history. On 2026-08-31, 10 of 22 candidates could not
         # be traded intraday at all, so this drops ~45% of the work before any

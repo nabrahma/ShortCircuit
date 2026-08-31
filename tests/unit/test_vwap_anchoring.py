@@ -55,7 +55,7 @@ def sd_of(df: pd.DataFrame) -> float:
     return compute_vwap_sd(d)
 
 
-# ── the regression ────────────────────────────────────────────────────────
+# the regression
 
 def test_truncating_the_frame_changes_the_sign_of_the_stretch():
     """
@@ -87,7 +87,7 @@ def test_the_session_request_covers_a_full_trading_day():
     assert SESSION_BARS_1M >= 375
 
 
-# ── the guard that catches a mid-session restart ──────────────────────────
+# the guard that catches a mid-session restart
 
 def frame_starting_at(hhmm: str, n: int = 30) -> pd.DataFrame:
     idx = pd.date_range(f"2026-08-12 {hhmm}", periods=n, freq="1min", tz="Asia/Kolkata")
@@ -114,7 +114,7 @@ def test_unusable_frames_are_not_treated_as_session_anchored(df):
     assert frame_reaches_session_open(df) is False
 
 
-# ── the property the gate actually depends on ─────────────────────────────
+# the property the gate actually depends on
 
 def test_stretch_is_positive_when_price_is_above_the_session_vwap():
     """
@@ -141,7 +141,7 @@ def test_stretch_is_negative_when_price_is_below_the_session_vwap():
     assert sd_of(falling) < 0
 
 
-# ── the broker returning more than it was asked for ───────────────────────
+# the broker returning more than it was asked for
 
 def two_session_frame() -> pd.DataFrame:
     """

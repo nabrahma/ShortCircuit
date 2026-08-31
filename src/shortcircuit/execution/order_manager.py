@@ -1,11 +1,14 @@
-"""
-Phase 44.6: Async Order Manager
-Changes from Phase 44.4:
-  1. compute_qty() via CapitalManager.compute_qty() — full Fyers margin utilization
-  2. acquire_slot() called after confirmed fill (was NEVER called before → capital never consumed)
-  3. Fill timeout reduced 30s → 15s with REST verification fallback
-  4. Execution failure cooldown: 15-min block per symbol after any failed entry
-  5. _finalize_closed_position() calls async release_slot(broker) (not deprecated release())
+"""Order placement, fill confirmation and stop-loss management.
+
+Owns the full lifecycle of a position at the broker: sizing it against live
+Fyers margin, placing the entry, waiting on the order socket for a real fill,
+attaching an SL-M stop, and reconciling whatever the broker actually did.
+
+Two invariants run through this module:
+
+  - A capital slot is acquired only after a *confirmed* fill, never on dispatch.
+  - An order in TRANSIT or PENDING is still working at the exchange. Treating
+    either as dead is how a resting stop-loss gets orphaned.
 """
 
 import asyncio
@@ -30,8 +33,8 @@ logger = logging.getLogger(__name__)
 # Canonical Fyers status codes live in fyers_broker_interface. These aliases are
 # kept so existing comparisons keep reading naturally.
 FYERS_ORDER_STATUS_TRADED  = int(FyersOrderStatus.FILLED)    # 2
-FYERS_ORDER_STATUS_PENDING = int(FyersOrderStatus.PENDING)   # 6
-FYERS_ORDER_STATUS_TRANSIT = int(FyersOrderStatus.TRANSIT)   # 4
+FYERS_ORDER_STATUS_PENDING = int(FyersOrderStatus.PENDING)    # 6
+FYERS_ORDER_STATUS_TRANSIT = int(FyersOrderStatus.TRANSIT)    # 4
 
 # An order in TRANSIT or PENDING is still working at the exchange. Treating either
 # as "not live" is how a resting stop-loss gets orphaned.
@@ -45,7 +48,7 @@ SESSION_BLOCK_SECONDS      = 8 * 3600
 
 class OrderManager:
     """
-    Phase 44.6: Async Order Manager with WebSocket Support.
+    Async Order Manager with WebSocket Support.
 
     Responsibilities:
     1. Async Execution via FyersBrokerInterface
@@ -75,15 +78,12 @@ class OrderManager:
         self.position_locks:   Dict[str, asyncio.Lock] = {}
         self.exit_in_progress: Dict[str, bool] = {}
         self.hard_stops:       Dict[str, str]  = {}
-        self.partial_exits_in_progress: Dict[str, Dict[str, float]] = {} # Phase 77: {symbol: {reason: timestamp}}
+        self.partial_exits_in_progress: Dict[str, Dict[str, float]] = {} # {symbol: {reason: timestamp}}
 
-        # FIX 4: Execution failure cooldown tracker
+        # Execution failure cooldown tracker
         # { symbol: datetime_unblock }
         self._exec_cooldowns: Dict[str, datetime] = {}
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # Helpers
-    # ─────────────────────────────────────────────────────────────────────────
 
     def _get_lock(self, symbol: str) -> asyncio.Lock:
         if symbol not in self.position_locks:
@@ -102,7 +102,6 @@ class OrderManager:
         if now < unblock_at:
             remaining = int((unblock_at - now).total_seconds())
             return True, remaining
-        # Cooldown expired — clean up
         del self._exec_cooldowns[symbol]
         return False, 0
 
@@ -159,7 +158,7 @@ class OrderManager:
         """
         atr    = signal.get('atr', 0)
         tick   = signal.get('tick_size', 0.05)
-        # PRD: max(atr * 0.5, 3 * tick_size) — using config constants
+        # max(atr * 0.5, 3 * tick_size), both multipliers from config.
         buffer = max(atr * getattr(config, 'SL_ATR_MULTIPLIER', 0.5),
                      tick * getattr(config, 'SL_MIN_TICK_BUFFER', 3))
 
@@ -181,7 +180,6 @@ class OrderManager:
                 sl_price = corrected
             return self._round_sl_to_tick(sl_price, 'BUY', tick)
 
-        # SHORT
         signal_high = signal.get('signal_high', ltp * 1.01)
         sl_price = signal_high + buffer
         if ltp > 0 and sl_price <= ltp + (min_gap / 2):
@@ -403,9 +401,6 @@ class OrderManager:
             logger.error(f"REST fill verify failed for {order_id}: {e}")
             return None
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # Close Path
-    # ─────────────────────────────────────────────────────────────────────────
 
     async def _finalize_closed_position(
         self,
@@ -419,17 +414,14 @@ class OrderManager:
         
         pos = self.active_positions.get(symbol)
 
-        # Phase 71: Update ML Outcome
         if pos and pos.get('obs_id'):
             try:
-                # Determine outcome label
                 outcome = "BREAKEVEN"
                 if pnl > 0: 
                     outcome = "WIN"
                 elif pnl < 0: 
                     outcome = "LOSS"
                 
-                # Calculate hold time (mins)
                 hold_time = 0
                 if pos.get('entry_time'):
                     elapsed = (datetime.now() - pos['entry_time']).total_seconds()
@@ -442,7 +434,7 @@ class OrderManager:
                 if entry_price > 0 and qty > 0:
                     pnl_pct = (pnl / (entry_price * qty)) * 100
 
-                # ML Update — Phase 96: Include MFE/MAE from shortcircuit.execution.focus_engine
+                # Include MFE/MAE captured by FocusEngine.
                 get_ml_logger().update_outcome(
                     obs_id=pos['obs_id'],
                     outcome=outcome,
@@ -458,14 +450,14 @@ class OrderManager:
             except Exception as e:
                 logger.error(f"❌ [ML-OUTCOME] Failed for {symbol}: {e}")
 
-        # FIX 5: use async release_slot (re-syncs Fyers margin after close)
+        # The async release_slot re-syncs Fyers margin after the close.
         if self.capital:
             try:
                 await self.capital.release_slot(broker=self.broker)
             except Exception as e:
                 logger.error(f"[CLOSE] Capital release_slot failed for {symbol}: {e}")
 
-        # Phase 98.1: Prevent reconciliation orphan noise by starting a grace period
+        # Prevent reconciliation orphan noise by starting a grace period
         if getattr(self, 'trade_manager', None) and getattr(self.trade_manager, 'reconciliation_engine', None):
             self.trade_manager.reconciliation_engine.mark_recently_closed(symbol)
 
@@ -483,21 +475,19 @@ class OrderManager:
             except Exception as e:
                 logger.error(f"[CLOSE] DB close log failed for {symbol}: {e}")
 
-        # Phase 51 [G13]: Record outcome in SignalManager for loss tracking
+        # Record outcome in SignalManager for loss tracking
         try:
             pos = self.active_positions.get(symbol)
             if pos:
                 if self.trade_manager:
                     self.trade_manager.record_trade_outcome(symbol, pnl)
                 else:
-                    # Fallback to direct call if trade_manager not injected
                     from shortcircuit.execution.signal_manager import get_signal_manager
                     get_signal_manager().record_outcome(symbol, pnl)
                     logger.info(f"Phase 69 Outcome recorded for {symbol} (direct): ₹{pnl:.2f}")
         except Exception as e:
             logger.error(f"[CLOSE] G13 record failed: {e}")
 
-        # Final state cleanup
         self.active_positions.pop(symbol, None)
         self.hard_stops.pop(symbol, None)
         self.exit_in_progress.pop(symbol, None)
@@ -513,15 +503,11 @@ class OrderManager:
             except Exception:
                 pass
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # Hard Stop Monitor
-    # ─────────────────────────────────────────────────────────────────────────
 
     async def monitor_hard_stop_status(self, symbol: str) -> bool:
         """
         Detects SL fill from broker orderbook.
         Returns True when hard-stop fill detected and state is closed.
-        (Unchanged from Phase 44.4)
         """
         lock = self._get_lock(symbol)
         async with lock:
@@ -553,7 +539,7 @@ class OrderManager:
                 if not isinstance(orderbook, dict) or orderbook.get('s') != 'ok':
                     return False
 
-                # ── PHASE 99: MANUAL OVERRIDE DETECTION ("Driver's Seat") ──
+                # Manual-override detection ("driver's seat")
                 # TRANSIT counts as live — an order en route to the exchange is a
                 # real resting order, and ignoring it hides genuine manual edits.
                 pending_orders = [
@@ -602,7 +588,6 @@ class OrderManager:
                             f"[HARD_STOP] Filled for {symbol} (sl_id={sl_id}). "
                             "Syncing state/capital/db cleanup."
                         )
-                        # Calculate PnL
                         pnl = 0.0
                         if exit_price > 0:
                             entry_price = pos.get('entry_price', 0)
@@ -627,9 +612,6 @@ class OrderManager:
 
             return False
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # Today's Trades
-    # ─────────────────────────────────────────────────────────────────────────
 
     async def get_today_trades(self) -> list:
         try:
@@ -647,21 +629,17 @@ class OrderManager:
             logger.error(f"Error fetching today's trades: {e}")
             return []
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # Startup Reconciliation
-    # ─────────────────────────────────────────────────────────────────────────
 
     async def startup_reconciliation(self):
         """
         Runs at startup to sync state.
-        Phase 44.6: Also triggers initial capital sync from Fyers.
+        Also triggers initial capital sync from Fyers.
         """
         import time
         start_time = time.time()
         logger.info("🔍 [STARTUP] Running Async Order Reconciliation...")
 
         try:
-            # DB Pool Warmup
             if self.db:
                 try:
                     pool = await self.db.get_pool()
@@ -671,11 +649,10 @@ class OrderManager:
                 except Exception as e:
                     logger.warning(f"DB Pool warmup failed: {e}")
 
-            # FIX 2 (Startup): Initial capital sync from Fyers
+            # Initial capital sync from Fyers
             if self.capital:
                 await self.capital.sync(self.broker)
 
-            # Orphan Check
             open_positions = await self.broker.get_all_positions()
             for pos in open_positions:
                 qty    = pos.get('qty', 0)
@@ -685,7 +662,6 @@ class OrderManager:
                     if self.telegram:
                         await self.telegram.send_alert(f"⚠️ **ORPHAN**: {symbol} ({qty})")
 
-            # Cancel Pending Orders
             loop = asyncio.get_event_loop()
             orderbook = await loop.run_in_executor(None, self.broker.rest_client.orderbook)
             if orderbook and isinstance(orderbook, dict) and orderbook.get('s') == 'ok':
@@ -712,13 +688,11 @@ class OrderManager:
         except Exception as e:
             logger.critical(f"🔥 [STARTUP] Failed: {e}")
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # ENTRY — Core Fix
-    # ─────────────────────────────────────────────────────────────────────────
+    # Entry
 
     async def enter_position(self, signal: dict) -> Optional[dict]:
         """
-        Phase 44.6: Async Entry + SL-M with full capital utilization.
+        Async Entry + SL-M with full capital utilization.
 
         FIX 1: compute_qty() uses real Fyers margin, not virtual/hardcoded figure.
         FIX 2: acquire_slot() called after confirmed fill (was missing entirely).
@@ -731,7 +705,7 @@ class OrderManager:
         async with lock:
             logger.info(f"🚀 [ENTRY] Processing {symbol}...")
 
-            # ── Auto Mode Gate ────────────────────────────────────────────
+            # Auto Mode Gate
             if self.telegram and hasattr(self.telegram, 'is_auto_mode'):
                 if not self.telegram.is_auto_mode():
                     logger.critical(
@@ -740,7 +714,7 @@ class OrderManager:
                     )
                     return None
 
-            # ── FIX 1: Sizing via compute_qty (full Fyers margin utilization) ──
+            # Sizing via compute_qty (full Fyers margin utilization)
             ltp = signal.get('ltp', 0)
             if ltp == 0:
                 ltp = await self.broker.get_ltp(symbol) or 0
@@ -750,10 +724,8 @@ class OrderManager:
                 return None
 
 
-            # Phase 91.2: G14 Leverage Guard removed.
-            # For intraday (MIS) orders, Fyers assigns leverage automatically.
-            # If a stock doesn't qualify, Fyers throws an API error caught below.
-
+            # There is no local leverage guard: Fyers assigns MIS leverage itself
+            # and rejects the order if the symbol does not qualify, which is caught below.
 
 
             # Resolved before the branch: the exception handler and the 4x fallback
@@ -766,7 +738,6 @@ class OrderManager:
             if self.capital:
                 qty, required_capital, margin_req = self.capital.compute_qty(symbol, ltp, dynamic_leverage)
             else:
-                # Fallback if capital manager not injected
                 buying_power = 9000.0
                 raw_qty = buying_power / ltp
                 qty = int(math.floor(raw_qty))
@@ -774,7 +745,7 @@ class OrderManager:
                 margin_req = required_capital / 5.0
                 logger.warning(f"[SIZING] Capital manager not injected — using fallback ₹{buying_power}")
 
-            # PRD: Spread > 0.4% -> CAUTIOUS execution (reduced size)
+            # A spread above 0.4% downgrades to CAUTIOUS execution (reduced size).
             if signal.get('execution_mode') == 'CAUTIOUS':
                 old_qty = qty
                 qty = int(math.floor(qty * 0.5))
@@ -782,7 +753,7 @@ class OrderManager:
                 margin_req *= 0.5
                 logger.warning(f"⚠️ [CAUTIOUS SIZE] {symbol} qty reduced from {old_qty} to {qty} (50%)")
 
-            # ── Qty Zero Guard ────────────────────────────────────────────
+            # Qty Zero Guard
             if qty == 0:
                 real_margin = self.capital._real_margin if self.capital else 0
                 msg = (
@@ -800,7 +771,7 @@ class OrderManager:
                 self._set_exec_cooldown(symbol, reason='ZERO_QTY', seconds=300)
                 return None
 
-            # Phase 94: Read direction from shortcircuit.config runtime switch
+            # Read direction from shortcircuit.config runtime switch
             signal_type = config.TRADE_DIRECTION
             side = 'SELL' if signal_type == 'SHORT' else 'BUY'
 
@@ -812,7 +783,7 @@ class OrderManager:
             try:
                 final_leverage = dynamic_leverage
 
-                # ── Step 1: Place Entry Order (with 4x Fallback) ──────────
+                # Step 1: Place Entry Order (with 4x Fallback)
                 entry_id = None
                 try:
                     entry_id = await self.broker.place_order(
@@ -882,7 +853,7 @@ class OrderManager:
                         f"Order ID: `{entry_id}`"
                     )
 
-                # ── Wait for fill ─────────────────────────────────────────
+                # Wait for fill
                 # With the order-socket envelope fixed, this now resolves on the
                 # real terminal frame (typically sub-second) instead of always
                 # burning the full timeout and being rescued by REST.
@@ -946,12 +917,11 @@ class OrderManager:
                         )
                     ltp = actual_fill
 
-                # ── FIX 2: Acquire Capital Slot AFTER confirmed fill ───────
-                # (This was completely missing before — capital was NEVER consumed)
+                # Acquire the capital slot only AFTER a confirmed fill.
                 if self.capital:
                     await self.capital.acquire_slot(symbol)
 
-                # ── FIX 4: ATR-Based SL ───────────────────────────────────
+                # ATR-Based SL
                 stop_price = self.compute_stop_loss(ltp, signal)
                 sl_side    = 'BUY' if side == 'SELL' else 'SELL'
 
@@ -1019,7 +989,7 @@ class OrderManager:
                 logger.info(f"🛡️ SL Placed: {sl_id} @ ₹{stop_price:.2f}")
                 self.hard_stops[symbol] = sl_id
 
-                # ── Step 4: Register Position ─────────────────────────────
+                # Step 4: Register Position
                 pos_state = {
                     'symbol':     symbol,
                     'qty':        qty,
@@ -1030,8 +1000,8 @@ class OrderManager:
                     'entry_time': datetime.now(),
                     'entry_price': ltp,
                     'stop_loss':  stop_price,
-                    'obs_id':     signal.get('obs_id'),  # Phase 71: ML Link
-                    # Phase 51: G13 Targets for trade_manager monitoring
+                    'obs_id':     signal.get('obs_id'),  # ML Link
+                    # G13 Targets for trade_manager monitoring
                     'tp_targets': self.compute_take_profits(ltp, signal),
                     'leverage':   final_leverage,
                     # Carried so move_hard_stop can round to the SYMBOL's real tick
@@ -1049,14 +1019,14 @@ class OrderManager:
                             'direction': side,   # Use 'SELL'/'BUY' from line 490, not 'SHORT'
                             'qty':       qty,
                             'entry_price': ltp,
-                            'entry_id':  entry_id,   # Phase 93: Pass order ID for dedup
+                            'entry_id':  entry_id,   # Pass order ID for dedup
                             'leverage':  final_leverage
                         })
                         if getattr(self, 'trade_manager', None) and getattr(self.trade_manager, 'reconciliation_engine', None):
                             self.trade_manager.reconciliation_engine.mark_dirty()
                             self.trade_manager.reconciliation_engine.mark_recently_modified(symbol)
                     except Exception as db_err:
-                        # Non-fatal to execution, but important
+                        # A DB failure must not abort an order that already filled.
                         logger.error(f"❌ [ENTRY-DB] Failed to log entry for {symbol}: {db_err}")
 
                 cap_status = self.capital.get_slot_status() if self.capital else {}
@@ -1122,14 +1092,12 @@ class OrderManager:
                     await self.telegram.send_alert(failure_msg)
                 return None
 
-    # ─────────────────────────────────────────────────────────────────────────
     # EXIT
-    # ─────────────────────────────────────────────────────────────────────────
 
     async def safe_exit(self, symbol: str, reason: str, emergency: bool = False) -> bool:
         """
         Async Safe Exit with WebSocket Race Condition Protection.
-        Phase 44.6: _finalize_closed_position now calls release_slot(broker).
+        _finalize_closed_position now calls release_slot(broker).
         """
         lock = self._get_lock(symbol)
 
@@ -1151,7 +1119,7 @@ class OrderManager:
 
                 logger.info(f"🔻 [EXIT] Initiating Safe Exit for {symbol} ({reason})")
                 
-                # Phase 52: Cancel all pending orders BEFORE placing exit order
+                # Cancel all pending orders BEFORE placing exit order
                 # Prevents phantom SL from executing AFTER position is closed
                 try:
                     loop = asyncio.get_event_loop()
@@ -1173,7 +1141,7 @@ class OrderManager:
 
                 pos['status'] = 'CLOSING'
 
-                # STEP 1: CANCEL SL (Best-effort, non-blocking)
+                # Step 1: cancel the SL (best-effort, non-blocking).
                 # The SL may already be cancelled/triggered/filled by the exchange.
                 # This is expected during fast price action — DO NOT abort exit.
                 sl_id = pos.get('sl_id') or self.hard_stops.get(symbol)
@@ -1192,7 +1160,7 @@ class OrderManager:
                     if symbol in self.hard_stops:
                         del self.hard_stops[symbol]
 
-                # STEP 2: CHECK IF POSITION STILL EXISTS ON BROKER
+                # Step 2: does the position still exist at the broker?
                 # If SL already filled (fast price action), position is already closed.
                 try:
                     # force_rest: this decides whether we skip placing an exit order.
@@ -1235,7 +1203,7 @@ class OrderManager:
                 except Exception as pos_check_err:
                     logger.warning(f"[SAFE_EXIT] Position check failed: {pos_check_err} — proceeding with exit order anyway.")
 
-                # STEP 3: PLACE EXIT ORDER
+                # Step 3: place the exit order.
                 exit_side = 'BUY' if pos['side'] == 'SHORT' else 'SELL'
                 exit_id = None
                 try:
@@ -1277,7 +1245,7 @@ class OrderManager:
                             )
                         return False
 
-                # STEP 4: WAIT FOR FILL (15s)
+                # Step 4: wait for the fill (15s).
                 if exit_id:
                     filled = await self.broker.wait_for_fill(exit_id, timeout=15.0)
                     if filled:
@@ -1285,7 +1253,7 @@ class OrderManager:
                     else:
                         logger.warning(f"⚠️ Exit fill not confirmed via WS for {symbol} — checking REST fallback")
 
-                # STEP 5: CLEANUP (releases capital slot + re-syncs margin)
+                # Step 5: cleanup — releases the capital slot and re-syncs margin.
                 exit_price = 0.0
                 pnl = 0.0
                 # Always try to get exit price, even if wait_for_fill timed out
@@ -1346,7 +1314,6 @@ class OrderManager:
                 return False
             finally:
                 self.exit_in_progress[symbol] = False
-
 
 
     async def partial_exit(self, symbol: str, exit_qty: int, reason: str) -> bool:
@@ -1438,7 +1405,7 @@ class OrderManager:
 
     async def move_hard_stop(self, symbol: str, new_stop_price: float, new_qty: Optional[int] = None) -> bool:
         """
-        Phase 97.2: Move the broker-side SL-M order to a new stop price (e.g. for BE activation).
+        Move the broker-side SL-M order to a new stop price (e.g. for BE activation).
         Optionally resizes the SL order if new_qty is provided (for partial exits).
         Strategy: Modify the existing SL-M order to the new stop price and/or qty.
         Falls back to cancel+replace if modify is not supported.

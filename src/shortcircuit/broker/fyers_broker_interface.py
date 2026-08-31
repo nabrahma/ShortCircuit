@@ -1,4 +1,3 @@
-# fyers_broker_interface.py
 """
 Unified Broker Interface with WebSocket-First Architecture.
 
@@ -11,10 +10,8 @@ Design:
 Usage (from shortcircuit.execution.order_manager):
     broker = FyersBrokerInterface(access_token, db_manager)
     await broker.initialize()
-    
-    # All calls look the same as before:
     order_id = await broker.place_order(symbol='NSE:SBIN-EQ', side='SELL', qty=100)
-    await broker.wait_for_fill(order_id)  # Uses WebSocket push, not polling!
+    await broker.wait_for_fill(order_id)   # resolves on a WS push, not by polling
 """
 
 import os
@@ -39,9 +36,7 @@ from shortcircuit.broker.rest_limiter import rest_limiter, Priority
 
 logger = logging.getLogger(__name__)
 
-# ===================================================================
-# WEBSOCKET IMPORT BLOCK (with graceful fallback)
-# ===================================================================
+# WebSocket imports, with a graceful fallback when the SDK is absent.
 
 _WS_AVAILABLE = False
 _data_ws_module = None
@@ -241,9 +236,9 @@ class CacheEntry:
     oi: float
     bid: float
     ask: float
-    open_price: float  # Phase 51
-    high_price: float  # Phase 51
-    prev_close: float  # Phase 51
+    open_price: float
+    high_price: float
+    prev_close: float
     last_time: float
     source: CacheEntrySource
     tick_count: int = 0
@@ -273,7 +268,7 @@ class MinuteCandleAggregator:
         self.current_candles: Dict[str, Candle] = {}  # symbol -> partially formed Candle
         self.minute_start_volume: Dict[str, float] = {} # symbol -> volume at start of current minute
         
-        # Phase 88: Real-time Slope Metrics
+        # Real-time Slope Metrics
         self.vwap_history: Dict[str, deque[float]] = {} # symbol -> deque[float] (VWAP values)
         self._lock = threading.Lock()
 
@@ -308,17 +303,15 @@ class MinuteCandleAggregator:
 
                 self.minute_start_volume[symbol] = tick.volume
 
-                # Phase 88: Update rolling VWAP history for slope calculation
+                # Update rolling VWAP history for slope calculation
                 if current:
                     if symbol not in self.vwap_history:
                         self.vwap_history[symbol] = deque(maxlen=60) # Store 1 hour of VWAPs
                     
                     # Calculate VWAP for the finalized candle
                     tp = (current.high + current.low + current.close) / 3
-                    # Simplified rolling VWAP if weight is not available, but ideally we use incremental
-                    # For slope, we just need the series of VWAP values or Close prices.
-                    # We'll use finalized candle close as the VWAP proxy for now if full calculation is too heavy,
-                    # but aggregator has volume, so let's do it right.
+                    # The slope only needs a consistent series, so the finalized
+                    # close stands in for the candle's VWAP here.
                     self.vwap_history[symbol].append(current.close) 
 
                 new_candle = Candle(
@@ -349,7 +342,7 @@ class MinuteCandleAggregator:
 
     def get_vwap_slope(self, symbol: str, window: int = 30) -> float:
         """
-        Phase 88: Calculate Slope on-the-fly from memory cache.
+        Calculate Slope on-the-fly from memory cache.
         Returns Normalized Linear Regression Slope (dy/dx).
         """
         import numpy as np
@@ -439,7 +432,7 @@ class FyersBrokerInterface:
         self.order_ws_connected = False
         self.ws_reconnecting = False
         
-        # Phase 82: Local Candle Engine
+        # Local Candle Engine
         self.aggregator = MinuteCandleAggregator(
             max_candles=getattr(config, "P82_MAX_LOCAL_CANDLES", 500)
         )
@@ -472,7 +465,7 @@ class FyersBrokerInterface:
         # Watchlist (symbols to subscribe)
         self.subscribed_symbols: Set[str] = set()
         
-        # Order WebSocket state (Added in Phase 42.2.5)
+        # Order WebSocket state
         self._fill_callbacks: Dict[str, Callable] = {}   # order_id -> callback function
         self._order_cache: Dict[str, Dict] = {}      # order_id -> latest order message
         self._position_cache: Dict[str, Dict] = {}   # symbol -> latest raw position message
@@ -487,26 +480,26 @@ class FyersBrokerInterface:
         self._position_cache_lock = threading.Lock()
         self._position_cache_last_event: float = 0.0
         
-        # Phase 44.7 / PRD-007 — WS quote cache for scanner pre-filter
-        # (threading imported at module level L28)
+        # WS quote cache, read by the scanner pre-filter.
         self._quote_cache: dict[str, CacheEntry] = {}
         self._quote_cache_lock = threading.Lock()
         self._ws_subscribed_symbols: list[str] = []
         
-        # Phase 79: Leverage cache (symbol -> leverage_float)
+        # Leverage cache (symbol -> leverage_float)
         self._leverage_cache: dict[str, float] = {}
         self._leverage_cache_lock = threading.Lock()
-        self._low_leverage_blacklist: set[str] = set() # Phase 89.7: Session-long block
+        self._low_leverage_blacklist: set[str] = set() # Session-long block
         self._ws_subscribed_symbols_set: set[str] = set()
 
-        # PRD-007: Cache reliability state machine
+        # Cache reliability state machine.
         self._cache_state: str = "UNINITIALIZED"  # UNINITIALIZED | PRIMING | READY | DEGRADED
         self._cache_ready_event = threading.Event()  # Set when readiness threshold first crossed
         self._subscribed_count: int = 0
         self._ws_subscribed_symbols: list[str] = []
         self._ws_subscribed_symbols_set: set[str] = set()
 
-        # PRD-007: Cache reliability state machine (now backed by BrokerHealthState enum)
+        # Same state machine, backed by the BrokerHealthState enum. The string
+        # form above is kept as a legacy compatibility property.
         self._health_state: BrokerHealthState = BrokerHealthState.UNINITIALIZED
         self._cache_state: str = "UNINITIALIZED"  # legacy compat property (derived from _health_state)
         self._cache_ready_event = threading.Event()  # Set when readiness threshold first crossed
@@ -517,28 +510,28 @@ class FyersBrokerInterface:
         self._reprime_requested: bool = False
         self._last_reprime_time: float = 0.0
         self._consecutive_reprime_failures: int = 0
-        self._sub_ack = threading.Event()  # BUG-02: blocks until Fyers confirms subscription
+        self._sub_ack = threading.Event()  # blocks until Fyers confirms subscription
         self._ws_cache_stop = False
 
-        # PRD-WS Phase 1: Independent per-socket health tracking
+        # Health is tracked per socket: the two reconnect independently.
         self._data_ws_health:  WSHealth = WSHealth()
         self._order_ws_health: WSHealth = WSHealth()
 
-        # PRD-WS Phase 4: Session-level recovery telemetry
+        # Session-level recovery telemetry
         self._total_reprime_attempts:        int   = 0
         self._total_reconnect_attempts:      int   = 0
         self._capital_sync_timeout_count:    int   = 0
         self._reconcile_timeout_count:       int   = 0
         self._session_degraded_seconds:      float = 0.0
         self._degraded_state_entered_at:     float = 0.0  # epoch when last entered a non-READY state
-        self._last_cached_funds:             dict  = {}   # Phase 4: last known good funds
+        self._last_cached_funds:             dict  = {}   # last known good funds
         self._health_state_entered_at:       float = time.time()
 
-        # PRD-3: Telegram hook for WS cache alerts
+        # Telegram hook for WS cache alerts
         # Set via broker.set_telegram(bot) from shortcircuit.runtime.supervisor.py after both are constructed
         self._telegram_bot = None
 
-        # PRD-3: Severe-degraded tracking (fresh < 5% for > 30s triggers recovery)
+        # Severe-degraded tracking (fresh < 5% for > 30s triggers recovery)
         self._severe_degraded_since: float = 0.0      # epoch when fresh% first dropped below 5%
         self._last_degraded_telegram_alert: float = 0.0   # throttle Telegram spam
         self._degraded_scan_count: int = 0            # incremented by scanner for banner log
@@ -546,7 +539,7 @@ class FyersBrokerInterface:
         # Background tasks
         self.tasks = []
 
-    # ── Phase PRD-WS: State Transition Helper ─────────────────────────
+    # State transition helper
     def _transition_health_state(self, new_state: BrokerHealthState, reason: str = ""):
         """
         Single canonical method for all health state transitions.
@@ -840,8 +833,8 @@ class FyersBrokerInterface:
         Handle market tick from WebSocket.
         """
         try:
-            # ── Phase 44.7: Update scanner quote cache ─────────────
-            # BUG-02: Detect subscription ACK from Fyers
+            # Update scanner quote cache
+            # Detect subscription ACK from Fyers
             msg_type = message.get('type')
             if msg_type == 'sub' and message.get('code') == 200:
                 self._sub_ack.set()
@@ -859,7 +852,7 @@ class FyersBrokerInterface:
                     prev_entry = self._quote_cache.get(symbol)
                     
                     # Merge incoming tick data with prev_entry fallbacks
-                    # Phase 85: Coerce None → 0 to prevent NoneType comparison crashes on pre-market ticks
+                    # Coerce None → 0 to prevent NoneType comparison crashes on pre-market ticks
                     ltp = message.get('ltp', prev_entry.last_price if prev_entry else 0) or 0
                     volume = message.get('vol_traded_today', message.get('v', prev_entry.volume if prev_entry else 0)) or 0
                     oi = message.get('oi', prev_entry.oi if prev_entry else 0) or 0
@@ -892,7 +885,7 @@ class FyersBrokerInterface:
                         source=CacheEntrySource.WS_TICK,
                         tick_count=tick_count,
                     )
-                    # PRD-007: Advance PRIMING → READY state machine on each tick
+                    # Advance PRIMING → READY state machine on each tick
                     self._check_cache_readiness_internal()
 
             # Fyers DataSocket returns dict structure
@@ -904,7 +897,7 @@ class FyersBrokerInterface:
             
             self.tick_cache[tick.symbol].append(tick)
             
-            # Phase 82: Update Local Candle Engine
+            # Update Local Candle Engine
             if getattr(config, "P82_LOCAL_CANDLES_ENABLED", False):
                 self.aggregator.update(tick)
             
@@ -918,10 +911,8 @@ class FyersBrokerInterface:
         except Exception as e:
             logger.error(f"Error handling tick: {e}")
 
-    # ================================================================
-    # ORDER WEBSOCKET CALLBACKS
+    # Order WebSocket callbacks
     # All called by FyersOrderSocket when events arrive
-    # ================================================================
 
     def _signal_order_waiters(self, order_id: str) -> None:
         """
@@ -1221,9 +1212,9 @@ class FyersBrokerInterface:
         self._cache_ready_event.clear()
         self._prime_start_ts = time.time()
         self._reprime_requested = False
-        self._sub_ack.clear()  # BUG-02: reset ACK before subscribing
+        self._sub_ack.clear()  # reset ACK before subscribing
 
-        # BUG-02: 3s post-connect delay — Fyers needs auth handshake to complete server-side
+        # 3s post-connect delay — Fyers needs auth handshake to complete server-side
         logger.info("[WS Cache] Waiting 3s post-connect before subscribing...")
         time.sleep(3)
 
@@ -1244,7 +1235,7 @@ class FyersBrokerInterface:
                 logger.error(f"[WS Cache] Subscribe batch {i//batch_size} failed: {e}")
         logger.info(f"[WS Cache] Subscribed {total}/{len(symbols)} symbols to dataws SymbolUpdate — state=PRIMING")
 
-        # BUG-02: Wait for subscription ACK (10s timeout)
+        # Wait for subscription ACK (10s timeout)
         if not self._sub_ack.wait(timeout=10.0):
             logger.critical(
                 "[WS Cache] ❌ No subscription ACK from Fyers after 10s — "
@@ -1286,9 +1277,9 @@ class FyersBrokerInterface:
                     'oi': entry.oi,
                     'bid': entry.bid,
                     'ask': entry.ask,
-                    'open': entry.open_price,   # Phase 51
-                    'high': entry.high_price,   # Phase 51
-                    'pc': entry.prev_close,     # Phase 51
+                    'open': entry.open_price,
+                    'high': entry.high_price,
+                    'pc': entry.prev_close,
                     'ts': entry.last_time,
                     'source': entry.source.value,
                     'tick_count': entry.tick_count,
@@ -1345,9 +1336,9 @@ class FyersBrokerInterface:
                         oi=qv.get("oi", 0),
                         bid=qv.get("bid", 0),
                         ask=qv.get("ask", 0),
-                        open_price=qv.get("o", qv.get("open_price", 0)), # Phase 51
-                        high_price=qv.get("h", qv.get("high_price", 0)), # Phase 51
-                        prev_close=qv.get("pc", qv.get("prev_close_price", 0)), # Phase 51
+                        open_price=qv.get("o", qv.get("open_price", 0)),
+                        high_price=qv.get("h", qv.get("high_price", 0)),
+                        prev_close=qv.get("pc", qv.get("prev_close_price", 0)),
                         last_time=now_ts,
                         source=CacheEntrySource.REST_SEED,
                         tick_count=0,
@@ -1366,9 +1357,7 @@ class FyersBrokerInterface:
             return symbol in self._quote_cache
 
 
-    # ================================================================
-    # PRD-007: Cache Readiness & Health
-    # ================================================================
+    # Cache Readiness & Health
 
     def _get_readiness_threshold(self) -> float:
         """Returns readiness threshold based on market session timing."""
@@ -1512,7 +1501,7 @@ class FyersBrokerInterface:
             'state':     self._cache_state,
         }
 
-    # ── Phase PRD-WS: Freshness Validation Helper ──────────────────────────────
+    # Freshness validation helper
 
     def _wait_for_freshness_recovery(self, timeout_secs: float = 60.0) -> bool:
         """
@@ -1544,7 +1533,6 @@ class FyersBrokerInterface:
         )
         return False
 
-    # ──────────────────────────────────────────────────────────────────────────────────────
     def _trigger_reprime(self):
         """Unsubscribe all, wait, then re-subscribe. Escalates to full reconnect after 3 failures."""
         if self._reprime_requested:
@@ -1614,7 +1602,7 @@ class FyersBrokerInterface:
             if self._ws_subscribed_symbols:
                 self.subscribe_scanner_universe(self._ws_subscribed_symbols)
 
-            # Phase PRD-WS 2: Validate freshness was actually restored
+            # Validate freshness was actually restored
             recovered = self._wait_for_freshness_recovery(timeout_secs=60)
             if recovered:
                 self._consecutive_reprime_failures = max(0, self._consecutive_reprime_failures - 1)
@@ -1658,7 +1646,7 @@ class FyersBrokerInterface:
                 time.sleep(2)
             if self._ws_subscribed_symbols:
                 self.subscribe_scanner_universe(self._ws_subscribed_symbols)
-                # Phase PRD-WS 2: Hard freshness validation after reconnect
+                # Hard freshness validation after reconnect
                 recovered = self._wait_for_freshness_recovery(timeout_secs=90)
                 if recovered:
                     logger.info("[WS Cache] ✅ Full reconnect succeeded — freshness validated")
@@ -1716,7 +1704,7 @@ class FyersBrokerInterface:
                 fresh_pct = snap['fresh'] / total
                 known_pct = (snap['fresh'] + snap['stale'] + snap.get('seeded', 0)) / total
 
-                # ── Classify health ─────────────────────────────────────────────────
+                # Classify health
                 classified = self._classify_health(fresh_pct)
                 current    = self._health_state
 
@@ -1768,7 +1756,7 @@ class FyersBrokerInterface:
                                 f"Auto-recovery will begin in 30s if not resolved."
                             )
 
-                # ── Canonical health log line ─────────────────────────────────────────────
+                # Canonical health log line
                 logger.info(
                     f"[WS Cache] CACHE HEALTH | Fresh: {snap['fresh']}/{snap['total']} ({fresh_pct:.1%}) "
                     f"| Stale: {snap['stale']} | Seeded: {snap.get('seeded', 0)} | Missing: {snap['missing']} "
@@ -1776,7 +1764,7 @@ class FyersBrokerInterface:
                     f"| Known: {known_pct:.1%} | State: {self._health_state.value} | Status: {classified.value}"
                 )
 
-                # ── Recovery trigger ───────────────────────────────────────────────────
+                # Recovery trigger
                 if self._severe_degraded_since > 0 and current not in recovery_states:
                     elapsed_severe = time.time() - self._severe_degraded_since
                     if elapsed_severe >= 30:
@@ -1786,7 +1774,7 @@ class FyersBrokerInterface:
                         )
                         self._trigger_reprime()
 
-                # Old CRITICAL path (5-50% fresh, 2 consecutive cycles)
+                # CRITICAL path: 5-50% fresh for 2 consecutive cycles.
                 elif classified == BrokerHealthState.CRITICAL:
                     if not hasattr(self, '_consecutive_critical_count'):
                         self._consecutive_critical_count = 0
@@ -1800,7 +1788,7 @@ class FyersBrokerInterface:
                 else:
                     self._consecutive_critical_count = 0
 
-                # ── UNRECOVERABLE banner ─────────────────────────────────────
+                # UNRECOVERABLE banner
                 if self._health_state == BrokerHealthState.UNRECOVERABLE:
                     logger.critical(
                         "[WS Cache] ⛔ UNRECOVERABLE — "
@@ -1822,11 +1810,8 @@ class FyersBrokerInterface:
         new_symbols = [s for s in symbols if s not in self.subscribed_symbols]
         if new_symbols and self.data_ws:
             try:
-                # Fyers subscribe is synchronous usually and thread-safe? 
-                # Better to run in executor if we are unsure.
-                # But SDK documentation usually suggests straight call.
-                # However, since data_ws.connect is running in a thread, we calling methods on it is tricky.
-                # The SDK methods `subscribe` usually send a message to the socket.
+                # subscribe() only queues a message on the socket, so it is
+                # called directly rather than pushed through an executor.
                 self.data_ws.subscribe(symbols=new_symbols, data_type="SymbolUpdate")
                 self.subscribed_symbols.update(new_symbols)
                 logger.info(f"Subscribed to {len(new_symbols)} symbols via WebSocket")
@@ -1834,9 +1819,7 @@ class FyersBrokerInterface:
                 logger.error(f"Symbol subscription failed: {e}")
     
 
-    # ===================================================================
     # REST API Wrappers with Rate Limit
-    # ===================================================================
     
     ORDER_PRIORITY_ENDPOINTS = frozenset({
         'place_order', 'cancel_order', 'modify_order', 'get_order_status',
@@ -2162,7 +2145,6 @@ class FyersBrokerInterface:
             return None
 
 
-
     async def _check_order_status_rest(
         self, order_id: str
     ) -> Optional[FyersOrderStatus]:
@@ -2214,7 +2196,7 @@ class FyersBrokerInterface:
     async def get_funds(self) -> dict:
         """
         Fetch available margin from Fyers /funds endpoint.
-        Phase 93: Rate-limit aware — backs off 180s after a -429 response.
+        Rate-limit aware — backs off 180s after a -429 response.
         Phase PRD-WS 4: Hard 15s timeout — returns cached value on timeout, never blocks runtime.
         """
         # Rate-limit cooldown check
@@ -2467,8 +2449,7 @@ class FyersBrokerInterface:
         for task in self.tasks:
             task.cancel()
         
-        # Close sockets?
-        # Fyers SDK doesn't always have clean close methods exposed easily for async.
+        # Sockets are left to the SDK: it exposes no reliable async close.
         pass
 
     async def disconnect(self):
@@ -2489,7 +2470,7 @@ class FyersBrokerInterface:
         try:
             data_ws = getattr(self, 'data_ws', None) or getattr(self, '_data_ws', None)
             if data_ws:
-                # Phase 98.3: Fyers SDK may use stop()/disconnect() instead of close()
+                # Fyers SDK may use stop()/disconnect() instead of close()
                 _stopped = False
                 for _method in ('stop', 'disconnect', 'close'):
                     fn = getattr(data_ws, _method, None)
@@ -2507,7 +2488,7 @@ class FyersBrokerInterface:
         try:
             order_ws = getattr(self, 'order_ws', None) or getattr(self, '_order_ws', None)
             if order_ws:
-                # Phase 98.3: Fyers SDK may use stop()/disconnect() instead of close()
+                # Fyers SDK may use stop()/disconnect() instead of close()
                 _stopped = False
                 for _method in ('stop', 'disconnect', 'close'):
                     fn = getattr(order_ws, _method, None)

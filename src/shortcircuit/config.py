@@ -5,12 +5,9 @@ import pytz
 from dotenv import load_dotenv
 from pathlib import Path
 
-# Load environment variables
 load_dotenv()
 
-# ============================================================================
-# 1. CREDENTIALS & SENSITIVE DATA
-# ============================================================================
+# Credentials — values come from .env, never from this file.
 FYERS_CLIENT_ID = os.getenv("FYERS_CLIENT_ID")
 FYERS_SECRET_ID = os.getenv("FYERS_SECRET_ID")
 FYERS_REDIRECT_URI = os.getenv("FYERS_REDIRECT_URI", "https://trade.fyers.in/api-login/redirect-uri/index.html")
@@ -18,27 +15,21 @@ FYERS_REDIRECT_URI = os.getenv("FYERS_REDIRECT_URI", "https://trade.fyers.in/api
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# ============================================================================
-# 2. CORE TRADING CONFIG (CRITICAL)
-# ============================================================================
-# Session Safety
+# Core trading config
 # Armed on boot BY DESIGN — do not change to False. Telegram is unreliable on this
 # connection, so requiring a manual /auto on each morning meant missed sessions.
 # Trading is still gated by TRADING_ENABLED (below), which MarketSession only turns
 # on at 09:30 IST. Disarm at runtime with /auto off; nothing disarms it automatically.
-AUTO_MODE = True            # Controls if the bot auto-executes trades (toggle via Telegram)
-MAX_SESSION_LOSS_INR = 500  # Max cumulative intra-day loss before bot halts (Phase 69)
+AUTO_MODE = True
+MAX_SESSION_LOSS_INR = 500  # Cumulative intraday loss that halts the bot
 DAILY_TARGET_INR = -1       # Set to -1 for Dynamic 5% Mode (Automatic calculation)
                             # Or set a fixed amount like ₹75 to override.
                             # When hit: only EXTREME or MAX_CONVICTION signals allowed.
 INTRADAY_LEVERAGE = 5.0    # Fixed 5× leverage (NSE standard requirement)
 
-# Phase 94: Trade Direction Switch
-# Controls whether bot enters SHORT (SELL) or LONG (BUY) positions.
-# Default: SHORT. Toggle via Telegram /mode buy | /mode sell at runtime.
+# Toggle at runtime with Telegram /mode buy | /mode sell.
 TRADE_DIRECTION = 'SHORT'  # 'SHORT' or 'LONG'
 
-# Timing (IST)
 # Restored to 45 on 2026-08-30. The reasoning that set this to 0 rested on two
 # live days and one trade (NSE:BAJAJELEC-EQ) that needed 67 minutes. Replaying
 # all 46 LIVE trades since 11 Jun against real 1-minute candles put the 45-minute
@@ -46,11 +37,8 @@ TRADE_DIRECTION = 'SHORT'  # 'SHORT' or 'LONG'
 # 7-11 Aug, and level afterwards. 0 disables the exit entirely.
 MAX_HOLD_TIME_MINUTES = 45
 
-# ============================================================================
-# 3. SCANNER & G5 STRETCH CONSTANTS
-# ============================================================================
-# Gain Floors & Limits
-SCANNER_GAIN_MIN_PCT: float = 7.5  # Phase 65: Synchronized with P65_G1 floor
+# Scanner universe filters
+SCANNER_GAIN_MIN_PCT: float = 7.5  # Kept in sync with the G1 gate floor
 SCANNER_GAIN_MAX_PCT: float = 18.0 # Protection against upper-circuit runners
 # 2026-08-12: halved from 333,333. NSE:ORISSAMINE-EQ ran and broke down that
 # morning but only crossed the old floor at 11:56 IST, ~26 min after the move,
@@ -83,18 +71,14 @@ SCANNER_MIN_LEVERAGE: float = 3.5
 # Past the budget, remaining symbols pass through unscreened rather than
 # delaying the scan — main.py times a scan out at 90s.
 SCANNER_LEVERAGE_BUDGET_SECONDS: float = 15.0
-CANDLE_BODY_RATIO_MIN: float = 0.382   # Phase 91.3: Scientific threshold (Fibonacci 0.382) for "clean" bodies
+CANDLE_BODY_RATIO_MIN: float = 0.382   # Fibonacci 0.382 — body must dominate the candle
 
-# G5 Stretch Thresholds
-DAY_GAIN_PCT_THRESHOLD = 7.5       # Duplicate alias used in legacy paths
+DAY_GAIN_PCT_THRESHOLD = 7.5       # Alias for SCANNER_GAIN_MIN_PCT, still read by legacy paths
 
-# Operations
-SCANNER_PARALLEL_WORKERS = 3 # Reverted to 3 to prevent Fyers 429 Rate Limits
+SCANNER_PARALLEL_WORKERS = 3  # Above 3, Fyers starts returning 429s
 WS_TICK_FRESHNESS_TTL_SECONDS = 180.0
 
-# ============================================================================
-# STRATEGY: BackToVWAPShort
-# ============================================================================
+# Strategy: BackToVWAPShort
 STRATEGY_VWAP_SD_FLOOR: float = 3.3       # Lowered from 4.5 — allows moderately stretched setups
 STRATEGY_VWAP_SD_HIGH: float = 5.0        # HIGH confidence tier threshold
 STRATEGY_VWAP_SD_EXTREME: float = 6.0     # EXTREME confidence tier threshold
@@ -109,15 +93,13 @@ STRATEGY_VOL_FADE_LOOKBACK: int = 15         # Candles to look back for volume b
 STRATEGY_RSI_DIVERGENCE_WINDOW: int = 25     # Window for swing-based RSI divergence check
 STRATEGY_MOMENTUM_DECAY_RATIO: float = 0.85  # Fast slope must be < slow * this ratio
 
-# ============================================================================
-# 6. EXIT ENGINE & RISK MULTIPLIERS
-# ============================================================================
+# Exit engine and risk multipliers
 SL_ATR_MULTIPLIER = 0.5
 SL_MIN_TICK_BUFFER = 3
 
 P52_CLEANUP_ON_STOP_FOCUS: bool = True 
 
-# ── Take-profit engine (restored 2026-08-30) ────────────────────────────────
+# Take-profit engine (restored 2026-08-30)
 # Removed on 6 Aug by f6eae88 on the strength of two live days. Replaying all
 # 46 LIVE trades since 11 Jun on real 1-minute candles reversed that read: over
 # the green era, running no take-profit scored -3.10 against +3.15 for the
@@ -140,23 +122,15 @@ TP_MODE: str = 'SCALE'
 # the scale-out and leaves the original stop where it is.
 P52_BREAKEVEN_AFTER_TP1: bool = True
 
-# ============================================================================
-# 7. LOGGING (PHASE 70-74)
-# ============================================================================
 LOG_FILE = "logs/bot.log"
-
-# ============================================================================
-# 8. FEATURE TOGGLES & LEGACY (PHASE 41 - PHASE 44)
-# ============================================================================
 
 RVOL_VALIDITY_GATE_ENABLED = True
 RVOL_MIN_CANDLES = 15
 
-# Phase 44.4: Telegram UX
 ETF_CLUSTER_DEDUP_ENABLED = True
 ETF_CLUSTER_KEYWORDS = ["SILVER"]
 
-# Legacy & Backward Compatibility
+# MarketSession flips this on at 09:30 IST; nothing trades while it is False.
 TRADING_ENABLED = False 
 
 MARKET_SESSION_CONFIG = {
@@ -178,17 +152,14 @@ def minutes_since_market_open() -> float:
     delta = now - market_open
     return delta.total_seconds() / 60.0
 
-# Phase 81: Telegram Hardening & Menu
 P81_TELEGRAM_MENU_ENABLED        = True
 P81_TELEGRAM_RATE_LIMIT_HZ       = 2
 
-# ============================================================================
-# PHASE 82: LOCAL CANDLE ENGINE
-# ============================================================================
+# Local candle engine
 P82_LOCAL_CANDLES_ENABLED = True
 P82_MAX_LOCAL_CANDLES = 500
 
-# ── VWAP anchor (restored to ROLLING 2026-08-30) ────────────────────────────
+# VWAP anchor (restored to ROLLING 2026-08-30)
 # features.enrich_dataframe computes a cumulative VWAP over whatever frame it
 # receives, so the frame length IS the anchor.
 #
@@ -211,10 +182,6 @@ P82_MAX_LOCAL_CANDLES = 500
 # Sample sizes are 4 and 11. This is a deliberate bet, not a demonstrated fact.
 VWAP_ANCHOR_MODE: str = 'ROLLING'
 VWAP_ROLLING_BARS: int = 100
-
-# ============================================================================
-# RESTORED MISSING PHASE CONSTANTS (Fixes runtime crashes)
-# ============================================================================
 
 MARKET_REGIME_CONFIG = {
     'strong_trend_threshold': 0.015

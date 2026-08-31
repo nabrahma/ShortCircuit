@@ -47,7 +47,7 @@ def gate() -> HTFConfluence:
     return HTFConfluence(StubFyers())
 
 
-# ── alpha strike bypass ───────────────────────────────────────────────────
+# alpha strike bypass
 
 def test_extreme_stretch_bypasses_the_gate_entirely(gate):
     """Above the bypass threshold G9 passes without looking at any data."""
@@ -73,7 +73,7 @@ def test_bypass_threshold_is_exclusive(gate):
     assert "Alpha Strike" not in msg
 
 
-# ── momentum physics ──────────────────────────────────────────────────────
+# momentum physics
 
 def test_accelerating_move_is_blocked(gate):
     """A still-accelerating move is the thing G9 is for."""
@@ -103,7 +103,7 @@ def test_sustained_trend_between_the_thresholds_is_blocked(gate):
     assert "Sustained Trend" in msg
 
 
-# ── fail-closed on missing data ───────────────────────────────────────────
+# fail-closed on missing data
 
 def test_missing_dataframe_blocks(gate):
     gate.fyers.response = {'s': 'error'}
@@ -126,7 +126,7 @@ def test_broker_exception_blocks_rather_than_propagating(gate):
     assert allowed is False
 
 
-# ── fail-open paths, recorded deliberately ────────────────────────────────
+# fail-open paths, recorded deliberately
 
 def test_unrecognised_close_column_is_fail_open(gate):
     """
@@ -150,7 +150,7 @@ def test_zero_price_in_candles_is_fail_open(gate):
     assert "Zero price" in msg
 
 
-# ── column-name compatibility ─────────────────────────────────────────────
+# column-name compatibility
 
 @pytest.mark.parametrize("column", ["c", "close"])
 def test_both_column_conventions_are_understood(gate, column):
@@ -164,7 +164,7 @@ def test_both_column_conventions_are_understood(gate, column):
     assert allowed is True
 
 
-# ── fetch, cache and staleness ────────────────────────────────────────────
+# fetch, cache and staleness
 
 def test_history_is_parsed_into_a_frame(gate):
     gate.fyers.response = {

@@ -24,7 +24,7 @@ from shortcircuit import config as cfg
 from shortcircuit.strategy.back_to_vwap import BackToVWAPShort
 
 
-# ── golden input ──────────────────────────────────────────────────────────
+# golden input
 
 def make_df(*, descending_highs: bool = True, fading_volume: bool = True) -> pd.DataFrame:
     """
@@ -75,7 +75,7 @@ def strategy() -> BackToVWAPShort:
     return BackToVWAPShort()
 
 
-# ── the golden case ───────────────────────────────────────────────────────
+# the golden case
 
 def test_all_six_gates_passing_returns_a_signal(strategy, golden):
     result = strategy.evaluate(**golden)
@@ -100,7 +100,7 @@ def test_snapshot_high_is_the_window_high(strategy, golden):
     assert result['snapshot_high'] == golden['df']['high'].max()
 
 
-# ── rejection table: one perturbation per gate ────────────────────────────
+# rejection table: one perturbation per gate
 
 REJECTIONS = [
     ("C0 gain below scanner floor",   {'gain_pct': cfg.SCANNER_GAIN_MIN_PCT - 0.1}),
@@ -144,7 +144,7 @@ def test_c5_rejects_when_volume_is_not_fading(strategy, golden):
     assert strategy.evaluate(**golden) is None
 
 
-# ── C6 sign-safety, the bug the branch exists to prevent ──────────────────
+# C6 sign-safety, the bug the branch exists to prevent
 
 def test_c6_negative_slow_slope_does_not_invert_the_comparison(strategy, golden):
     """
@@ -168,7 +168,7 @@ def test_c6_requires_genuine_decay_off_a_real_up_slope(strategy, golden):
     assert strategy.evaluate(**golden) is None
 
 
-# ── auction failure: only two forms of evidence are accepted ──────────────
+# auction failure: only two forms of evidence are accepted
 
 def test_profile_rejection_alone_is_auction_failure():
     assert BackToVWAPShort._check_auction_failure(
@@ -198,7 +198,7 @@ def test_auction_failure_is_false_without_a_vah():
         make_df(), [], {}, vah=0.0, profile_rejection=False) is False
 
 
-# ── confidence is informational only ──────────────────────────────────────
+# confidence is informational only
 
 def test_confidence_never_changes_whether_a_signal_is_produced(strategy, golden):
     """
@@ -230,7 +230,7 @@ def test_confidence_tiers(sd, confluences, expected):
     ) == expected
 
 
-# ── no gate may be bypassed because another looks strong ──────────────────
+# no gate may be bypassed because another looks strong
 
 @pytest.mark.parametrize("gate,override", [
     ("C1", {'vwap_sd': cfg.STRATEGY_VWAP_SD_FLOOR - 0.1}),

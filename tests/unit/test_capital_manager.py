@@ -20,7 +20,7 @@ def cm():
     return CapitalManager(leverage=5.0)
 
 
-# ── the multi-shape funds parser ──────────────────────────────────────────
+# the multi-shape funds parser
 
 def test_parses_v3_fund_limit_and_picks_available_not_utilised(cm, funds_responses):
     """
@@ -61,7 +61,7 @@ def test_rejects_a_non_dict(cm):
         cm._parse_fyers_funds(None)
 
 
-# ── sizing ────────────────────────────────────────────────────────────────
+# sizing
 
 def test_compute_qty_returns_zero_before_the_first_sync(cm):
     """No margin known yet — must refuse to size rather than guess."""
@@ -103,7 +103,7 @@ def test_compute_qty_returns_zero_when_one_share_is_unaffordable(cm):
     assert qty == 0
 
 
-# ── the capital slot ──────────────────────────────────────────────────────
+# the capital slot
 
 def test_slot_starts_free(cm):
     assert cm.is_slot_free is True

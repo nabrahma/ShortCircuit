@@ -15,7 +15,7 @@ except Exception:  # pragma: no cover - import fallback for environments without
 
 logger = logging.getLogger(__name__)
 
-# Phase 42.1: PostgreSQL Configuration
+# PostgreSQL Configuration
 DB_CONFIG = {
     "host": "localhost",
     "port": 5432,
@@ -28,7 +28,7 @@ DB_CONFIG = {
 
 class DatabaseManager:
     """
-    Phase 42.1: HFT-Grade Database Manager using PostgreSQL + asyncpg.
+    HFT-Grade Database Manager using PostgreSQL + asyncpg.
     Implements connection pooling and atomic transactions.
     """
     
@@ -104,7 +104,7 @@ class DatabaseManager:
         """
         Synchronous query interface for standalone/offline scripts.
 
-        Implementation contract (Phase 44.5):
+        Implementation contract:
         - Uses a fresh blocking psycopg2 connection per call.
         - Reuses the same DB env-var credentials as asyncpg config.
         - No persistent psycopg2 pool (script path only, not hot path).
@@ -148,13 +148,13 @@ class DatabaseManager:
             if conn is not None:
                 conn.close()
 
-    # --- HFT Trading Logics ---
+    # HFT Trading Logics
 
     async def log_trade_entry(self, data: dict):
         """
         Log new trade entry to 'positions' and 'orders'.
         Uses transaction to ensure consistency.
-        Phase 93: ON CONFLICT DO NOTHING for orders to prevent duplicate key errors
+        ON CONFLICT DO NOTHING for orders to prevent duplicate key errors
         when WS fill recovery re-triggers entry logging.
         """
         pool = await self.get_pool()
@@ -245,17 +245,10 @@ class DatabaseManager:
         return trades
             
     async def log_event(self, event_type: str, details: dict):
+        """Log a system event.
+
+        Currently a no-op. The applied migration (v42_1_0_postgresql.sql) creates
+        only orders, positions and reconciliation_log — there is no generic
+        audit_log or trade_events table to write to.
         """
-        Log system event or audit entry.
-        """
-        # We might need a generic event table or audit_log
-        # For Phase 42.1, we have reconciliation_log, maybe add 'system_events'? 
-        # Using a simple log output for now if table doesn't exist, strictly following migration.
-        # Migration script has trade_events? No, migration script dropped trade_events.
-        # It has audit_log? No audit_log in the applied v42_1_0_postgresql.sql?
-        # Checking migration script content again...
-        # It has Orders, Positions, Reconciliation Log.
-        # It does NOT have 'audit_log' or 'trade_events' in the PRIMARY script I wrote.
-        # Wait, the PRD listed them but I wrote a simplified migration script for "Emergency Patch".
-        # I should stick to what I created in v42_1_0_postgresql.sql.
         pass

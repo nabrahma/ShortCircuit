@@ -44,7 +44,7 @@ async def conn():
         await connection.close()
 
 
-# ── migrations ────────────────────────────────────────────────────────────
+# migrations
 
 @pytest.mark.parametrize("table", ["orders", "positions", "reconciliation_log", "gate_results"])
 async def test_migrations_created_every_expected_table(conn, table):
@@ -77,7 +77,7 @@ async def test_orders_exchange_order_id_is_unique(conn):
     assert "exchange_order_id" in defs and "UNIQUE" in defs.upper()
 
 
-# ── round trips ───────────────────────────────────────────────────────────
+# round trips
 
 async def test_position_round_trips(conn):
     """
@@ -175,7 +175,7 @@ async def test_reconciliation_log_accepts_a_divergence_record(conn):
     await conn.execute("DELETE FROM reconciliation_log WHERE check_duration_ms = 12")
 
 
-# ── the guard itself ──────────────────────────────────────────────────────
+# the guard itself
 
 async def test_integration_tests_may_use_the_network(conn):
     """

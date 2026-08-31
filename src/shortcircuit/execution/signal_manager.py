@@ -25,7 +25,7 @@ class SignalManager:
         # Per-symbol tracking
         self.last_signal_time = {}  # symbol -> datetime
         
-        # PnL tracking for auto-pause (Phase 69)
+        # PnL tracking for auto-pause
         self.daily_pnl = 0.0
         self.max_session_loss = getattr(config, 'MAX_SESSION_LOSS_INR', 500.0)
         self.is_paused = False
@@ -33,7 +33,7 @@ class SignalManager:
         
         # Stats
         self.stats = defaultdict(int)
-        self._lock = threading.Lock()  # FIX #4: protect list/dict from concurrent thread access
+        self._lock = threading.Lock()  # protect list/dict from concurrent thread access
         self._exec_cooldowns: dict = {}   # symbol → datetime (unblock_at)
     
     def _reset_if_new_day(self):
@@ -55,7 +55,7 @@ class SignalManager:
 
         Args:
             symbol:       The stock symbol (e.g., "NSE:HINDCOPPER-EQ")
-            is_execution: If True, skips discovery-level cooldown check (Phase 73 Fix)
+            is_execution: If True, skips discovery-level cooldown check
             confidence:   Signal confidence tier from G5 ('MEDIUM','HIGH','EXTREME','MAX_CONVICTION').
                           Used for the Daily Target gate — after 5% target is hit only
                           EXTREME or MAX_CONVICTION signals are allowed.
@@ -91,7 +91,7 @@ class SignalManager:
                     self.stats['blocked_cooldown'] += 1
                     return False, f"Cooldown: {symbol} blocked for {remaining:.1f}m"
 
-            # ── Daily Target Gate ─────────────────────────────────────────────
+            # Daily Target Gate
             # Once daily profit ≥ target, only EXTREME / MAX_CONVICTION allowed.
             # Favor dynamic_target_inr if config is set to -1.
             daily_target = getattr(config, 'DAILY_TARGET_INR', 0)
@@ -153,17 +153,16 @@ class SignalManager:
 
     def add_pending_signal(self, symbol: str):
         """
-        Phase 91: Reduced cooldown for Pending signals.
+        Reduced cooldown for Pending signals.
         We no longer block the scanner if a signal is added but not yet executed.
         This allows 'Trailing' the signal until validation is passed.
         """
         with self._lock:
-            # We no longer set self.last_signal_time[symbol] here.
-            # Cooldown is only for successful executions (record_signal).
+            # Deliberately does not set last_signal_time: the cooldown applies
+            # only to successful executions, which record_signal handles.
             logger.info(f"G8.3 Pending Signal tracking: {symbol} (No cooldown set)")
 
 
-    
     def record_outcome(self, symbol: str, pnl: float):
         """
         Record the outcome of a trade for daily PnL risk limits.
@@ -225,7 +224,6 @@ class SignalManager:
             'stats': dict(self.stats)
         }
     
-
 
 # Global singleton instance
 _signal_manager = None

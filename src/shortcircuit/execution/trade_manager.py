@@ -16,27 +16,23 @@ class TradeManager:
         # Legacy Auto-Trade State (Now managed by TelegramBot)
         self.auto_trade_enabled = False  # Default to False always
 
-        # Phase 42: Position Safety — Track active SL orders
+        # Position Safety — Track active SL orders
         self.active_sl_orders = {}   # {symbol: order_id}
 
-        # Phase 42.1: Capital Management (Injected)
+        # Capital Management (Injected)
         self.capital_manager = capital_manager
 
         # Reference to Telegram bot (set externally after init)
         self.bot = None
         
-        # Phase 42.3.4: Reconciliation Engine (Injected)
+        # Reconciliation Engine (Injected)
         self.reconciliation_engine = None
 
-        # Phase 44.6: Scalper Position Manager (Injected)
+        # Scalper Position Manager (Injected)
         self.scalper_manager = None
 
 
-
-
-    # ==================================================================
-    # PHASE 42: POSITION SAFETY — CRITICAL GUARDS
-    # ==================================================================
+    # Position safety: critical guards
 
     def _get_broker_position(self, symbol: str) -> dict:
         """
@@ -68,9 +64,6 @@ class TradeManager:
             return None
 
 
-
-
-
     def cleanup_active_orders(self, symbol: str):
         """
         Cancels all pending orders for a symbol. 
@@ -93,7 +86,7 @@ class TradeManager:
         """
         Closes all open intraday positions.
         Used for EOD Auto-Square Off.
-        Phase 42.1: Releases capital for each closed position.
+        Releases capital for each closed position.
         """
         logger.warning("[ALERT] INITIATING AUTO-SQUARE OFF...")
         try:
@@ -158,7 +151,7 @@ class TradeManager:
                         f"[EXIT] {symbol} reason=EOD_SQUAREOFF pnl=₹{pnl_estimate:.2f}"
                     )
 
-                    # Phase 51 [G13]: Record outcome
+                    # Record outcome
                     try:
                         self.record_trade_outcome(symbol, pnl_estimate)
                     except Exception as e:
@@ -166,13 +159,13 @@ class TradeManager:
 
                     closed_count += 1
 
-                    # Phase 42: Clean up SL tracking
+                    # Clean up SL tracking
                     self._cleanup_sl_tracking(symbol)
 
-                    # Phase 42.1: Release capital (Handled by main loop in Phase 97)
+                    # Capital is released by the main loop, not here.
                     pass
                     
-                    # Phase 42.3.4: Mark Dirty
+                    # Mark Dirty
                     if self.reconciliation_engine: self.reconciliation_engine.mark_dirty()
 
             return f"Squaring Off Complete. Closed {closed_count} positions."
@@ -237,9 +230,7 @@ class TradeManager:
         sm.record_outcome(symbol, pnl)
         logger.info(f"Phase 69 Outcome recorded for {symbol}: ₹{pnl:.2f}")
 
-    # ==================================================================
-    # SAFETY UTILITIES
-    # ==================================================================
+    # Safety utilities
 
     def _cleanup_sl_tracking(self, symbol: str):
         """Remove SL tracking after position closed."""

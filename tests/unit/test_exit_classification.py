@@ -63,7 +63,7 @@ def classify(engine, pos, symbol="NSE:TARSONS-EQ"):
 SHORT_POS = {"entry_price": 323.15, "qty": 10, "side": "SHORT"}
 
 
-# ── the regression this exists for ────────────────────────────────────────
+# the regression this exists for
 
 @freeze_time(IN_SESSION)
 def test_filled_stop_is_classified_as_sl_hit():
@@ -85,7 +85,7 @@ def test_pnl_is_always_computed_when_prices_are_known():
     assert pnl != 0.0
 
 
-# ── the other three reasons ───────────────────────────────────────────────
+# the other three reasons
 
 @freeze_time(AFTER_EOD)
 def test_vanishing_after_the_deadline_is_the_square_off():
@@ -119,7 +119,7 @@ def test_long_pnl_uses_the_opposite_sign():
     assert reason == "MANUAL_TP_EXIT"
 
 
-# ── precedence and degradation ────────────────────────────────────────────
+# precedence and degradation
 
 @freeze_time(AFTER_EOD)
 def test_a_filled_stop_outranks_the_eod_window():

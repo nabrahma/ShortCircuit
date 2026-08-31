@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+# coding: utf-8
 import asyncio
 from collections import deque
 from dataclasses import dataclass
@@ -197,7 +197,7 @@ async def _initialize_runtime() -> RuntimeContext:
     db_manager = DatabaseManager()
     await db_manager.initialize()
 
-    # PRD-008: Enable periodic gate result flush — set DSN once after DB pool is ready
+    # Enable periodic gate result flush — set DSN once after DB pool is ready
     from shortcircuit.observability.gate_result_logger import get_gate_result_logger
     from shortcircuit.state.database import DB_CONFIG as _db_cfg
     import os as _os
@@ -216,10 +216,10 @@ async def _initialize_runtime() -> RuntimeContext:
         emergency_logger=None,
     )
     await broker.initialize()
-    # PRD-3: Wire Telegram bot to broker for WS cache alerts
+    # Wire Telegram bot to broker for WS cache alerts
     broker.set_telegram(bot)
 
-    # ── Phase 89.9: Dynamic 5% Target Initialization ──────────────────
+    # Dynamic 5% Target Initialization
     # Perform initial sync to capture morning ledger balance
     await capital_manager.sync(broker)
     
@@ -236,8 +236,6 @@ async def _initialize_runtime() -> RuntimeContext:
     bot.market_session = market_session
 
 
-    # ── PRD-007: Phase 44.7 + Startup Gate ───────────────────────────
-    # 1. Create scanner with broker reference
     scanner = FyersScanner(fyers_client, broker=broker)
 
     # 2. Fetch NSE symbol universe synchronously (blocks executor, not event loop)
@@ -301,7 +299,7 @@ async def _initialize_runtime() -> RuntimeContext:
             f"[STARTUP GATE] Cache READY: {snap['fresh']}/{snap['total']} symbols fresh. Proceeding to scan."
         )
     else:
-        # BUG-02 sub-fix 2c: attempt one full reconnect before accepting REST fallback
+        # Attempt one full reconnect before accepting the REST fallback.
         snap = broker.cache_health_snapshot()
         logger.critical(
             f"[STARTUP GATE] Cache NOT ready after {CACHE_READY_TIMEOUT}s. "
@@ -337,7 +335,7 @@ async def _initialize_runtime() -> RuntimeContext:
         except Exception as _e:
             logger.warning(f"[STARTUP GATE] Could not send Telegram alert: {_e}")
 
-    # ── P0 FIX: Construct OrderManager with live broker ──────────────
+    # P0 FIX: Construct OrderManager with live broker
     from shortcircuit.execution.order_manager import OrderManager
     order_manager = OrderManager(
         broker=broker,
@@ -349,21 +347,18 @@ async def _initialize_runtime() -> RuntimeContext:
 
     # Inject into FocusEngine (was None → caused NSESGL-EQ execution miss)
     focus_engine.order_manager = order_manager
-    # PRD-008 Bug 2 fix: inject analyzer so focus_engine can call record_signal() at order placement
+    # Injected so focus_engine can call record_signal() at order placement.
     focus_engine.analyzer = analyzer
 
-    # Phase 52: Wire event loop for sync thread async dispatch
+    # Wire event loop for sync thread async dispatch
     focus_engine._event_loop = asyncio.get_event_loop()
     logger.info(f"[FOCUS] Event loop set: {focus_engine._event_loop is not None}")
     logger.info("[INIT] ✅ OrderManager constructed and injected into FocusEngine.")
 
     # Also wire into bot for /positions, /pnl, order alerts
     bot.order_manager = order_manager
-    # ────────────────────────────────────────────────────────────────────
 
-    # ────────────────────────────────────────────────────────────────────
     # Reconciliation Engine construction
-    # ────────────────────────────────────────────────────────────────────
     reconciliation_engine = ReconciliationEngine(
         broker=broker,
         db_manager=db_manager,
@@ -374,7 +369,7 @@ async def _initialize_runtime() -> RuntimeContext:
 
     await order_manager.startup_reconciliation()
 
-    # Phase 44.6: Startup Recovery (now adopts orphans)
+    # Startup Recovery (now adopts orphans)
     startup_recovery = StartupRecovery(
         fyers_client=fyers_client,
         order_manager=order_manager,
@@ -406,7 +401,7 @@ async def _trading_loop(shutdown_event: asyncio.Event, ctx: RuntimeContext):
         ctx.bot._auto_mode = True
         ctx.bot._auto_on_queued = False
         logger.info("[AUTO] Queued Auto ON activated — market ready")
-        # FIX #5: Flush stale pending signals from pre-market
+        # Flush stale pending signals from pre-market
         if hasattr(ctx, 'focus_engine') and ctx.focus_engine:
             ctx.focus_engine.flush_stale_pending_signals(max_age_minutes=20)
             logger.info("[SESSION] Stale pending signals flushed at session open")
@@ -438,7 +433,7 @@ async def _trading_loop(shutdown_event: asyncio.Event, ctx: RuntimeContext):
                     last_sync = last_sync.replace(tzinfo=UTC)
                 if (now_utc - last_sync).total_seconds() > 300:
                     try:
-                        await asyncio.wait_for(ctx.capital_manager.sync(ctx.broker), timeout=60.0) # Phase 91.3: Increased from 30s
+                        await asyncio.wait_for(ctx.capital_manager.sync(ctx.broker), timeout=60.0) # Increased from 30s
                     except asyncio.TimeoutError:
                         logger.error("[RESILIENCE] Capital sync timed out after 60s. Skipping.")
                     except Exception as e:
@@ -452,7 +447,7 @@ async def _trading_loop(shutdown_event: asyncio.Event, ctx: RuntimeContext):
                 continue
 
             if not config.TRADING_ENABLED:
-                # Phase 89: Log once, not every 30s during warmup
+                # Log once, not every 30s during warmup
                 if not getattr(ctx, '_trading_disabled_logged', False):
                     logger.info("[TRADING] Trading disabled (warmup); waiting for 09:30 transition.")
                     ctx._trading_disabled_logged = True
@@ -476,7 +471,7 @@ async def _trading_loop(shutdown_event: asyncio.Event, ctx: RuntimeContext):
                 logger.error(f"[RESILIENCE] Scanning error: {e}")
                 candidates = []
 
-            # PRD-008: Pull scan_id and data_tier from shortcircuit.marketdata.scanner for gate audit correlation
+            # Pull scan_id and data_tier from shortcircuit.marketdata.scanner for gate audit correlation
             _scan_id   = getattr(ctx.scanner, '_scan_counter', 0)
             _data_tier = getattr(ctx.scanner, '_last_data_tier', 'UNKNOWN')
 
@@ -486,7 +481,7 @@ async def _trading_loop(shutdown_event: asyncio.Event, ctx: RuntimeContext):
                 "candidate_names": [c["symbol"] for c in candidates] if candidates else []
             }
             
-            # Phase 89.6: Parallelized Analysis
+            # Parallelized Analysis
             async def run_analysis(cand):
                 signal = await asyncio.to_thread(
                     ctx.analyzer.check_setup,
@@ -498,7 +493,7 @@ async def _trading_loop(shutdown_event: asyncio.Event, ctx: RuntimeContext):
                     _scan_id,
                     _data_tier,
                 )
-                # Phase 93: Inject the scanner's tick_size into the signal
+                # Inject the scanner's tick_size into the signal
                 # The symbol master has the correct exchange tick (0.01/0.05/0.10).
                 if signal and "tick_size" in cand:
                     signal["tick_size"] = cand["tick_size"]
@@ -511,7 +506,7 @@ async def _trading_loop(shutdown_event: asyncio.Event, ctx: RuntimeContext):
                 if shutdown_event.is_set():
                     return
                 symbol = signal["symbol"]
-                if signal.get("cooldown_blocked"): # Added back
+                if signal.get("cooldown_blocked"):
                     try:
                         unlock_at = (
                             ctx.analyzer.signal_manager.last_signal_time[symbol]
@@ -575,7 +570,7 @@ def _update_terminal_log() -> None:
         )
         subprocess.run([sys.executable, str(dump_script)], check=False)
 
-        # Phase 70: Auto-generate the noise-filtered markdown report
+        # Auto-generate the noise-filtered markdown report
         import datetime as _dt
         today_str = _dt.date.today().strftime('%Y-%m-%d')
         log_path = paths.LOGS_DIR / f"{today_str}_session.log"
@@ -598,7 +593,7 @@ async def _cleanup_runtime(ctx: Optional[RuntimeContext]):
 
     logger.info("[SHUTDOWN] Beginning cleanup sequence.")
 
-    # ✅ ADD: Stop FocusEngine first — prevents post-shutdown signals
+    # Stop FocusEngine first — prevents post-shutdown signals.
     if ctx.focus_engine:
         try:
             ctx.focus_engine.stop("PROCESS_SHUTDOWN")
@@ -866,7 +861,7 @@ async def main() -> int:
                 logger.error("[EOD] Analysis failed: %s", exc)
                 await _notify(f"❌ EOD Analysis FAILED: {exc}")
 
-            # PRD-008: Gate result EOD flush
+            # Gate result EOD flush
             try:
                 from shortcircuit.observability.gate_result_logger import get_gate_result_logger
                 grl = get_gate_result_logger()
@@ -951,7 +946,7 @@ async def main() -> int:
         _update_terminal_log()  # keep last, captures full session shutdown
         logger.info("[SUPERVISOR] Cleanup complete.")
 
-        # ✅ HARD EXIT FALLBACK — kills any hanging non-daemon threads
+        # Hard-exit fallback: kills any hanging non-daemon threads.
         # Give Python 10 seconds to exit naturally first (FastAPI/GhostAudit need time)
         import threading
         def _force_exit():

@@ -15,11 +15,11 @@ from shortcircuit.marketdata.symbols import NIFTY_50
 
 class MarketSession:
     """
-    Phase 41.3.1: Intelligent Market Session Awareness.
+    Intelligent Market Session Awareness.
     Handles startup at ANY time of day.
     """
     
-    # Phase 41.3.3: Centralized Symbol
+    # Centralized Symbol
     NIFTY_SYMBOL = NIFTY_50
     
     # NSE Market Hours (IST)
@@ -108,7 +108,7 @@ class MarketSession:
             set_trading_enabled(False)
             self._send_formatted_msg("🌙 **MARKET CLOSED**\n\nSee you tomorrow!", "POST_MARKET")
 
-    # ── HANDLERS ──────────────────────────────────────────────────
+    # HANDLERS
 
     async def handle_premarket(self):
         now = datetime.now(IST)
@@ -145,7 +145,7 @@ class MarketSession:
         self._notify(msg)
         set_trading_enabled(False) # Ensure disabled
         
-        # Phase 89: Don't sleep! Return immediately so main.py can run heavy init
+        # Don't sleep! Return immediately so main.py can run heavy init
         # (DB, Broker, WS subscribe, REST seed, cache warmup) during 9:15-9:30.
         # Trading stays disabled. _handle_transition() will flip TRADING_ENABLED=True
         # when should_trade_now() detects MID_MARKET at 9:30.
@@ -204,14 +204,13 @@ class MarketSession:
             await asyncio.sleep(sleep_sec)
             
             # Wake up -> Reset
-            self.session_state = 'PRE_MARKET' # Will naturally flow
-            # Recursively restart? Or just return and let main loop catch up?
+            self.session_state = 'PRE_MARKET'
+            # Re-enter so the fresh state is evaluated against the new day.
             return await self.initialize_session()
         else:
             logger.info("👋 Auto-sleep disabled. Exiting.")
             sys.exit(0)
 
-    # ── HELPERS ───────────────────────────────────────────────────
 
     def _fetch_morning_range(self):
         """Fetch 9:15-9:30 range for NIFTY"""
@@ -221,7 +220,7 @@ class MarketSession:
         
         try:
             today_str = datetime.now(IST).strftime('%Y-%m-%d')
-            # Phase 88.3: Real data fetch
+            # Real data fetch
             data = {
                 "symbol": self.NIFTY_SYMBOL,
                 "resolution": "5",

@@ -13,7 +13,7 @@ import pytest
 from shortcircuit.strategy import features as F
 
 
-# ── enrich_dataframe / VWAP ───────────────────────────────────────────────
+# enrich_dataframe / VWAP
 
 def test_vwap_of_constant_price_is_that_price(flat_candles):
     F.enrich_dataframe(flat_candles)
@@ -45,7 +45,7 @@ def test_enrich_adds_vwap_column_in_place(flat_candles):
     assert "vwap" in flat_candles.columns
 
 
-# ── compute_vwap_sd ───────────────────────────────────────────────────────
+# compute_vwap_sd
 
 def test_vwap_sd_returns_zero_without_a_vwap_column(sample_candles):
     assert F.compute_vwap_sd(sample_candles) == 0.0
@@ -69,7 +69,7 @@ def test_vwap_sd_is_positive_when_price_is_above_vwap(trending_candles):
     assert F.compute_vwap_sd(trending_candles) > 0
 
 
-# ── compute_vwap_slope ────────────────────────────────────────────────────
+# compute_vwap_slope
 
 def test_slope_of_flat_series_is_zero(flat_candles):
     slope, status = F.compute_vwap_slope(flat_candles, window=30)
@@ -89,7 +89,7 @@ def test_slope_reports_insufficient_data_rather_than_guessing(single_bar):
     assert status == "INSUFFICIENT_DATA"
 
 
-# ── compute_atr ───────────────────────────────────────────────────────────
+# compute_atr
 
 def test_atr_returns_nan_on_insufficient_data(single_bar):
     """
@@ -115,7 +115,7 @@ def test_atr_never_returns_a_sentinel_on_malformed_input():
     assert np.isnan(F.compute_atr(bad))
 
 
-# ── compute_volume_fade_ratio ─────────────────────────────────────────────
+# compute_volume_fade_ratio
 
 def test_volume_fade_detects_declining_volume():
     candles = [{"volume": 1000} for _ in range(15)] + \
@@ -151,7 +151,7 @@ def test_volume_fade_drops_the_forming_bar_by_default():
     assert without != with_forming
 
 
-# ── compute_rsi_divergence ────────────────────────────────────────────────
+# compute_rsi_divergence
 
 def test_rsi_divergence_false_on_short_series(flat_candles):
     assert F.compute_rsi_divergence(flat_candles.iloc[:5], window=25) is False
@@ -171,7 +171,7 @@ def test_rsi_divergence_swallows_malformed_input():
     assert F.compute_rsi_divergence(pd.DataFrame({"close": [1, 2]}), window=25) is False
 
 
-# ── is_narrowing_highs ────────────────────────────────────────────────────
+# is_narrowing_highs
 
 def test_narrowing_highs_true_for_a_descending_staircase():
     df = pd.DataFrame({
@@ -190,7 +190,7 @@ def test_narrowing_highs_false_on_insufficient_bars(single_bar):
     assert F.is_narrowing_highs(single_bar, n=3) is False
 
 
-# ── compute_stretch_score ─────────────────────────────────────────────────
+# compute_stretch_score
 
 def test_stretch_score_is_zero_at_the_scanner_floor():
     assert F.compute_stretch_score(7.5, 7.5) == 0.0
@@ -204,7 +204,7 @@ def test_stretch_score_guards_zero_denominator():
     assert F.compute_stretch_score(10.0, 0) == 0.0
 
 
-# ── detect_pattern ────────────────────────────────────────────────────────
+# detect_pattern
 
 def test_detect_pattern_returns_normal_for_insufficient_bars(single_bar):
     pattern, vol_z = F.detect_pattern(single_bar)

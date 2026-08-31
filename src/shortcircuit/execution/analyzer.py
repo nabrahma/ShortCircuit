@@ -68,7 +68,6 @@ def log_signal(symbol: str, ltp: float, pattern: str, stop_loss: float,
         ])
 
 
-
 # 09:15 to 15:30 IST is 375 one-minute bars. Request the full session so the
 # cumulative VWAP in features.enrich_dataframe() is anchored to the open rather
 # than to wherever a truncated frame happens to begin.
@@ -170,9 +169,7 @@ class FyersAnalyzer:
         self.profile_analyzer = ProfileAnalyzer()
         self.strategy = BackToVWAPShort()
 
-    # ──────────────────────────────────────────────────────────────────
-    # DATA FETCHING
-    # ──────────────────────────────────────────────────────────────────
+    # Data fetching
 
     def get_history(self, symbol: str, interval: str = "1") -> Optional[pd.DataFrame]:
         """
@@ -285,9 +282,7 @@ class FyersAnalyzer:
             logger.error(f"Error fetching history for {symbol}: {e}")
             return None
 
-    # ──────────────────────────────────────────────────────────────────
-    # MAIN ENTRY POINT
-    # ──────────────────────────────────────────────────────────────────
+    # Main entry point
 
     def check_setup(
         self,
@@ -307,7 +302,7 @@ class FyersAnalyzer:
         gr = GateResult(symbol=symbol, scan_id=scan_id, data_tier=data_tier)
         signal_meta = {}
 
-        # ── Data Fetch ───────────────────────────────────────────────
+        # Data fetch
         if pre_fetched_df is not None:
             df = pre_fetched_df.copy()
         else:
@@ -319,7 +314,7 @@ class FyersAnalyzer:
             grl.record(gr)
             return None
 
-        # ── G2: Candle count guard ───────────────────────────────────
+        # G2: Candle count guard
         if config.RVOL_VALIDITY_GATE_ENABLED and len(df) < config.RVOL_MIN_CANDLES:
             gr.g2_pass = False
             gr.g2_value = float(len(df))
@@ -336,7 +331,7 @@ class FyersAnalyzer:
             return None
         gr.g2_pass = True
 
-        # ── Enrichment ───────────────────────────────────────────────
+        # Enrichment
         F.enrich_dataframe(df)
         prev_df = df.iloc[:-1]
 
@@ -355,7 +350,7 @@ class FyersAnalyzer:
                 symbol, slope_5m, slope_30m,
             )
 
-        # ── Gain Calculation ─────────────────────────────────────────
+        # Gain calculation
         pc = 0
         try:
             if self.broker:
@@ -375,7 +370,7 @@ class FyersAnalyzer:
         baseline = pc if pc > 0 else open_price
         gain_pct = ((ltp - baseline) / baseline) * 100
 
-        # ── Profile Pre-calc ─────────────────────────────────────────
+        # Profile pre-calc
         profile = None
         profile_rejection = False
         vol_z = 0.0
@@ -397,7 +392,7 @@ class FyersAnalyzer:
             grl.record(gr)
             return None
 
-        # ── Pre-fetch Depth for Strategy ─────────────────────────────
+        # Pre-fetch depth for the strategy
         upper_circuit = 0.0
         lower_circuit = 0.0
         spread_pct = 0.0
@@ -423,7 +418,7 @@ class FyersAnalyzer:
 
         is_circuit_hitter = self.market_context.is_circuit_hitter(symbol)
 
-        # ── STRATEGY EVALUATION (Replaces G1-G6) ────────────────────
+        # Strategy evaluation, replacing gates G1-G6.
         result = self.strategy.evaluate(
             symbol=symbol,
             ltp=ltp,
@@ -458,7 +453,7 @@ class FyersAnalyzer:
         signal_meta.update(result)
         pattern_desc = result.get('pattern_bonus', 'EXHAUSTION_FADE')
 
-        # ── G9: HTF Confluence ────────────────────────────────────────
+        # G9: HTF Confluence
         # Runs on a shared, long-lived pool. The previous version built a new
         # ThreadPoolExecutor per symbol per scan and used it as a context manager,
         # so __exit__ called shutdown(wait=True) — meaning a timed-out G9 check
@@ -487,7 +482,7 @@ class FyersAnalyzer:
             grl.record(gr)
             return None
 
-        # ── G8: Signal Manager (cooldown + daily target) ──────────────
+        # G8: Signal Manager (cooldown + daily target)
         sm = self.signal_manager
         confidence = signal_meta.get('confidence', '')
         can_signal, sm_reason = (
@@ -504,7 +499,7 @@ class FyersAnalyzer:
             grl.record(gr)
             return None
 
-        # ── Reward Risk ───────────────────────────
+        # Reward/risk: a smaller target multiple on weaker moves.
         if gain_pct < 9.0:
             signal_meta['tp_atr_mult_override'] = 0.5
         else:
@@ -512,7 +507,7 @@ class FyersAnalyzer:
 
         signal_meta['snapshot_high'] = day_high
 
-        # ── Finalize ──────────────────────────────────────────────────
+        # Finalize
         gr.verdict = "ANALYZER_PASS"
         finalized = self._finalize_signal(
             symbol, ltp, df, pattern_desc, slope_5m, "", signal_meta
@@ -525,11 +520,7 @@ class FyersAnalyzer:
         grl.record(gr)
         return finalized
 
-    # ──────────────────────────────────────────────────────────────────
-    # PRIVATE HELPERS (kept)
-    # ──────────────────────────────────────────────────────────────────
-
-
+    # Private helpers
 
 
     def _finalize_signal(

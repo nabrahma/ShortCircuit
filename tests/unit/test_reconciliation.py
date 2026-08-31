@@ -31,9 +31,7 @@ import pytest
 from shortcircuit.state.reconciliation import ReconciliationEngine
 
 
-# ──────────────────────────────────────────────────────────────────────────
 # Harness
-# ──────────────────────────────────────────────────────────────────────────
 
 def _broker_entry(symbol, net_qty, avg=100.0):
     """Shape produced by _get_broker_positions_cached: qty absolute, net_qty signed."""
@@ -96,9 +94,7 @@ def classify(broker_positions: dict, db_positions: dict) -> dict:
     return engine.captured or {"orphans": [], "phantoms": [], "mismatched": []}
 
 
-# ──────────────────────────────────────────────────────────────────────────
 # The table — one test per row
-# ──────────────────────────────────────────────────────────────────────────
 
 SYM = "NSE:TESTSYM-EQ"
 
@@ -168,9 +164,7 @@ def test_row7_missed_fill_appears_as_an_orphan():
     assert result["orphans"][0]["symbol"] == SYM
 
 
-# ──────────────────────────────────────────────────────────────────────────
 # Row 8 — adoption must be idempotent
-# ──────────────────────────────────────────────────────────────────────────
 
 def test_row8_adoption_is_idempotent():
     """
@@ -209,9 +203,7 @@ def test_row8_adoption_is_idempotent():
     assert adopted == [SYM], f"orphan adopted {len(adopted)} times, expected once"
 
 
-# ──────────────────────────────────────────────────────────────────────────
 # Safety property: a degraded broker must never look like "flat"
-# ──────────────────────────────────────────────────────────────────────────
 
 def test_broker_fetch_failure_does_not_phantom_close_every_position():
     """

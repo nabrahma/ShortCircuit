@@ -49,8 +49,6 @@ def ohlcv(draw, min_size=25, max_size=80):
     return pd.DataFrame(rows)
 
 
-# ── P1 ────────────────────────────────────────────────────────────────────
-
 @SETTINGS
 @given(df=ohlcv())
 def test_p1_vwap_lies_within_the_traded_range(df):
@@ -61,8 +59,6 @@ def test_p1_vwap_lies_within_the_traded_range(df):
     assume(np.isfinite(vwap))
     assert df["low"].min() - 1e-6 <= vwap <= df["high"].max() + 1e-6
 
-
-# ── P2 ────────────────────────────────────────────────────────────────────
 
 @SETTINGS
 @given(df=ohlcv())
@@ -76,8 +72,6 @@ def test_p2_rsi_divergence_is_always_a_bool(df):
     assert isinstance(result, bool)
 
 
-# ── P3 ────────────────────────────────────────────────────────────────────
-
 @SETTINGS
 @given(df=ohlcv(min_size=30))
 def test_p3_value_area_is_ordered_vah_ge_poc_ge_val(df):
@@ -86,8 +80,6 @@ def test_p3_value_area_is_ordered_vah_ge_poc_ge_val(df):
     assume(profile is not None)
     assert profile["vah"] >= profile["poc"] >= profile["val"]
 
-
-# ── P4 ────────────────────────────────────────────────────────────────────
 
 @SETTINGS
 @given(df=ohlcv(min_size=30))
@@ -100,8 +92,6 @@ def test_p4_value_area_lies_within_the_traded_range(df):
     assert profile["val"] >= lo - span
     assert profile["vah"] <= hi + span
 
-
-# ── P5 ────────────────────────────────────────────────────────────────────
 
 @SETTINGS
 @given(
@@ -117,8 +107,6 @@ def test_p5_vwap_of_a_constant_series_is_that_price(p, n, v):
     F.enrich_dataframe(df)
     assert df["vwap"].iloc[-1] == pytest.approx(p, rel=1e-9)
 
-
-# ── P6 ────────────────────────────────────────────────────────────────────
 
 @SETTINGS
 @given(df=ohlcv())
@@ -143,8 +131,6 @@ def test_p6_appending_a_zero_volume_bar_does_not_move_vwap(df):
 
     assert extended["vwap"].iloc[-1] == pytest.approx(baseline, rel=1e-9)
 
-
-# ── P7 ────────────────────────────────────────────────────────────────────
 
 @SETTINGS
 @given(df=ohlcv())
@@ -182,7 +168,7 @@ def test_p7_read_only_features_are_pure_and_do_not_mutate_input(df):
     )
 
 
-# ── Robustness ────────────────────────────────────────────────────────────
+# Robustness
 
 @SETTINGS
 @given(df=ohlcv())

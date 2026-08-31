@@ -23,7 +23,7 @@ def _df(prices, volumes=None):
     })
 
 
-# ── ordering invariant ────────────────────────────────────────────────────
+# ordering invariant
 
 def test_vah_ge_poc_ge_val(analyzer):
     """The defining invariant of a value area. If this breaks, C2 is meaningless."""
@@ -45,7 +45,7 @@ def test_value_area_spans_the_traded_range(analyzer):
     assert profile["vah"] <= max(prices) + 1
 
 
-# ── degenerate inputs ─────────────────────────────────────────────────────
+# degenerate inputs
 
 def test_empty_frame_returns_none(analyzer):
     assert analyzer.calculate_dalton_value_area(pd.DataFrame()) is None
@@ -75,7 +75,7 @@ def test_zero_volume_does_not_raise(analyzer):
     assert result is None or result["vah"] >= result["val"]
 
 
-# ── compatibility aliases ─────────────────────────────────────────────────
+# compatibility aliases
 
 def test_exposes_both_naming_conventions(analyzer):
     """Callers read both `vah` and `vvah`; both must be present and agree."""
@@ -92,7 +92,7 @@ def test_all_outputs_are_plain_floats(analyzer):
         assert type(profile[key]) is float
 
 
-# ── check_profile_rejection ───────────────────────────────────────────────
+# check_profile_rejection
 
 def test_profile_rejection_needs_enough_bars(analyzer):
     rejected, _ = analyzer.check_profile_rejection(_df([100.0, 101.0]), ltp=100.0)

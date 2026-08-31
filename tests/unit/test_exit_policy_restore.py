@@ -23,7 +23,7 @@ import pytest
 from shortcircuit.execution.focus_engine import compute_tp_levels, target_reached
 
 
-# ── which side of entry counts as "reached" ───────────────────────────────
+# which side of entry counts as "reached"
 
 @pytest.mark.parametrize("ltp,level,direction,expected", [
     (99.0, 100.0, 'SHORT', True),    # short target sits below entry
@@ -51,7 +51,7 @@ def test_no_price_is_not_a_reason_to_exit():
     assert target_reached(0, 100.0, 'SHORT') is False
 
 
-# ── the two levels ────────────────────────────────────────────────────────
+# the two levels
 
 def test_the_midpoint_sits_halfway_between_entry_and_the_vwap_target():
     tp_1, tp_2 = compute_tp_levels(entry_price=100.0, vwap_target=90.0, tick=0.05, is_long=False)
@@ -75,7 +75,7 @@ def test_a_long_midpoint_is_above_entry():
     assert tp_1 == pytest.approx(105.0)
 
 
-# ── the guard that stops a trade closing on its own first tick ────────────
+# the guard that stops a trade closing on its own first tick
 
 @pytest.mark.parametrize("entry,target,is_long,why", [
     (100.0, 100.0, False, "target equal to entry"),
@@ -102,7 +102,7 @@ def test_a_nonsense_tick_does_not_divide_by_zero():
     assert tp_1 is not None and tp_2 is not None
 
 
-# ── the policies these levels implement ───────────────────────────────────
+# the policies these levels implement
 
 def test_single_closes_at_the_midpoint_and_scale_does_not():
     """
@@ -139,7 +139,7 @@ def test_a_gap_through_both_levels_reaches_both():
     assert target_reached(gap_price, tp_2, 'SHORT') is True
 
 
-# ── the VWAP anchor the profitable run was measured on ────────────────────
+# the VWAP anchor the profitable run was measured on
 
 def test_rolling_and_session_request_different_bar_counts():
     """

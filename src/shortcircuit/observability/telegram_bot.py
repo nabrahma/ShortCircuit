@@ -1,6 +1,3 @@
-# -*- coding: utf-8 -*-
-# telegram_bot.py
-# Phase 42.3.1 — Complete Telegram UI
 import asyncio
 import json
 import logging
@@ -61,11 +58,11 @@ class ShortCircuitBot:
         self.order_manager = order_manager
         self.capital_manager = capital_manager
         self.focus_engine = focus_engine
-        # ── Auto-Trade Gate ───────────────────────────────────
+        # Auto-Trade Gate
         self._auto_mode: bool = config_settings.get('AUTO_MODE', True)
         self._auto_on_queued: bool = False
         self._morning_brief_sent: bool = False
-        # ── Telegram App ──────────────────────────────────────
+        # Telegram App
         self.bot_token = config_settings.get('TELEGRAM_BOT_TOKEN')
         self.chat_id = str(config_settings.get('TELEGRAM_CHAT_ID'))
         self.app: Optional[Application] = None
@@ -75,7 +72,7 @@ class ShortCircuitBot:
         self._throttler_task: Optional[asyncio.Task] = None
         self._cleanup_task: Optional[asyncio.Task] = None
         
-        # ── State ─────────────────────────────────────────────
+        # State
         self._scanning_paused: bool = False
         self._editable_signal_flow_override: Optional[bool] = None
         self._signal_msg_index: dict = {}
@@ -96,9 +93,7 @@ class ShortCircuitBot:
             "🤖 Telegram Bot initialized | Auto Mode: %s",
             "ON" if self._auto_mode else "OFF",
         )
-    # ════════════════════════════════════════════════════════════
     # PUBLIC API — used by other modules
-    # ════════════════════════════════════════════════════════════
     def is_auto_mode(self) -> bool:
         """
         Single source of truth for the auto-trade gate.
@@ -416,16 +411,10 @@ class ShortCircuitBot:
             self._cleanup_task.cancel()
             await asyncio.gather(self._cleanup_task, return_exceptions=True)
         self._cleanup_task = asyncio.create_task(self._cleanup_stale_signal_entries_loop())
-    # ════════════════════════════════════════════════════════════
     # SIGNAL ALERTS — called by trade_manager / focus_engine
-    # ════════════════════════════════════════════════════════════
 
-    # ════════════════════════════════════════════════════════════
-    # COMMAND HANDLERS
-    # ════════════════════════════════════════════════════════════
-    # ════════════════════════════════════════════════════════════
+    # Command handlers
     # HELPERS — build status snippets
-    # ════════════════════════════════════════════════════════════
     def _get_capital_block(self) -> str:
         """Build capital status block for command responses."""
         if not self.capital_manager:
@@ -497,12 +486,9 @@ class ShortCircuitBot:
             else:
                 lines.append(f"Last Scan: {scan_time.strftime('%H:%M:%S')} ({scan_count} candidates)")
         return '\n'.join(lines) + '\n' if lines else ""
-    # ════════════════════════════════════════════════════════════
-    # COMMAND HANDLERS — Phase 44.4: Rich structured responses
-    # ════════════════════════════════════════════════════════════
+    # Command handlers
     async def _cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """/start — Welcome message."""
-        # Removed local import config
         if not self._is_authorized(update):
             return
         mode_str = "🟢 AUTO" if self.is_auto_mode() else "🔴 ALERT ONLY"
@@ -590,7 +576,6 @@ class ShortCircuitBot:
             await update.message.reply_text("Usage: `/mode buy` or `/mode sell`", parse_mode='Markdown')
     async def _cmd_auto_off(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """/auto off — Disable auto trading."""
-        # Removed local import config
         if not self._is_authorized(update):
             await update.message.reply_text("⛔ Unauthorized.")
             return
@@ -603,7 +588,7 @@ class ShortCircuitBot:
         
         logger.critical("🛑 [AUTO] Auto-trading DISABLED via Telegram override (/auto off)")
         
-        # Phase 81: Ensure immediate yield to event loop
+        # Ensure immediate yield to event loop
         await asyncio.sleep(0)
         
         open_count = len(self.order_manager.active_positions) if self.order_manager and hasattr(self.order_manager, 'active_positions') else 0
@@ -619,11 +604,10 @@ class ShortCircuitBot:
         await update.message.reply_text(text, parse_mode='HTML')
     async def _cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """/status — Full system health snapshot (Live Sync)."""
-        # Removed local import config
         if not self._is_authorized(update):
             return
 
-        # ── Step 1: Force Live Sync from Fyers ──
+        # Step 1: Force Live Sync from Fyers
         today_pnl = 0.0
         unrealised = 0.0
         open_positions = 0
@@ -632,7 +616,7 @@ class ShortCircuitBot:
         if self.order_manager and self.order_manager.broker:
             broker = self.order_manager.broker
             try:
-                # Phase 88.2: Timeout Protection for Live Sync
+                # Timeout Protection for Live Sync
                 # Prevents /status from hanging when Fyers API is slow/down
                 if self.capital_manager:
                     try:
@@ -699,7 +683,6 @@ class ShortCircuitBot:
         await update.message.reply_text(text, parse_mode='HTML')
     async def _cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """/help"""
-        # Removed local import config
         if not self._is_authorized(update):
             return
         await update.message.reply_text(
@@ -783,7 +766,6 @@ class ShortCircuitBot:
 
     async def _cmd_stop(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """/stop — Request bot termination with confirmation."""
-        # Removed local import config
         if not self._is_authorized(update):
             return
         
@@ -803,9 +785,7 @@ class ShortCircuitBot:
             reply_markup=reply_markup,
             parse_mode='HTML'
         )
-    # ════════════════════════════════════════════════════════════
     # HANDLERS
-    # ════════════════════════════════════════════════════════════
     async def _handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
         await query.answer()
@@ -836,12 +816,8 @@ class ShortCircuitBot:
         else:
             logger.error("[SHUTDOWN] No shutdown_event available — manual restart required")
 
-    # ════════════════════════════════════════════════════════════
-    # EOD SUMMARY — Phase 44.4 Section 3
-    # ════════════════════════════════════════════════════════════
-    # ════════════════════════════════════════════════════════════
-    # EMERGENCY ALERTS
-    # ════════════════════════════════════════════════════════════
+    # EOD summary
+    # Emergency alerts
 
     async def _send_morning_briefing(self, ws_cache, market_ctx, startup_validation_passed: bool):
         """Fires once at trading loop start. Never fires more than once per session."""
@@ -868,7 +844,6 @@ class ShortCircuitBot:
 
         snap = {}
         if ws_cache:
-            # Standardized on cache_health_snapshot in Phase 89.5
             if hasattr(ws_cache, "cache_health_snapshot"):
                 snap = ws_cache.cache_health_snapshot()
 
@@ -877,7 +852,7 @@ class ShortCircuitBot:
         fresh_pct = round(fresh / total * 100, 1) if total else 0.0
 
         # Read the ACTUAL socket state. This block used to print
-        # "WS Data: ✅ | WS Order: ✅" unconditionally, so the first message of
+        # "WS Data:  | WS Order: " unconditionally, so the first message of
         # every session claimed both sockets were healthy even when they were
         # down — precisely the morning you would want to know otherwise.
         data_ok  = bool(getattr(ws_cache, 'data_ws_connected', False))
@@ -949,9 +924,7 @@ class ShortCircuitBot:
         ]
         return random.choice(quotes)
 
-    # ════════════════════════════════════════════════════════════
     # SETUP
-    # ════════════════════════════════════════════════════════════
     def _register_handlers(self):
         self.app.add_handler(CommandHandler("start", self._cmd_start))
         self.app.add_handler(CommandHandler("auto", self._cmd_auto))
@@ -968,9 +941,7 @@ class ShortCircuitBot:
             return
         if args[0] == 'on': await self._cmd_auto_on(update, context)
         elif args[0] == 'off': await self._cmd_auto_off(update, context)
-    # ════════════════════════════════════════════════════════════
     # COMPATIBILITY & UTILS
-    # ════════════════════════════════════════════════════════════
     async def send_alert(self, message: str):
         """
         Async alert sender. Callers must await this method.
@@ -986,7 +957,7 @@ class ShortCircuitBot:
 
     async def _alert_throttler_loop(self):
         """
-        Phase 81: Background task to process the alert queue with rate limiting.
+        Background task to process the alert queue with rate limiting.
         Bundles multiple fast alerts into a single message to avoid Telegram API lag.
         """
         logger.info("Telegram Alert Throttler started")
@@ -1051,9 +1022,7 @@ class ShortCircuitBot:
                         self._alert_queue.task_done()
                     except ValueError:
                         break
-    # ════════════════════════════════════════════════════════════
     # AUTHORIZATION — Security Gate
-    # ════════════════════════════════════════════════════════════
     def _is_authorized(self, update: Update) -> bool:
         """
         Verify command sender is authorized.
@@ -1098,13 +1067,11 @@ class ShortCircuitBot:
                 )
                 return False
         return True
-    # ════════════════════════════════════════════════════════════
-    # BOT LIFECYCLE
-    # ════════════════════════════════════════════════════════════
+    # Bot lifecycle
     async def start(self):
         self.app = Application.builder().token(self.bot_token).build()
         self._register_handlers()
-        # Phase 44.4: Register global error handler (fixes PTB 'No error handlers' warning)
+        # Register global error handler (fixes PTB 'No error handlers' warning)
         self.app.add_error_handler(self._error_handler)
         await self.app.initialize()
         await self.app.start()
@@ -1114,7 +1081,7 @@ class ShortCircuitBot:
         await self._start_cleanup_task()
         await self.app.updater.start_polling(drop_pending_updates=True)
         
-        # Phase 81: Telegram Command Menu
+        # Telegram Command Menu
         if getattr(config, 'P81_TELEGRAM_MENU_ENABLED', True):
             commands = [
                 BotCommand("help", "Show all commands"),
@@ -1129,7 +1096,7 @@ class ShortCircuitBot:
             except Exception as e:
                 logger.error(f"Failed to register Telegram Menu: {e}")
 
-        # Phase 81: Alert Throttler
+        # Alert Throttler
         self._throttler_task = asyncio.create_task(self._alert_throttler_loop())
         logger.info("Telegram Bot started & Throttler active")
     async def run(self, shutdown_event: asyncio.Event):
@@ -1152,13 +1119,12 @@ class ShortCircuitBot:
         events, polling failures, or schedulers — not from a user message.
         Every `update.*` access MUST be guarded.
         """
-        #  Bug 3 FIX: Suppress transient DNS/network errors 
+        # Suppress transient DNS/network errors.
         error_str = str(context.error)
         transient_keywords = ("getaddrinfo", "NetworkError", "TimedOut", "ConnectionError")
         if any(kw in error_str or kw in type(context.error).__name__ for kw in transient_keywords):
             logger.warning("[TELEGRAM] Transient network error: %s. PTB will auto-retry.", error_str[:200])
             return  # Don't flood log with full traceback for DNS blips
-        # 
         tb_string = traceback.format_exception(
             type(context.error), context.error, context.error.__traceback__
         )

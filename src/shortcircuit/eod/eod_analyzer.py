@@ -56,7 +56,7 @@ class EODAnalyzer:
         soft_stop_results = await self.analyze_soft_stops(target_date)
         stats = self.calculate_performance(trades)
         
-        # 2. Phase 73: Ghost Signal Auditing (labeling missed opportunities)
+        # Ghost audit: label signals that passed validation but were never traded.
         ghost_stats = {"processed": 0, "wins": 0, "losses": 0, "tp_hits": 0, "eod_wins": 0}
         try:
             # Force target_date passed to audit
@@ -75,7 +75,7 @@ class EODAnalyzer:
 
     async def audit_missed_signals(self, target_date: date):
         """
-        Phase 73: Finds signals that passed validation but weren't traded.
+        Finds signals that passed validation but weren't traded.
         Simulates their path (SL/TP) to provide labeled data for the ML Trainer.
         """
         from shortcircuit.observability.ml_logger import MLDataLogger, get_ml_logger
@@ -96,7 +96,7 @@ class EODAnalyzer:
         logger.info(f"Auditing {len(unlabeled)} missed signals for {target_date}...")
         results = {"processed": 0, "wins": 0, "losses": 0, "tp_hits": 0, "eod_wins": 0}
         
-        # Phase 97.2: Global audit timeout to prevent EOD hang
+        # Global audit timeout to prevent EOD hang
         audit_start_ts = time.monotonic()
         MAX_AUDIT_SECONDS = 60
         

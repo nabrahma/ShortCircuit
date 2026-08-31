@@ -90,7 +90,7 @@ class RateLimiter:
         self.total_day_rejections = 0
         self.max_wait_seconds = 0.0
 
-    # ── internals (lock must be held) ─────────────────────────────────────
+    # internals (lock must be held)
 
     @staticmethod
     def _today_epoch() -> float:
@@ -129,7 +129,7 @@ class RateLimiter:
             return 0.0
         return max(0.001, min(max(waits), 60.0))
 
-    # ── public API ────────────────────────────────────────────────────────
+    # public API
 
     def acquire(
         self,

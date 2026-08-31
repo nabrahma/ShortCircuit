@@ -1,13 +1,12 @@
-"""
-Phase 44.6: Capital Management Module — Live Fyers Sync Edition
+"""Position sizing and single-slot capital accounting.
 
-Key changes from Phase 42.1:
-- Removed hardcoded base_capital. Real margin fetched from Fyers GET /funds.
-- compute_qty() for full margin utilization (replaces floor(available/ltp)).
-- acquire_slot() / release_slot() for single-position enforcement.
-- Soft observation mode: slot check is SEPARATE from execution block.
-  Callers can observe capital status without being hard-blocked.
-- Backward-compatible get_status() / can_afford() kept for legacy callers.
+Available margin is read from Fyers GET /funds rather than configured, so
+sizing tracks the real account. The bot holds one position at a time, enforced
+by acquire_slot() / release_slot().
+
+The slot check is deliberately separate from the execution block: a caller can
+ask whether capital is available without being hard-blocked, which is what lets
+a signal be fully observed and logged for ML even when it cannot be traded.
 """
 
 import asyncio
@@ -42,9 +41,7 @@ class CapitalManager:
             f"real_margin=PENDING (call sync() before trading)"
         )
 
-    # ─────────────────────────────────────────────────────────────────────────
     # Properties
-    # ─────────────────────────────────────────────────────────────────────────
 
     @property
     def buying_power(self) -> float:
@@ -62,9 +59,7 @@ class CapitalManager:
     def initial_margin(self) -> float:
         return self._initial_margin
 
-    # ─────────────────────────────────────────────────────────────────────────
     # Fyers Sync
-    # ─────────────────────────────────────────────────────────────────────────
 
     async def sync(self, broker) -> float:
         """
@@ -156,9 +151,7 @@ class CapitalManager:
         logger.warning(f"Abnormal funds structure detected: {json.dumps(funds)}")
         raise ValueError(f"Cannot parse available margin from Fyers funds.")
 
-    # ─────────────────────────────────────────────────────────────────────────
     # Sizing
-    # ─────────────────────────────────────────────────────────────────────────
 
     def compute_qty(self, symbol: str, ltp: float, dynamic_leverage: float = None) -> tuple:
         """
@@ -204,9 +197,7 @@ class CapitalManager:
         )
         return 0, 0.0, 0.0
 
-    # ─────────────────────────────────────────────────────────────────────────
     # Slot Management (Single-Position Architecture)
-    # ─────────────────────────────────────────────────────────────────────────
 
     async def acquire_slot(self, symbol: str):
         """
@@ -284,9 +275,7 @@ class CapitalManager:
             'last_sync': self._last_sync.strftime('%H:%M:%S') if self._last_sync else 'NEVER',
         }
 
-    # ─────────────────────────────────────────────────────────────────────────
     # Legacy Compatibility (keeps existing callers working)
-    # ─────────────────────────────────────────────────────────────────────────
 
     def get_status(self) -> dict:
         """Legacy-compatible — used by order_manager for buying_power lookup."""
@@ -299,7 +288,6 @@ class CapitalManager:
             'positions_count': 1 if self._position_active else 0,
             'active_symbol': self._active_symbol,
         }
-
 
 
     def release(self, symbol: str):

@@ -28,7 +28,7 @@ def _fixed_clock(monkeypatch, start=1_000_000.0):
     return state
 
 
-# ── window enforcement ────────────────────────────────────────────────────
+# window enforcement
 
 def test_grants_up_to_the_per_second_ceiling(monkeypatch):
     clock = _fixed_clock(monkeypatch)
@@ -80,7 +80,7 @@ def test_daily_quota_refuses_beyond_the_cap(monkeypatch):
     assert rl.total_day_rejections == 1
 
 
-# ── priority reservation ──────────────────────────────────────────────────
+# priority reservation
 
 def test_high_priority_has_strictly_more_capacity():
     rl = RateLimiter(per_second=10, per_minute=100, reserve_second=3, reserve_minute=30)
@@ -102,7 +102,7 @@ def test_order_path_priority_is_higher_than_background():
     assert Priority.HIGH > Priority.NORMAL
 
 
-# ── telemetry ─────────────────────────────────────────────────────────────
+# telemetry
 
 def test_snapshot_reports_usage_against_caps(monkeypatch):
     _fixed_clock(monkeypatch)
@@ -123,7 +123,7 @@ def test_timeout_zero_never_blocks(monkeypatch):
     assert rl.acquire(timeout=0) is False       # returns rather than sleeping
 
 
-# ── configured singleton ──────────────────────────────────────────────────
+# configured singleton
 
 def test_the_shipped_limiter_sits_under_the_documented_broker_limits():
     """Fyers: 10/s, 200/min, 100k/day. Ours must be strictly below each."""

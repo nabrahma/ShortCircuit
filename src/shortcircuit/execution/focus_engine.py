@@ -11,7 +11,6 @@ from shortcircuit.execution.order_manager import OrderManager
 
 from shortcircuit.observability.gate_result_logger import get_gate_result_logger
 
-# Setup Logger
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("FocusEngine")
 
@@ -58,7 +57,6 @@ class FocusEngine:
         self.fyers = FyersConnect().authenticate()
         self.trade_manager = trade_manager 
         
-        # Phase 41.3: New Core Engines
         self.order_manager = order_manager
         self.discretionary_engine = discretionary_engine
         
@@ -66,22 +64,21 @@ class FocusEngine:
         self.is_running = False
         self.telegram_bot = None # Injected by main.py
         
-        # Validation Gate & Cooldown Queue (Phase 37 / 43.4)
+        # Validation gate and cooldown queue
         self.pending_signals = {} # {symbol: {signal_data, entry_trigger, invalidation_trigger, timestamp}}
-        self.cooldown_signals = {} # Phase 43.4: {symbol: {data, unlock_at}}
+        self.cooldown_signals = {} # {symbol: {data, unlock_at}}
         self.monitoring_active = False
         self.monitor_thread = None
         
-        # Auto-Recovery on Init
         self.attempt_recovery()
         
-        # Phase 52: Event loop reference for sync thread async dispatch
+        # Event loop reference for sync thread async dispatch
         self._event_loop = None
         
 
     def add_pending_signal(self, signal_data):
         """
-        Phase 37: Adds a signal to the Validation Gate.
+        Adds a signal to the Validation Gate.
         It will ONLY be executed if Price breaks Signal Low (Short).
         """
         symbol = signal_data['symbol']
@@ -90,14 +87,13 @@ class FocusEngine:
             logger.error(f"Cannot validate {symbol}: Missing signal_low")
             return
 
-        # Define Triggers (Phase 51: G12 Tighter Invalidation)
-        # Short Logic: Trigger if Price < Low
+        # A short arms when price breaks the signal candle's low, and is
+        # invalidated by a 0.2% push above its high.
         entry_trigger = signal_low
-        # G12: Tighter invalidation buffer (signal_high * 1.002)
         signal_high = signal_data.get('signal_high', signal_low * 1.01)
         invalidation_trigger = signal_high * 1.002
 
-        # Phase 63: Simplified G11 Fixed Timeout (15 minutes)
+        # Fixed 15-minute expiry.
         IST = pytz.timezone('Asia/Kolkata')
         now_ist = datetime.datetime.now(IST)
         expires_at = now_ist + datetime.timedelta(minutes=15)
@@ -107,13 +103,13 @@ class FocusEngine:
             'trigger': entry_trigger,
             'invalidate': invalidation_trigger,
             'timestamp': time.time(),
-            'expires_at': expires_at, # Phase 51 dynamic timeout
-            'queued_at': datetime.datetime.now(),  # FIX #5: for stale signal flush at 9:45
+            'expires_at': expires_at, # dynamic timeout
+            'queued_at': datetime.datetime.now(),  # for stale signal flush at 9:45
             'correlation_id': signal_data.get('correlation_id'),
-            'last_evaluated_minute': None, # Phase 58: for candle-close validation
+            'last_evaluated_minute': None, # for candle-close validation
         }
         
-        # Phase 51 [G8.3]: Trigger immediate cooldown for this symbol in SignalManager
+        # Trigger immediate cooldown for this symbol in SignalManager
         # This prevents other scanner instances (if parallel) from picking it up
         if hasattr(self, 'analyzer') and self.analyzer:
             try:
@@ -123,7 +119,6 @@ class FocusEngine:
 
         logger.info(f"[GATE] Added {symbol} to Validation Gate. Trigger: < {entry_trigger}")
         
-        # Start Background Monitor if not running
         if not self.monitoring_active:
             self.start_pending_monitor()
 
@@ -172,7 +167,6 @@ class FocusEngine:
             'data': signal_data,
             'unlock_at': unlock_at
         }
-        # Start Background Monitor if not running
         if not self.monitoring_active:
             self.start_pending_monitor()
 
@@ -180,7 +174,6 @@ class FocusEngine:
         """Phase 43.4: Promotes signals whose cooldown has expired."""
         now = datetime.datetime.now()
         
-        # EOD Guard
         if now.hour == 15 and now.minute >= 10:
             if self.cooldown_signals:
                 logger.info("EOD Window active - clearing pending cooldown signals.")
@@ -212,7 +205,7 @@ class FocusEngine:
 
                 if open_val > 0:
                     gain = ((ltp - open_val) / open_val) * 100
-                    # Assuming SC uses DAY_GAIN_PCT_THRESHOLD as positive scalar e.g. 5.0
+                    # The threshold is a positive scalar, so compare on magnitude.
                     if abs(gain) >= config.DAY_GAIN_PCT_THRESHOLD: 
                         logger.info(f"PROMOTED {symbol} from pending — cooldown expired, gain {gain:.2f}%")
                         self.add_pending_signal(meta['data'])
@@ -226,7 +219,7 @@ class FocusEngine:
         if self.monitoring_active:
             return
         self.monitoring_active = True
-        # BUG R2 FIX: explicitly pass loop to fallback thread to fix Python 3.12 RuntimeError
+        # explicitly pass loop to fallback thread to fix Python 3.12 RuntimeError
         try:
             loop = asyncio.get_running_loop()
             if loop.is_running():
@@ -267,7 +260,7 @@ class FocusEngine:
         """Async background loop. Stops automatically at EOD."""
         while self.monitoring_active:
 
-            # ✅ EOD GUARD — kill the loop at 15:10
+            # EOD guard: kill the loop at 15:10.
             now = datetime.datetime.now()
             if now.hour == 15 and now.minute >= 10:
                 logger.info("[GATE] EOD: 15:10 reached — stopping validation monitor.")
@@ -293,13 +286,13 @@ class FocusEngine:
 
     async def check_pending_signals(self, trade_manager):
         """
-        Phase 37: Monitors pending signals for Validation Trigger.
+        Monitors pending signals for Validation Trigger.
         FIX #1: Now async. FIX #3: Slot guard + burn-after-confirm.
         """
         if not self.pending_signals:
             return
 
-        # ✅ EOD GUARD — never execute after 15:10
+        # EOD guard: never execute after 15:10.
         now = datetime.datetime.now()
         if now.hour == 15 and now.minute >= 10:
             logger.info(f"[GATE] EOD guard triggered in check_pending_signals. "
@@ -307,7 +300,6 @@ class FocusEngine:
             self.stop("EOD_CHECK_GUARD")
             return
 
-        # Create copy to avoid runtime error during modification
         current_pending = list(self.pending_signals.items())
         
         for symbol, pending in current_pending:
@@ -315,7 +307,7 @@ class FocusEngine:
                 trigger_price = pending['trigger']
                 inval_price = pending['invalidate']
                 
-                # ── PHASE 58: G12 CANDLE-CLOSE VALIDATION ───────────────────
+                # G12 candle-close validation
                 use_close = getattr(config, 'P58_G12_USE_CANDLE_CLOSE', False)
                 IST = pytz.timezone('Asia/Kolkata')
                 now_ist = datetime.datetime.now(IST)
@@ -383,11 +375,9 @@ class FocusEngine:
                             details=details or {}
                         ))
                 
-                # ── PHASE 51: G10-G12 HARDEING ──────────────────────────────
-                # A. CHECK TRIGGER (VALIDATION CONFIRMED)
-                # For Short: LTP < Trigger (Signal Low)
+                # Trigger check: for a short, LTP below the signal low.
                 if ltp < trigger_price:
-                    # ── G10.1: Execution Precision (Spread Guard) ───────
+                    # G10.1: Execution Precision (Spread Guard)
                     # Soft Gate: Downgrades to CAUTIOUS mode if spread is wide.
                     spread_pct = 0.0
                     try:
@@ -411,7 +401,7 @@ class FocusEngine:
                     adjusted_entry = trigger_price - tick_size
                     pending['data']['adjusted_entry'] = adjusted_entry
 
-                    # ── G10-G12 Recording ──────────────────────────────
+                    # Record the gate outcome.
                     _gr = pending.get('data', {}).get('_gate_result')
                     if _gr is not None:
                         _gr.g10_pass  = True
@@ -429,7 +419,7 @@ class FocusEngine:
                         }
                     )
 
-                    # ── AUTO MODE GATE ───────────────────────────────────────────
+                    # Auto-mode gate
                     auto_enabled = False
                     if hasattr(self, 'telegram_bot') and self.telegram_bot:
                         auto_enabled = self.telegram_bot.is_auto_mode()
@@ -455,12 +445,11 @@ class FocusEngine:
 
                     logger.info(f"✅ [VALIDATED] {symbol} broke {trigger_price} @ {ltp}. Checking capital...")
 
-                    # ────────────────────────────────────────────────────────────────
-                    # CAPITAL SLOT CHECK (Phase 44.6)
-                    # NEW BEHAVIOUR: Signal is fully observed even when capital is locked.
-                    # Show Telegram alert just like a real entry — but with "NOT TAKEN" footer.
-                    # Log to gate_result_logger as OBSERVED_NO_CAPITAL for ML training.
-                    # ────────────────────────────────────────────────────────────────
+                    # Capital slot check
+                    # A signal is fully observed even when capital is locked: it still
+                    # sends its Telegram alert (with a NOT TAKEN footer) and still logs
+                    # as OBSERVED_NO_CAPITAL, so the ML set is not biased toward the
+                    # trades that happened to find a free slot.
                     capital = getattr(self.order_manager, 'capital', None) if self.order_manager else None
 
                     if capital and not capital.is_slot_free:
@@ -500,7 +489,7 @@ class FocusEngine:
                         del self.pending_signals[symbol]
                         continue  # Move to next pending symbol
 
-                    # ── EXECUTION COOLDOWN CHECK (Phase 44.6) ───────────────────────
+                    # Execution cooldown check
                     if self.order_manager:
                         cooldown_active, remaining_secs = self.order_manager.is_exec_cooldown_active(symbol)
                         if cooldown_active:
@@ -521,7 +510,7 @@ class FocusEngine:
                             del self.pending_signals[symbol]
                             continue
 
-                    # ── SLOT GUARD (Signal Manager) ──────────────────────────────────
+                    # Slot guard (SignalManager)
                     analyzer = getattr(self, 'analyzer', None)
                     if analyzer and hasattr(analyzer, 'signal_manager'):
                         can_trade, reason = analyzer.signal_manager.can_signal(symbol, is_execution=True)
@@ -534,7 +523,7 @@ class FocusEngine:
                             del self.pending_signals[symbol]
                             continue
 
-                    # ── ORDER MANAGER GUARD ──────────────────────────────────────────
+                    # OrderManager guard
                     if self.order_manager is None:
                         if _gr is not None:
                             _gr.verdict = "DATA_ERROR"
@@ -553,7 +542,7 @@ class FocusEngine:
 
                     logger.info(f"🚀 [EXECUTING] {symbol} | trigger=₹{trigger_price} ltp=₹{ltp}")
 
-                    # ── EXEC COOLDOWN GATE (Phase 44.6) ─────────────────────────────
+                    # Execution cooldown gate
                     # order_manager._exec_cooldowns is set on any failed entry attempt.
                     # Signal is NOT removed from gate — stays observable for ML logging.
                     if self.order_manager and hasattr(self.order_manager, 'is_exec_cooldown_active'):
@@ -573,7 +562,6 @@ class FocusEngine:
                                 ))
                             # DO NOT delete from pending_signals — keep for continued monitoring
                             continue
-                    # ────────────────────────────────────────────────────────────────
 
                     pos = await self.order_manager.enter_position(pending['data'])
                     logger.info(f"[DEBUG] enter_position returned type={type(pos)} value={pos}")
@@ -612,27 +600,26 @@ class FocusEngine:
                     del self.pending_signals[symbol]
                     continue
                     
-                # B. CHECK INVALIDATION / TIMEOUT
+                # Invalidation and timeout.
                 elif ltp > inval_price:
                     logger.info(f"🚫 [INVALIDATED] {symbol} hit G12 tighter buffer {inval_price}")
                     _queue_validation_update(outcome='REJECTED', details={'reason': 'G12_INVALIDATED_BUFFER', 'ltp': ltp})
                     del self.pending_signals[symbol]
                     continue
                 
-                # C. TIMEOUT (Phase 51 G11: Dynamic expires_at)
+                # Timeout
                 elif datetime.datetime.now(pytz.timezone('Asia/Kolkata')) > pending.get('expires_at', datetime.datetime.now(pytz.timezone('Asia/Kolkata')) + datetime.timedelta(minutes=15)):
                     logger.info(f"⌛ [TIMEOUT] {symbol} expired at {pending.get('expires_at')}")
                     _queue_validation_update(outcome='TIMEOUT', details={'reason': 'G11_DYNAMIC_TIMEOUT'})
                     del self.pending_signals[symbol]
                     continue
                 
-                # No further action needed if within range
                 else:
                     pass
                      
             except Exception as e:
                 logger.error(f"Validation Check Error {symbol}: {e}")
-                # FIX #3: Alert on execution error instead of silent swallow
+                # Alert on execution error instead of silent swallow
                 if self.telegram_bot:
                     asyncio.create_task(self.telegram_bot.send_alert(
                         f"🔴 EXECUTION ERROR {symbol}: {e}"
@@ -766,14 +753,13 @@ class FocusEngine:
         """
         Latch onto a trade. Phase 94: Direction-aware.
         """
-        # Adapt to OrderManager state or Legacy
         entry_price = position_data.get('entry_price', position_data.get('entry', 0))
         sl_price = position_data.get('stop_loss',
                        position_data.get('hard_stop_price',
                            position_data.get('sl', 0)))
         actual_qty = position_data.get('qty', qty)
 
-        # Phase 94: Read direction from shortcircuit.config
+        # Read direction from shortcircuit.config
         direction = config.TRADE_DIRECTION  # 'SHORT' or 'LONG'
         is_long = direction == 'LONG'
 
@@ -835,14 +821,9 @@ class FocusEngine:
             'qty':             actual_qty,
             'remaining_qty':   actual_qty,
             'start_time':      time.time(),
-            'direction':       direction,  # Phase 94: Store direction for TP/BE/PnL logic
+            'direction':       direction,  # Store direction for TP/BE/PnL logic
             
-            # Phase 89.9: Precalculated True Breakeven (3.5% profit @ 5x)
-            # SHORT: Trigger = 0.7% drop, BE SL = 0.25% drop
-            # LONG:  Trigger = 0.7% rise, BE SL = 0.25% rise
-            # be_trigger / be_sl / be_activated removed with the breakeven stop.
-
-            # Phase 96: MFE/MAE tracking for ML trainer
+            # MFE/MAE tracking for the ML trainer.
             'mfe_pct':         0.0,  # Max Favorable Excursion (% from entry)
             'mae_pct':         0.0,  # Max Adverse Excursion (% from entry)
         }
@@ -875,7 +856,6 @@ class FocusEngine:
             f"sl=₹{sl_price:.2f} {_tp_desc}"
         )
         
-        # Start Loop
         self.thread = threading.Thread(target=self.focus_loop, daemon=True)
         self.thread.start()
 
@@ -898,7 +878,7 @@ class FocusEngine:
         """
         broker = self.order_manager.broker if self.order_manager else None
 
-        # ── Fast path: live WS position cache ────────────────────────────
+        # Fast path: live WS position cache
         # A cache HIT is authoritative. A cache MISS is NOT — it only means no
         # position frame has arrived for this symbol yet.
         #
@@ -927,7 +907,7 @@ class FocusEngine:
             except Exception as e:
                 logger.debug(f"[SAFETY] WS position cache read failed: {e}")
 
-        # ── Authoritative path: REST ─────────────────────────────────────
+        # Authoritative path: REST
         try:
             positions = self.fyers.positions()
             if not isinstance(positions, dict) or positions.get('s') != 'ok' \
@@ -950,29 +930,28 @@ class FocusEngine:
             try:
                 symbol = self.active_trade['symbol']
 
-                # ── SAFETY: CHECK IF POSITION CLOSED EXTERNALLY ──────
+                # Safety: has the position been closed externally?
                 if self.order_manager:
-                    # Sync with OrderManager state
                     om_pos = self.order_manager.active_positions.get(symbol)
                     if not om_pos or om_pos['status'] != 'OPEN':
                          logger.info(f"[FOCUS] Position closed in OrderManager. Stopping Focus.")
                          self.stop_focus("CLOSED_EXTERNALLY")
                          return
                     
-                    # Phase 52: monitor_hard_stop_status is async — dispatch correctly from sync thread
+                    # monitor_hard_stop_status is async — dispatch correctly from sync thread
                     if self._event_loop:
                         asyncio.run_coroutine_threadsafe(
                             self.order_manager.monitor_hard_stop_status(symbol),
                             self._event_loop
                         )
 
-                # ── PHASE 99: MANUAL OVERRIDE CHECK ──
+                # Manual-override check
                 manual_override = False
                 if self.order_manager:
                     pos = self.order_manager.active_positions.get(symbol, {})
                     manual_override = pos.get('manual_override', False)
 
-                # ── CRITICAL: TIME-BASED STOP (Mean Reversion Expiration) ───
+                # Time-based stop: the mean-reversion thesis has expired.
                 _max_hold = getattr(config, 'MAX_HOLD_TIME_MINUTES', 0) or 0
                 if not manual_override and _max_hold > 0 and self.order_manager:
                     om_pos = self.order_manager.active_positions.get(symbol)
@@ -992,7 +971,7 @@ class FocusEngine:
                             self.stop_focus("TIME_STOP")
                             return
 
-                # ── CRITICAL: EOD SQUARE-OFF (15:10) ────────────────
+                # EOD square-off at 15:10.
                 now = datetime.datetime.now()
                 if now.hour == 15 and now.minute >= 10:
                     logger.warning(f"⏰ [EOD] Force Closing {symbol} at 15:10")
@@ -1025,7 +1004,6 @@ class FocusEngine:
                         qt = quote.get('v', quote)
                         ltp = qt.get('lp')
 
-                # Skip cycle if no price available
                 if not ltp:
                     time.sleep(1)
                     continue
@@ -1033,7 +1011,7 @@ class FocusEngine:
                 self.active_trade['last_price'] = ltp
                 t = self.active_trade
 
-                # ── Phase 96: Track MFE/MAE on every tick ──────────────────
+                # Track MFE/MAE on every tick
                 _entry = t['entry']
                 if _entry > 0:
                     _tdir = t.get('direction', 'SHORT')
@@ -1053,12 +1031,12 @@ class FocusEngine:
                         self.order_manager.active_positions[symbol]['mfe_pct'] = t['mfe_pct']
                         self.order_manager.active_positions[symbol]['mae_pct'] = t['mae_pct']
 
-                # ── Phase 95: MANUAL CLOSE DETECTION (Broker-side) ──────────
+                # Manual-close detection, broker-side.
                 # Every ~5 seconds, check if the broker still has this position.
                 # If not, the user closed it manually via the app.
                 # SAFETY: Require 2 consecutive CONFIRMED flat reads to avoid
                 # false positives from transient API failures.
-                # Phase 97: Exponential backoff on API failures to avoid rate-limit storms.
+                # Exponential backoff on API failures to avoid rate-limit storms.
                 _last_broker_check = getattr(self, '_last_broker_pos_check', 0)
                 _api_fail_streak = getattr(self, '_api_fail_streak', 0)
                 _check_interval = min(5 * (2 ** _api_fail_streak), 30)  # 5s → 10s → 20s → 30s max
@@ -1179,19 +1157,13 @@ class FocusEngine:
                         self._api_fail_streak = 0
 
 
-                # ── Breakeven stop: REMOVED 2026-08-12 ────────────────────
-                # The automatic breakeven move is gone at the operator's
-                # request, for the same reason the take-profit went: it is a
-                # profit-side decision, and profit-side decisions are manual.
-                # A position now exits on its broker-side stop or the 15:10
-                # square-off, and on nothing else the bot decides by itself.
-                #
-                # It also never worked reliably: the 2026-08-11 DEVYANI move
-                # was rejected by the broker, leaving the original stop in
-                # place while the alert claimed a change had been attempted.
-                # Do not reintroduce without evidence from data/ml/.
+                # There is deliberately no standalone breakeven stop here. The
+                # profit-triggered version (move the stop once the trade is 0.7%
+                # onside) was removed on 2026-08-12: it is a profit-side decision,
+                # and those are the operator's. The only breakeven left is the one
+                # tied to the scale-out partial below, behind P52_BREAKEVEN_AFTER_TP1.
                 
-                # ── TAKE-PROFIT ENGINE (restored 2026-08-30) ──────────────────────
+                # Take-profit engine (restored 2026-08-30).
                 # Removed on 6 Aug because the midpoint target "capped every
                 # winner". Replaying all 46 LIVE trades since 11 Jun on real
                 # 1-minute candles does not support that: no-TP scored -3.10 over
@@ -1210,7 +1182,7 @@ class FocusEngine:
                 #   SCALE  — the VWAP target, closing whatever the partial left.
                 _full_exit_level = t.get('tp_1') if _tp_mode == 'SINGLE' else t.get('tp')
 
-                # ── Stage 1: the full exit, checked FIRST ─────────────────────
+                # Stage 1: the full exit, checked FIRST
                 # Order matters. A fast mover can gap through the midpoint and the
                 # VWAP target inside one 5Hz tick. Taking the partial first would
                 # dispatch partial_exit(half) and safe_exit(remaining) into the
@@ -1237,7 +1209,7 @@ class FocusEngine:
                     self.stop_focus("TP_HIT")
                     return
 
-                # ── Stage 2: the midpoint partial (SCALE only) ────────────────
+                # Stage 2: the midpoint partial (SCALE only)
                 if (not manual_override and _tp_mode == 'SCALE'
                         and not t.get('tp_1_hit') and target_reached(ltp, t.get('tp_1'), _tp_dir)):
                     exit_qty = t['remaining_qty'] // 2
@@ -1326,11 +1298,11 @@ class FocusEngine:
                                     )
 
 
-                # ── SOFT STOP (existing logic — keep for non-partial-exit fallback) ──
-                partial_enabled = False  # Phase 93: Partial exit not currently active
+                # Soft stop. Kept as the non-partial-exit fallback path.
+                partial_enabled = False
                 if not manual_override and not partial_enabled and self.discretionary_engine and self.order_manager:
                     soft_sl = t['soft_sl']
-                    # Phase 94: Direction-aware soft stop.
+                    # Direction-aware soft stop.
                     # _trade_dir used to be defined by the breakeven block above;
                     # that block is gone, so it is resolved here where it is used.
                     _trade_dir = t.get('direction', 'SHORT')
@@ -1351,12 +1323,7 @@ class FocusEngine:
                             self.stop_focus("SOFT_STOP")
                             return
 
-                # ── FALLBACK / LEGACY LOGIC ──────────────────────
-                # Keep simplistic trailing if Discretionary Engine not active?
-                # Or just rely on Hard SL (monitored by order_manager)
-                    
-                    
-                # Phase 89.9: High-frequency heartbeat for 200ms latency execution
+                                # 5 Hz heartbeat.
                 time.sleep(0.2)
 
                 
@@ -1384,7 +1351,6 @@ class FocusEngine:
             logger.error(f"Cleanup Orders Error: {e}")
 
 
-
     def stop_focus(self, reason="STOPPED"):
         trade = self.active_trade
         symbol = trade['symbol'] if trade else None
@@ -1392,7 +1358,7 @@ class FocusEngine:
         self.active_trade = None
         logger.info(f"[FOCUS] Stop. Reason: {reason}")
         
-        # Phase 52: Cancel ALL pending orders on any stop
+        # Cancel ALL pending orders on any stop
         # Prevents phantom SL order creating accidental LONG after manual close
         if symbol and getattr(config, 'P52_CLEANUP_ON_STOP_FOCUS', True):
             try:

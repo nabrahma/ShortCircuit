@@ -61,7 +61,6 @@ class TimeoutHTTPAdapter(HTTPAdapter):
         return super().send(request, **kwargs)
 
 
-
 # Set once enforce_rest_timeouts() succeeds, so the 'no Session' path can tell
 # an expected 3.1.7 layout from a genuinely unprotected client.
 _REST_BOUNDED = False
@@ -311,7 +310,7 @@ class FyersConnect:
         #
         # BUG-2026-08-12: this preferred FYERS_ACCESS_TOKEN over the cached file
         # unconditionally, on the strength of `len(token) > 20`, and logged
-        # "✅ Found Valid Token in Env Var" without checking anything. A token
+        # " Found Valid Token in Env Var" without checking anything. A token
         # left in .env from 2026-01-09 therefore beat a token cached minutes ago
         # and still valid for hours, so every start burned a full interactive
         # re-login. Under FYERS_NO_INTERACTIVE (the container) it raises instead,
@@ -391,7 +390,7 @@ class FyersConnect:
         auth_code_raw = input("👉 Paste the Auth Code (or complete redirect URL) here: ").strip()
         auth_code = auth_code_raw
         
-        # Smart URL Pasting (Phase 85)
+        # Accept either a bare auth code or the whole redirect URL.
         if "auth_code=" in auth_code_raw:
              try:
                  # Extract auth_code from URL parameters
@@ -411,7 +410,7 @@ class FyersConnect:
         if response.get('s') == 'ok':
             return response['access_token']
         else:
-            # Phase 91.3: If token generation fails, clear the bad token file and env var
+            # If token generation fails, clear the bad token file and env var
             logger.error(f"Fyers token generation failed: {response}")
             if TOKEN_FILE.exists():
                 TOKEN_FILE.unlink()
@@ -472,7 +471,7 @@ class FyersConnect:
             logger.warning(f"Could not load token: {e}")
         return None
     
-    # Delegate other methods for backward compatibility if needed, 
+    # Delegate other methods for backward compatibility if needed,
     # but preferably access .fyers directly.
     
     @property

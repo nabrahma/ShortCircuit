@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+# coding: utf-8
 import asyncio
 import logging
 from datetime import datetime, time as dt_time
@@ -87,7 +87,7 @@ async def eod_scheduler(
                 await notify(f"EOD Analysis FAILED: {exc}")
             analysis_done_today = True
 
-            # ── Bug 2A FIX: Fire graceful shutdown after EOD work is done ──
+            # Fire graceful shutdown after EOD work is done
             logger.info("[EOD_SCHEDULER] All EOD tasks complete. Firing shutdown.")
             await notify("✅ EOD complete. Shutting down bot.")
             shutdown_event.set()

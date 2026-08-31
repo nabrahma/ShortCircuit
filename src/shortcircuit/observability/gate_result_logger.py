@@ -26,9 +26,7 @@ from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-# ================================================================
 # Dataclass
-# ================================================================
 
 @dataclass
 class GateResult:
@@ -73,9 +71,7 @@ class GateResult:
     qty:         Optional[int]   = None
 
 
-# ================================================================
 # Logger Singleton
-# ================================================================
 
 class GateResultLogger:
     """
@@ -148,9 +144,7 @@ class GateResultLogger:
         else:
             self._suppression[key] = (now, 0)
 
-    # ----------------------------------------------------------------
     # Public API
-    # ----------------------------------------------------------------
 
     def record(self, gr: GateResult, *, force: bool = False) -> None:
         """
@@ -245,9 +239,7 @@ class GateResultLogger:
             parts.append(f"{name}:{status}{val_str}{arrow}")
         return " ".join(parts) if parts else "(no gates evaluated)"
 
-    # ----------------------------------------------------------------
     # EOD Summary
-    # ----------------------------------------------------------------
 
     def write_eod_summary(self, session_date: Optional[datetime.date] = None) -> str:
         """
@@ -324,9 +316,7 @@ class GateResultLogger:
         logger.info(f"[GateResultLogger] EOD summary written to {path}")
         return path
 
-    # ----------------------------------------------------------------
     # PostgreSQL Flush — Shared logic for periodic + EOD
-    # ----------------------------------------------------------------
 
     _INSERT_SQL = """
         INSERT INTO gate_results (
@@ -410,7 +400,7 @@ class GateResultLogger:
             try:
                 # Support float conversion for everything numeric
                 if expected_type == float:
-                    # _to_num logic already applied in _build_rows, 
+                    # _to_num logic already applied in _build_rows,
                     # but double check and catch asyncpg-specific decimal issues
                     out[i] = float(val)
                 elif expected_type == str:
@@ -468,11 +458,11 @@ class GateResultLogger:
                 f"[GateResultLogger] GATE FLUSH ERROR: {e} — "
                 f"writing {len(safe_rows)} records to JSON fallback"
             )
-            # PRD-3: Never lose data — write to JSONL fallback file
+            # Never lose data — write to JSONL fallback file
             await self._flush_to_json_fallback(pending)
             # We DON'T increment _flushed_count because reimport script will handle these,
             # but usually we'd want to skip them for subsequent flushes in-memory.
-            # However, logic in _flush_batch is [self._flushed_count:]. 
+            # However, logic in _flush_batch is [self._flushed_count:].
             # If we don't increment, we'll try to re-flush them to DB later.
             # Better to increment and let JSON fallback be the primary record.
             self._flushed_count += len(safe_rows)
@@ -547,8 +537,6 @@ class GateResultLogger:
         return flushed
 
 
-
-
 def _to_num(val) -> Optional[float]:
     """Coerce to float or None for DB insert."""
     if val is None:
@@ -559,9 +547,7 @@ def _to_num(val) -> Optional[float]:
         return None
 
 
-# ================================================================
 # Module-level singleton
-# ================================================================
 
 _gate_result_logger: Optional[GateResultLogger] = None
 

@@ -256,7 +256,7 @@ class MLDataLogger:
             "upper_wick_pct": features.get("upper_wick_pct", 0),
             "lower_wick_pct": features.get("lower_wick_pct", 0),
 
-            # ── Strategy quality features ──────────────────────────────────
+            # Strategy quality features
             # These four are declared in FEATURE_COLUMNS and are passed in by
             # analyzer._finalize_signal, but were never copied into the observation
             # record — so _dataframe_from_buffer backfilled them as None and every
@@ -387,7 +387,6 @@ class MLDataLogger:
             ]
             return pd.DataFrame(unlabeled)
     
-
 
 # Singleton instance
 _ml_logger: Optional[MLDataLogger] = None

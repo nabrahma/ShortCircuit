@@ -78,7 +78,7 @@ def prime_index(ctx: MarketContext, close: float, *, age_s: float = 0.0, monkeyp
                         lambda symbol=None: candles_at(close))
 
 
-# ── construction ──────────────────────────────────────────────────────────
+# construction
 
 def test_morning_range_is_valid_when_both_bounds_are_supplied(ctx):
     assert ctx.morning_range_valid is True
@@ -104,7 +104,7 @@ def test_an_invalid_index_symbol_raises_rather_than_trading_blind(monkeypatch):
         MarketContext(StubFyers())
 
 
-# ── time gates ────────────────────────────────────────────────────────────
+# time gates
 
 @freeze_time(BEFORE_OPEN)
 def test_blocked_before_0930(ctx):
@@ -135,7 +135,7 @@ def test_the_cutoff_boundary_is_exclusive(ctx):
     assert "EOD Cutoff" in reason
 
 
-# ── fail-closed on index data ─────────────────────────────────────────────
+# fail-closed on index data
 
 @freeze_time(IN_WINDOW)
 def test_missing_index_data_blocks(ctx, monkeypatch):
@@ -170,7 +170,7 @@ def test_missing_morning_range_blocks(monkeypatch):
     assert "Morning range" in reason
 
 
-# ── regime detection ──────────────────────────────────────────────────────
+# regime detection
 
 @freeze_time(IN_WINDOW)
 def test_strong_index_uptrend_blocks_new_shorts(ctx, monkeypatch):
@@ -226,7 +226,7 @@ def test_trend_label_defaults_to_unknown(ctx):
     assert ctx.get_trend_label() == "UNKNOWN"
 
 
-# ── circuit blacklist ─────────────────────────────────────────────────────
+# circuit blacklist
 
 def test_marking_a_symbol_blacklists_it(ctx):
     assert ctx.is_circuit_hitter("NSE:TEST-EQ") is False
@@ -258,7 +258,7 @@ def test_the_blacklist_does_not_clear_within_the_same_day(ctx):
     assert ctx.is_circuit_hitter("NSE:TEST-EQ") is True
 
 
-# ── volume z-score ────────────────────────────────────────────────────────
+# volume z-score
 
 def test_volume_z_score_of_a_spike_is_positive(ctx):
     vols = [1_000] * 20 + [50_000]
@@ -285,7 +285,7 @@ def test_volume_z_score_guards_return_zero_not_nan(ctx, df):
     assert result == 0.0
 
 
-# ── index data: WS cache first, REST second ───────────────────────────────
+# index data: WS cache first, REST second
 
 class StubBroker:
     """Stands in for the broker's live websocket quote cache."""
@@ -389,7 +389,7 @@ def test_broker_exception_during_rest_is_swallowed():
     assert MarketContext(Boom())._get_index_data_cached() is None
 
 
-# ── morning range over REST ───────────────────────────────────────────────
+# morning range over REST
 
 def ist_epoch(y, m, d, hh, mm):
     from zoneinfo import ZoneInfo
@@ -446,7 +446,7 @@ def test_only_todays_bars_count_towards_the_morning_range():
     assert c._fetch_morning_range_from_rest() == (25_100.0, 24_900.0)
 
 
-# ── morning range refresh ─────────────────────────────────────────────────
+# morning range refresh
 
 @freeze_time(IN_WINDOW)
 def test_refresh_populates_the_range_on_success():

@@ -63,7 +63,7 @@ def ok(margin):
                      "margin_new_order": margin, "prevMargin": 0}}
 
 
-# ── the reading itself ────────────────────────────────────────────────────
+# the reading itself
 
 def test_margin_equal_to_price_reads_as_one_times(patched):
     """
@@ -110,7 +110,7 @@ def test_it_asks_about_the_side_the_bot_actually_trades(patched):
     assert order["productType"] == "INTRADAY"
 
 
-# ── unknown must never mean "blocked" ─────────────────────────────────────
+# unknown must never mean "blocked"
 
 @pytest.mark.parametrize("kw,why", [
     ({"status": 500, "response": {}}, "server error"),
@@ -145,7 +145,7 @@ def test_a_failed_lookup_is_not_cached(patched):
     assert "NSE:X-EQ" not in b._leverage_cache
 
 
-# ── cost control ──────────────────────────────────────────────────────────
+# cost control
 
 def test_a_confirmed_reading_is_cached(patched):
     b = broker(ok(106.34))
@@ -170,7 +170,7 @@ def test_a_good_reading_is_not_blacklisted(patched):
     assert b._low_leverage_blacklist == set()
 
 
-# ── the floor ─────────────────────────────────────────────────────────────
+# the floor
 
 def test_the_floor_sits_in_the_empty_gap():
     """

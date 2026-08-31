@@ -1,6 +1,8 @@
-"""
-Phase 44.6: StartupRecovery — now adopts orphans, places emergency SL.
-Previously: logged only. Now: acts.
+"""Boot-time recovery of positions the bot did not open itself.
+
+A restart mid-session can find live positions at the broker with no local
+state — a crash, a redeploy, or a manual trade. This adopts them and places an
+emergency stop rather than leaving them unmanaged.
 """
 import logging
 import asyncio
@@ -13,9 +15,9 @@ class StartupRecovery:
 
     def __init__(self, fyers_client, order_manager=None, capital_manager=None, telegram=None):
         self.fyers          = fyers_client
-        self.order_manager  = order_manager    # NEW
-        self.capital        = capital_manager  # NEW
-        self.telegram       = telegram         # NEW
+        self.order_manager  = order_manager
+        self.capital        = capital_manager
+        self.telegram       = telegram
         logger.info("[RECOVERY] StartupRecovery initialized (Phase 44.6 — adoption enabled).")
 
     async def scan_orphaned_trades(self):
@@ -24,7 +26,7 @@ class StartupRecovery:
         Adopts orphans and recovers state if any are found.
         """
         try:
-            # Phase 89.1: Enforce strict timeout to prevent indefinite sync hangs
+            # Enforce strict timeout to prevent indefinite sync hangs
             positions = await asyncio.wait_for(
                 asyncio.to_thread(self.fyers.positions), 
                 timeout=15.0
@@ -51,7 +53,7 @@ class StartupRecovery:
                 avg     = p.get('avgPrice', 0.0)
                 logger.critical(f"   - {sym}: qty={qty} ({side}) avgPrice=₹{avg:.2f}")
 
-                # Phase 44.6: Attempt adoption instead of just logging
+                # Attempt adoption instead of just logging
                 if self.order_manager and self.capital:
                     try:
                         # Since we're now async, directly await the adoption

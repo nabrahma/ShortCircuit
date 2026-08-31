@@ -3,17 +3,17 @@ Central symbol registry for Fyers API
 All symbols MUST use Fyers exact format
 """
 
-# ===== INDICES =====
+# INDICES
 NIFTY_50 = 'NSE:NIFTY50-INDEX'
 BANK_NIFTY = 'NSE:NIFTYBANK-INDEX'
 FIN_NIFTY = 'NSE:FINNIFTY-INDEX'
 MIDCAP_NIFTY = 'NSE:NIFTYMID50-INDEX'
 
-# ===== REFERENCE INDEX =====
+# Reference index
 # Default index for market regime detection
 DEFAULT_INDEX = NIFTY_50
 
-# ===== SYMBOL VALIDATION =====
+# Symbol validation
 def validate_symbol(symbol: str) -> bool:
     """
     Validate symbol format for Fyers API
@@ -51,8 +51,6 @@ def validate_symbol(symbol: str) -> bool:
     return True
 
 
-
-# ─── Phase 44.8 ────────────────────────────────────────────────
 import calendar
 from datetime import datetime, timedelta
 

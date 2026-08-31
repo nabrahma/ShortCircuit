@@ -14,7 +14,6 @@ logger = logging.getLogger(__name__)
 FORCE_REST_SYNC_INTERVAL = 300  # 5 minutes
 
 
-
 # Tick sizes learned from the broker's own rejection messages, per session.
 # NSE revised its tick bands in April 2025 and the position payload does not
 # carry a tick size, so guessing is not viable — but a rejection states the
@@ -50,7 +49,7 @@ def round_stop_away_from_entry(raw: float, tick: float, side: str) -> float:
 
 class ReconciliationEngine:
     """
-    Phase 42.3: HFT Reconciliation Engine — Zero-cost when flat, cache-driven when live.
+    HFT Reconciliation Engine — Zero-cost when flat, cache-driven when live.
 
     Architecture:
     - FLAT STATE  → pure cache check, 0 REST calls, 0 DB queries. Sub-millisecond.
@@ -63,23 +62,23 @@ class ReconciliationEngine:
         broker: FyersBrokerInterface,
         db_manager: DatabaseManager,
         telegram_bot,
-        capital_manager=None,    # NEW Phase 44.6
-        order_manager=None,      # NEW Phase 44.6
+        capital_manager=None,
+        order_manager=None,
     ):
         self.broker         = broker
         self.db             = db_manager
         self.telegram       = telegram_bot
-        self.capital        = capital_manager   # NEW
-        self.order_manager  = order_manager     # NEW
+        self.capital        = capital_manager
+        self.order_manager  = order_manager
         self.running        = False
 
-        # ── Internal State Cache ──────────────────────────────────────
+        # Internal State Cache
         self._db_positions:      dict = {}
         self._db_dirty:          bool = True
         self._has_open_positions: bool = False
         self._shutdown_event:    asyncio.Event = None
         self._last_rest_sync:    float = 0.0
-        self._recently_closed:   dict = {}  # Phase 98.1: symbol → close_timestamp (grace period)
+        self._recently_closed:   dict = {}  # symbol → close_timestamp (grace period)
         self._recently_modified: dict = {}  # symbol → timestamp (grace period for entry/partial exit)
         self._orphan_grace_secs: float = 30.0  # Ignore orphans for 30s after internal close
 
@@ -90,9 +89,8 @@ class ReconciliationEngine:
         # entitled to manage their own stop; the bot must not fight them for it.
         self._adoptions: dict = {}
         self._naked_alert_cooldown: float = 900.0   # re-warn at most every 15 min
-        # ─────────────────────────────────────────────────────────────
 
-    # ── Called by TradeManager when trade opens or closes ─────────────
+    # Called by TradeManager when trade opens or closes
     def mark_dirty(self):
         """
         Call this from TradeManager whenever a trade opens or closes.
@@ -102,7 +100,7 @@ class ReconciliationEngine:
 
     def mark_recently_closed(self, symbol: str):
         """
-        Phase 98.1: Record that a position was just closed internally.
+        Record that a position was just closed internally.
         Prevents false orphan alerts during broker settlement lag.
         """
         import time
@@ -118,7 +116,6 @@ class ReconciliationEngine:
         import time
         self._recently_modified[symbol] = time.time()
         logger.debug(f"[RECONCILE] {symbol} marked recently modified — grace period active")
-    # ──────────────────────────────────────────────────────────────────
 
 
     async def _classify_exit(self, sym: str, pos: dict):
@@ -267,16 +264,16 @@ class ReconciliationEngine:
             - Full compare + alert on divergence
         """
 
-        # ── STEP 1: Read broker cache directly (0 cost) ───────────────
+        # Step 1: read the broker cache directly (zero cost).
         broker_open = self._read_broker_cache()
         
-        # ── STEP 1.5: Periodic Force REST Sync ────────────────────────
+        # Step 1.5: periodic forced REST sync.
         # Guarantee recovery even if WS cache/DB flags fail
         loop = asyncio.get_event_loop()
         now = loop.time()
         force_live = (now - self._last_rest_sync) > FORCE_REST_SYNC_INTERVAL
 
-        # ── FAST PATH: Both sides flat ─────────────────────────────────
+        # FAST PATH: Both sides flat
         if not force_live and not broker_open and not self._has_open_positions and not self._db_dirty:
             # Nothing on broker, nothing tracked locally, no recent updates → definitively flat
             return
@@ -285,7 +282,7 @@ class ReconciliationEngine:
             logger.info("📡 [REC] Periodic Force REST Sync triggered (5-min safety).")
             self._last_rest_sync = now
 
-        # ── LIVE PATH ─────────────────────────────────────────────────
+        # Live path
         # Broker has positions OR we think DB has positions
 
         # Step 2: Get broker positions (cache-first, REST fallback)
@@ -322,7 +319,7 @@ class ReconciliationEngine:
             b_qty_abs = abs(b_pos.get('qty', 0) or 0)
             b_qty = b_pos.get('net_qty', b_qty_abs)
             if symbol not in db_positions:
-                # Phase 98.1: Grace period — skip orphan alert if recently closed internally
+                # Grace period — skip orphan alert if recently closed internally
                 import time
                 closed_at = self._recently_closed.get(symbol, 0)
                 if time.time() - closed_at < self._orphan_grace_secs:
@@ -388,7 +385,7 @@ class ReconciliationEngine:
                     orphans, phantoms, mismatched
                 )
 
-    # ── Private Helpers ───────────────────────────────────────────────
+    # Private Helpers
 
     def _read_broker_cache(self) -> bool:
         """
@@ -531,7 +528,7 @@ class ReconciliationEngine:
 
     async def adopt_orphan(self, broker_pos: dict):
         """
-        Phase 44.9.3: Adopt an orphaned broker position (manual trade detection).
+        Adopt an orphaned broker position (manual trade detection).
 
         Called when broker has a position not tracked internally.
         Fires within 6 seconds of your manual entry during market hours.
@@ -552,7 +549,7 @@ class ReconciliationEngine:
         side      = 'SHORT' if net_qty < 0 else 'LONG'
         avg_price = broker_pos.get('avg_price', 0.0)
 
-        # Phase 95: Fallback to LTP if avg_price is 0 (WS cache didn't have it)
+        # Fallback to LTP if avg_price is 0 (WS cache didn't have it)
         if avg_price == 0 or avg_price is None:
             try:
                 avg_price = await self.broker.get_ltp(symbol) or 0.0
@@ -575,7 +572,7 @@ class ReconciliationEngine:
                 )
             return
 
-        # ── IDEMPOTENCY GUARD ─────────────────────────────────────────────────
+        # Idempotency guard
         # If symbol already registered, a prior adoption cycle completed successfully.
         # Do not place another SL or overwrite state.
         if self.order_manager and symbol in self.order_manager.active_positions:
@@ -605,7 +602,7 @@ class ReconciliationEngine:
         sl_side = 'BUY' if side == 'SHORT' else 'SELL'
 
         try:
-            # ── Step 0: is this position already protected? ──────────────────
+            # Step 0: is this position already protected?
             # The operator may be running their own stop, or ours may still be
             # live from an earlier adoption. Either way, do not place a second.
             existing = await self._find_live_protective_order(symbol, sl_side)
@@ -622,7 +619,7 @@ class ReconciliationEngine:
                 sl_id = existing
                 sl_price = 0.0
 
-            # ── Step 1: Compute tick-safe SL price ───────────────────────────
+            # Step 1: Compute tick-safe SL price
             sl_pct  = 0.01   # emergency 1% SL for adopted orphan
             raw_sl  = (
                 avg_price * (1 + sl_pct) if side == 'SHORT'
@@ -637,7 +634,7 @@ class ReconciliationEngine:
                     f"(tick={tick_size})"
                 )
 
-            # ── Step 2: Place emergency SL, learning the tick if rejected ────
+            # Step 2: Place emergency SL, learning the tick if rejected
             for attempt in ((1, 2) if not existing else ()):
                 try:
                     sl_id = await self.broker.place_order(
@@ -706,7 +703,7 @@ class ReconciliationEngine:
                         f"⚠️ **Position is NAKED. Close manually NOW.**"
                     )
 
-            # ── Step 3: Register in order_manager internal state ──────────────
+            # Step 3: Register in order_manager internal state
             if self.order_manager:
                 self.order_manager.active_positions[symbol] = {
                     'symbol':      symbol,
@@ -724,7 +721,7 @@ class ReconciliationEngine:
                     self.order_manager.hard_stops[symbol] = sl_id
                 logger.info(f"[ADOPT] Position registered in active_positions: {symbol}")
 
-            # ── Step 4: Log to DB ─────────────────────────────────────────────
+            # Step 4: Log to DB
             # CRITICAL: This is what stops infinite re-detection.
             # Without this, every reconcile cycle re-detects the same orphan.
             # Persisting the adoption is what stops infinite re-detection: until the
@@ -781,13 +778,13 @@ class ReconciliationEngine:
                     symbol,
                 )
 
-            # ── Step 5: Mark DB dirty ─────────────────────────────────────────
+            # Step 5: Mark DB dirty
             # Forces fresh DB read next reconcile cycle.
             # After fresh read, symbol will appear in db_positions → no longer an orphan.
             self._db_dirty = True
             logger.info(f"[ADOPT] _db_dirty set True for {symbol}")
 
-            # ── Step 6: Acquire capital slot ──────────────────────────────────
+            # Step 6: Acquire capital slot
             if self.capital:
                 if self.capital.is_slot_free:
                     try:
@@ -816,7 +813,7 @@ class ReconciliationEngine:
                             f"**Recommended:** Close one position manually."
                         )
 
-            # ── Step 7: Final Telegram alert ──────────────────────────────────
+            # Step 7: Final Telegram alert
             sl_status = f"₹{sl_price:.2f} (id: {sl_id})" if sl_id else "FAILED ⚠️ Close manually!"
             cap_status = "✅ Acquired" if (self.capital and not self.capital.is_slot_free and
                                             self.capital.active_symbol == symbol) else "⚠️ Slot occupied by other trade"
@@ -849,7 +846,7 @@ class ReconciliationEngine:
 
     async def _handle_divergence(self, db_pos, broker_pos, orphans, phantoms, mismatched):
         """
-        Phase 44.6: Detect + ACT on state divergence.
+        Detect + ACT on state divergence.
         Previous version: alert only.
         Now: adopts orphans, releases phantom capital slots.
         """
@@ -864,7 +861,7 @@ class ReconciliationEngine:
                 f"Phantoms={len(phantoms)}, Mismatch={len(mismatched)}"
             )
     
-        # ── DB log (defensive — tries both column name conventions) ────────
+        # DB log (defensive — tries both column name conventions)
         async def _try_insert(int_col: str, brk_col: str) -> bool:
             try:
                 await self.db.execute(f"""
@@ -913,11 +910,11 @@ class ReconciliationEngine:
             except Exception as migrate_err:
                 logger.error(f"Reconciliation DB migration failed: {migrate_err}")
     
-        # ── ORPHANS: broker has position, internal state doesn't ─────────
+        # ORPHANS: broker has position, internal state doesn't
         for orphan in orphans:
             sym = orphan['symbol']
 
-            # IDEMPOTENCY GUARD: if already in active_positions, do not re-adopt.
+            # Idempotency guard: if already in active_positions, do not re-adopt.
             # This prevents double-adoption when two reconcile cycles fire close together.
             if (self.order_manager and
                     sym in self.order_manager.active_positions):
@@ -941,7 +938,7 @@ class ReconciliationEngine:
             }
             await self.adopt_orphan(adopt_data)
     
-        # ── PHANTOMS: internal state has position, broker doesn't ────────
+        # PHANTOMS: internal state has position, broker doesn't
         # This fires when YOU manually close a position outside the bot.
         # We must: (1) run the full close path, (2) release capital, (3) reset DB cache.
         for phantom in phantoms:
@@ -965,7 +962,7 @@ class ReconciliationEngine:
             finalized = False
             if self.order_manager and sym in self.order_manager.active_positions:
                 try:
-                    # Phase 78.2: Fetch LTP for accurate PnL logging
+                    # Fetch LTP for accurate PnL logging
                     pos = self.order_manager.active_positions[sym]
                     exit_price = 0.0
                     pnl = 0.0
@@ -975,7 +972,7 @@ class ReconciliationEngine:
                             entry_price = pos.get('entry_price', 0.0)
                             qty = pos.get('qty', 0)
                             if entry_price > 0 and qty > 0:
-                                # Phase 94: Direction-aware PnL
+                                # Direction-aware PnL
                                 import shortcircuit.config as _cfg
                                 _dir = pos.get('side', _cfg.TRADE_DIRECTION)
                                 if _dir == 'LONG':
@@ -1010,7 +1007,7 @@ class ReconciliationEngine:
                     self.order_manager.hard_stops.pop(sym, None)
                     self.order_manager.exit_in_progress.pop(sym, None)
                     
-                # Phase 89.9: Hard-close the ghost position in the database to break the loop
+                # Hard-close the ghost position in the database to break the loop
                 try:
                     await self.db.execute(
                         "UPDATE positions SET state = 'CLOSED', closed_at = NOW() WHERE symbol = $1 AND state = 'OPEN'", 
@@ -1020,17 +1017,16 @@ class ReconciliationEngine:
                 except Exception as e:
                     logger.error(f"[GHOST] Failed to hard-close phantom {sym} in DB: {e}")
 
-            # Step 1.5: Phase 89.9 Cleanup orphaned orders for this symbol
+            # Drop any orders left tracked for a symbol that is now flat.
             if hasattr(self.order_manager, 'trade_manager'):
                  self.order_manager.trade_manager.cleanup_active_orders(sym)
             elif hasattr(self, 'trade_manager'):
                  self.trade_manager.cleanup_active_orders(sym)
 
-            # Step 2: Release capital slot if still occupied.
-            # BUG FIX: Do NOT check active_symbol == sym.
-            # This is a single-position bot — any phantom means slot should be free.
-            # Step 2: Release capital slot if still occupied.
-            # Phase 89.8: Aggressive Force-Clear to ensure no trade is missed after manual exit.
+            # Step 2: release the capital slot if still occupied. Deliberately does
+            # not check active_symbol == sym — this is a single-position bot, so any
+            # phantom means the slot should be free, and leaving it held would block
+            # every later trade.
             if self.capital and not self.capital.is_slot_free:
                 try:
                     logger.critical(f"🚨 [RECOVERY] Force-clearing slot for manually closed position: {sym}")
@@ -1093,7 +1089,7 @@ class ReconciliationEngine:
                     f"✅ DB position marked CLOSED."
                 )
     
-        # ── MISMATCHED: qty differs ───────────────────────────────────────
+        # MISMATCHED: qty differs
         for mm in mismatched:
             logger.critical(
                 f"⚠️ QTY MISMATCH: {mm['symbol']} "

@@ -18,7 +18,7 @@ from shortcircuit.marketdata import symbols
 IST = timezone(timedelta(hours=5, minutes=30))
 
 
-# ── symbols.py ────────────────────────────────────────────────────────────
+# symbols.py
 
 @pytest.mark.parametrize("sym", [
     "NSE:SBIN-EQ", "NSE:NIFTY50-INDEX", "NSE:RELIANCE-EQ", "NSE:NIFTYBANK-INDEX",
@@ -47,7 +47,7 @@ def test_default_index_is_nifty50():
     assert symbols.DEFAULT_INDEX == symbols.NIFTY_50
 
 
-# ── market_utils.py ───────────────────────────────────────────────────────
+# market_utils.py
 
 @freeze_time("2026-08-03 06:00:00")          # 11:30 IST, a Monday
 def test_market_hours_true_during_the_session():
@@ -74,7 +74,7 @@ def test_market_open_boundary_is_inclusive():
     assert market_utils.is_market_hours() is True
 
 
-# ── config.py — no secret may have a usable default ───────────────────────
+# config.py — no secret may have a usable default
 
 SECRET_KEYS = [
     "FYERS_CLIENT_ID", "FYERS_SECRET_ID", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID",
@@ -146,7 +146,7 @@ def test_dotenv_file_is_git_ignored():
     assert result.returncode == 0, ".env is not git-ignored"
 
 
-# ── config.py — invariants the risk model depends on ──────────────────────
+# config.py — invariants the risk model depends on
 
 def test_scanner_gain_band_is_ordered():
     assert config.SCANNER_GAIN_MIN_PCT < config.SCANNER_GAIN_MAX_PCT

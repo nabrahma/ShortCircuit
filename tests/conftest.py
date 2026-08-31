@@ -28,9 +28,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 IST = timezone(timedelta(hours=5, minutes=30))
 
 
-# ──────────────────────────────────────────────────────────────────────────
 # Safety guards
-# ──────────────────────────────────────────────────────────────────────────
 
 @pytest.fixture(autouse=True)
 def no_network(monkeypatch, request):
@@ -70,9 +68,7 @@ def no_real_credentials(monkeypatch, request):
         monkeypatch.delenv(key, raising=False)
 
 
-# ──────────────────────────────────────────────────────────────────────────
 # Candle fixtures — deterministic OHLCV frames
-# ──────────────────────────────────────────────────────────────────────────
 
 def _frame(rows: list[tuple]) -> pd.DataFrame:
     """rows: (open, high, low, close, volume) → DataFrame with an epoch column."""
@@ -125,9 +121,7 @@ def zero_volume_candles() -> pd.DataFrame:
     return _frame([(100.0 + i, 101.0 + i, 99.0 + i, 100.5 + i, 0) for i in range(20)])
 
 
-# ──────────────────────────────────────────────────────────────────────────
 # Broker / local state fixtures for the reconciliation divergence table
-# ──────────────────────────────────────────────────────────────────────────
 
 @pytest.fixture
 def broker_position_factory():
@@ -177,9 +171,7 @@ def fake_local_state():
     }
 
 
-# ──────────────────────────────────────────────────────────────────────────
 # Broker funds responses — every shape the parser has had to handle
-# ──────────────────────────────────────────────────────────────────────────
 
 @pytest.fixture
 def funds_responses() -> dict:

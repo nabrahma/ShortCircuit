@@ -31,7 +31,7 @@ def _clear_learned():
     _LEARNED_TICKS.clear()
 
 
-# ── tick size learned from the broker's own rejection ─────────────────────
+# tick size learned from the broker's own rejection
 
 def test_tick_is_learned_from_the_rejection_message():
     """
@@ -61,7 +61,7 @@ def test_unrelated_errors_teach_nothing(msg):
     assert "NSE:X-EQ" not in _LEARNED_TICKS
 
 
-# ── rounding never tightens the stop ──────────────────────────────────────
+# rounding never tightens the stop
 
 @pytest.mark.parametrize("side,raw,tick,expected", [
     ("SHORT", 2992.85, 0.10, 2992.90),   # away from a short entry = upward
@@ -81,7 +81,7 @@ def test_a_nonsense_tick_falls_back_rather_than_dividing_by_zero():
     assert round_stop_away_from_entry(100.0, 0.0, "SHORT") > 0
 
 
-# ── do not place a second stop over an existing one ───────────────────────
+# do not place a second stop over an existing one
 
 class FakeOrderbookBroker:
     """Minimal stand-in exposing the orderbook the way the broker does."""
@@ -167,7 +167,7 @@ def test_an_unreadable_orderbook_reports_no_protection():
     ) is None
 
 
-# ── tick size looked up, not guessed ──────────────────────────────────────
+# tick size looked up, not guessed
 
 def test_broker_tick_lookup_caches_and_falls_back():
     """

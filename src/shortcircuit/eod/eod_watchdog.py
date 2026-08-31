@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+# coding: utf-8
 """
 EOD Watchdog — Standalone failsafe for market-close shutdown.
 
@@ -40,13 +40,13 @@ async def eod_watchdog(shutdown_event: asyncio.Event):
                 logger.warning("[EOD-WATCHDOG] 15:35 IST — triggering graceful shutdown.")
                 shutdown_event.set()
 
-        # ✅ HARD KILL at 15:40 — cannot be trapped, cannot be ignored
+        # Hard kill at 15:40 — cannot be trapped, cannot be ignored.
         if now.hour == 15 and now.minute >= 40:
             logger.critical("[EOD-WATCHDOG] 15:40 IST — process did not exit cleanly. "
                             "Forcing os._exit(0).")
             os._exit(0)   # ← bypasses all Python cleanup, kills immediately
 
-        # ✅ EXIT the loop once shutdown is confirmed AND it's past 15:32
+        # Exit the loop once shutdown is confirmed and it is past 15:32.
         if shutdown_event.is_set() and now.hour == 15 and now.minute >= 32:
             logger.info("[EOD-WATCHDOG] Shutdown confirmed. Watchdog exiting cleanly.")
             return   # ← lets the TaskGroup finish normally
