@@ -2259,75 +2259,100 @@ class FyersBrokerInterface:
             raise
 
 
-    def get_symbol_leverage_sync(self, symbol: str, price: float) -> float:
+    def get_symbol_leverage_sync(self, symbol: str, price: float) -> Optional[float]:
         """
-        Phase 88.1: Synchronous leverage fetch for Scanner thread.
-        Leverage = Price / Margin_Required.
-        """
-        from shortcircuit import config
-        if not symbol:
-            return 1.0
+        Intraday (MIS) leverage the broker will actually grant on this symbol.
 
-        # Check Blacklist (Phase 89.7)
+        leverage = price / margin_required_for_one_share
+
+        Returns None when the answer is unknown — a failed lookup is not
+        evidence of anything, and the caller must fail OPEN on it. Returning a
+        number here is what broke this the last time: the old version fell back
+        to 5.0 on error, so the guard silently passed everything, and an earlier
+        version blocked instead and produced a session with zero trades
+        (removed in cd178cc, Apr 2026).
+
+        Two faults made that fallback fire on every single call:
+
+          1. It posted to api.fyers.in/api/v3/multiorder/margin. That host
+             answers 500 "Invalid Request, please provide valid method" for
+             every symbol. The SDK's own base is api-t1.fyers.in — verified
+             2026-08-31, where the same request returns 200.
+          2. It read response['data'][0]['margin'], i.e. a list. The real
+             response is a dict:
+                 {"code":200,"data":{"margin_avail":...,"margin_total":...,
+                                     "margin_new_order":212.31,"prevMargin":0},"s":"ok"}
+
+        Measured on the 22 candidates of 2026-08-31, the distribution is
+        strictly bimodal — 12 symbols at 4.0x/4.99x, 10 at exactly 1.0x, and
+        nothing in between. At 1.0x the required margin equals the share price
+        (NSE:SHIPROCKET-EQ: 138.93 margin on a 138.89 share), which is the
+        broker's way of saying MIS is not available. That symbol reached an
+        order and was rejected with
+        "RED:RULE:{Allowed Basket} in Basket NSE.MIS.NSE_MIS_BASKET".
+        """
+        if not symbol or not price or price <= 0:
+            return None
+
+        # Confirmed low-leverage earlier this session; the answer does not
+        # change intraday, so never ask again.
         if symbol in self._low_leverage_blacklist:
             return 1.0
 
-        # Check Cache
         with self._leverage_cache_lock:
             if symbol in self._leverage_cache:
                 return self._leverage_cache[symbol]
 
-        # Fetch from Broker
         try:
             payload = {
-                "data": [
-                    {
-                        "symbol": symbol,
-                        "qty": 1,
-                        "side": 1,  # 1 for Buy
-                        "type": 2,  # 2 for Market
-                        "productType": "INTRADAY",
-                        "limitPrice": 0,
-                        "stopPrice": 0
-                    }
-                ]
+                "data": [{
+                    "symbol": symbol,
+                    "qty": 1,
+                    "side": -1,             # SELL — the side this bot actually takes
+                    "type": 2,              # market
+                    "productType": "INTRADAY",
+                    "limitPrice": 0,
+                    "stopPrice": 0,
+                }]
             }
-            
-            # Manual REST call - Phase 88.1 correction
-            # Using multiorder/margin instead of order-calc which returns 500
-            url = "https://api.fyers.in/api/v3/multiorder/margin"
+            # Build the URL from the SDK's own base rather than hardcoding a
+            # host. The previous hardcoded api.fyers.in is what made every call
+            # fail; if the vendor moves the base again, the SDK moves with it.
+            base = getattr(fyersModel.Config, 'API', 'https://api-t1.fyers.in/api/v3').rstrip('/')
             headers = {
                 "Authorization": f"{self.client_id}:{self.access_token}",
-                "Content-Type": "application/json"
+                "Content-Type": "application/json",
             }
-            
-            resp = requests.post(url, headers=headers, json=payload, timeout=5)
+            resp = requests.post(f"{base}/multiorder/margin", headers=headers,
+                                 json=payload, timeout=8)
             response = resp.json() if resp.status_code == 200 else {}
-            
-            if response and response.get('s') == 'ok' and response.get('data'):
-                margin = response['data'][0].get('margin', 0)
-                if margin > 0:
-                    leverage = round(price / margin, 2)
-                    with self._leverage_cache_lock:
-                        self._leverage_cache[symbol] = leverage
-                    logger.info(f"[BROKER] Dynamic Leverage detected for {symbol}: {leverage}x (Margin: ₹{margin:.2f} @ ₹{price:.2f})")
-                    return leverage
-            
-            # Diagnostic Logging for empty/failed responses
-            # Phase 89.7: "Execution-First" strategy. Assume 5x if Fyers fails so we don't miss trades.
+
+            data = response.get('data') if isinstance(response, dict) else None
+            margin = (data or {}).get('margin_new_order') if isinstance(data, dict) else None
+
+            if margin and margin > 0:
+                leverage = round(price / margin, 2)
+                with self._leverage_cache_lock:
+                    self._leverage_cache[symbol] = leverage
+                logger.info(
+                    "[BROKER] %s leverage %.2fx (margin ₹%.2f on a ₹%.2f share)",
+                    symbol, leverage, margin, price,
+                )
+                # A confirmed reading below the floor is permanent for the day.
+                if leverage < getattr(config, 'SCANNER_MIN_LEVERAGE', 3.5):
+                    self._low_leverage_blacklist.add(symbol)
+                return leverage
+
             logger.warning(
-                f"[BROKER] API Error detecting leverage for {symbol} (Status: {resp.status_code}). "
-                f"Assuming 5.0x and caching fallback to prevent further API spam."
+                "[BROKER] leverage lookup for %s returned HTTP %s / %s — unknown, "
+                "caller must fail open",
+                symbol, resp.status_code, str(response)[:120],
             )
-            with self._leverage_cache_lock:
-                self._leverage_cache[symbol] = 5.0
-            return 5.0
-            
+            return None
+
         except Exception as e:
-            logger.error(f"[BROKER] Leverage detection failed for {symbol}: {e}. Emergency defaulting and caching 5.0x")
-            with self._leverage_cache_lock:
-                self._leverage_cache[symbol] = 5.0
-            return 5.0
+            logger.error("[BROKER] leverage lookup failed for %s: %s", symbol, e)
+            return None
 
     # A WS position snapshot older than this is not trusted for reconciliation.
     POSITION_CACHE_TTL_SECONDS = 30.0

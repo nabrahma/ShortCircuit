@@ -535,6 +535,58 @@ class FyersScanner:
 
         logger.info(f"Pre-filter: {len(pre_candidates)} candidates. Starting parallel quality check...")
 
+        # ── MIS leverage screen ───────────────────────────────────────────────
+        # Runs BEFORE the quality checks below, which are the expensive part —
+        # each one fetches history. On 2026-08-31, 10 of 22 candidates could not
+        # be traded intraday at all, so this drops ~45% of the work before any
+        # history is fetched.
+        #
+        # Cached per symbol per session in the broker, so this costs one call per
+        # NEW symbol, not one per scan. That session had 392 scans over 22
+        # distinct symbols.
+        #
+        # Fails OPEN by construction: get_symbol_leverage_sync returns None when
+        # it cannot get an answer, and None is kept. A broken lookup must never
+        # empty the funnel — that outcome is exactly why the previous leverage
+        # gate was torn out (cd178cc).
+        # A wall-clock budget caps the whole screen. Uncached symbols cost one
+        # HTTP call each at up to 8s; a slow morning with many new movers could
+        # otherwise eat the 90s scan timeout in main.py before a single history
+        # fetch had started. Past the budget every remaining symbol is allowed
+        # through unscreened — the broker rejection is still the backstop, and a
+        # slow margin API must never cost a trading day.
+        min_lev = getattr(config, 'SCANNER_MIN_LEVERAGE', 0.0)
+        if min_lev > 0 and self.broker and hasattr(self.broker, 'get_symbol_leverage_sync'):
+            budget_s = getattr(config, 'SCANNER_LEVERAGE_BUDGET_SECONDS', 15.0)
+            started = time.monotonic()
+            kept, dropped, unscreened = [], [], 0
+            for c in pre_candidates:
+                lev = None
+                if time.monotonic() - started < budget_s:
+                    try:
+                        lev = self.broker.get_symbol_leverage_sync(c['symbol'], c.get('ltp') or 0)
+                    except Exception as e:
+                        logger.warning("[LEVERAGE] lookup raised for %s: %s — allowing through",
+                                       c['symbol'], e)
+                else:
+                    unscreened += 1
+                if lev is not None and lev < min_lev:
+                    dropped.append(f"{c['symbol'].replace('NSE:', '').replace('-EQ', '')}({lev}x)")
+                    continue
+                c['leverage'] = lev
+                kept.append(c)
+            if dropped:
+                logger.info(
+                    "[LEVERAGE] dropped %d/%d below %.1fx (no intraday margin): %s",
+                    len(dropped), len(pre_candidates), min_lev, ", ".join(dropped[:12]),
+                )
+            if unscreened:
+                logger.warning(
+                    "[LEVERAGE] %.0fs budget spent — %d symbol(s) passed through unscreened",
+                    budget_s, unscreened,
+                )
+            pre_candidates = kept
+
         # Phase B: Parallel history + quality check
         filtered_candidates = []
         max_workers = getattr(config, 'SCANNER_PARALLEL_WORKERS', 3)
@@ -568,8 +620,14 @@ class FyersScanner:
                         c['history_df'] = df
                         c['history_df_15m'] = df_15m # Phase 51
                         
-                        # Phase 88.1: Enhanced candidate logging
-                        leverage = c.get('leverage', 1.0)
+                        # 'leverage' is set by the MIS screen above and is None
+                        # when the lookup could not answer. It used to default to
+                        # 1.0, which printed "Lev: 1.0x" against every candidate
+                        # in the session log whether or not anything had been
+                        # measured — a reading that looked alarming and meant
+                        # nothing.
+                        _lev = c.get('leverage')
+                        leverage = f"{_lev}" if _lev is not None else "?"
                         logger.info(
                             f"[CANDIDATE] {c['symbol']} | "
                             f"Gain: {c['change']}% | "

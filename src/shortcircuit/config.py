@@ -59,6 +59,30 @@ SCANNER_GAIN_MAX_PCT: float = 18.0 # Protection against upper-circuit runners
 # slippage. SCANNER_MIN_LTP is the remaining guard against manipulation vehicles.
 SCANNER_MIN_VOLUME:   int   = 161616
 SCANNER_MIN_LTP:      float = 40.0   # Filter sub-₹40 manipulation vehicles
+
+# Minimum intraday (MIS) leverage the broker must grant before a symbol is worth
+# analysing at all. The operator trades 4x and 5x names only.
+#
+# Measured against the live margin API on 2026-08-31 over that session's 22
+# candidates, the distribution is strictly bimodal:
+#     12 symbols at 4.0x / 4.99x        10 symbols at exactly 1.0x
+# Nothing in between. At 1.0x the required margin equals the share price, which
+# is the broker refusing MIS: NSE:SHIPROCKET-EQ needed ₹138.93 on a ₹138.89
+# share, passed all six gates, and was rejected at order time with
+# "RED:RULE:{Allowed Basket} in Basket NSE.MIS.NSE_MIS_BASKET".
+#
+# 3.5 sits in the empty gap, so it selects exactly the 4x/5x cohort and is
+# insensitive to rounding. There is deliberately no threshold to tune here —
+# picking a number inside a populated range is what produced a zero-trade
+# session last time (see cd178cc). An unknown reading NEVER blocks: the scanner
+# fails open and the broker rejection remains the backstop.
+SCANNER_MIN_LEVERAGE: float = 3.5
+
+# Wall-clock cap on the leverage screen per scan. Readings are cached per symbol
+# for the session, so this only binds on a morning with many unseen movers.
+# Past the budget, remaining symbols pass through unscreened rather than
+# delaying the scan — main.py times a scan out at 90s.
+SCANNER_LEVERAGE_BUDGET_SECONDS: float = 15.0
 CANDLE_BODY_RATIO_MIN: float = 0.382   # Phase 91.3: Scientific threshold (Fibonacci 0.382) for "clean" bodies
 
 # G5 Stretch Thresholds
