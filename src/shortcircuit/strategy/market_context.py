@@ -19,7 +19,7 @@ class MarketContext:
     Analyzes broader market to determine if it's safe to take reversal trades.
     """
     
-    # Phase 41.3.3: Centralized Symbol Handling
+    # Centralised symbol handling
     NIFTY_SYMBOL = NIFTY_50
     
     def __init__(self, fyers, morning_high=None, morning_low=None, broker=None):
@@ -28,7 +28,7 @@ class MarketContext:
         self.regime = "UNKNOWN"
         self.msg = "Initializing..."
         
-        # Phase 41.3.3: Explicit Symbol Initialization
+        # Explicit symbol initialisation
         self.nifty_symbol = self.NIFTY_SYMBOL
         
         # Validate symbol
@@ -45,11 +45,11 @@ class MarketContext:
             self._morning_high and self._morning_low and self._morning_range and self._morning_range > 0
         )
         
-        # Phase 41.3: Dynamic Regime State
+        # Dynamic regime state
         self.last_regime = 'UNKNOWN'
         self.regime_change_time = None
         self.trend_duration_minutes = 0
-        self._circuit_touched_today = set() # Phase 51: G3 Blacklist (Session-permanent)
+        self._circuit_touched_today = set() # G3 Blacklist (Session-permanent)
         self._circuit_blacklist_date = datetime.now(IST).date()
 
         if self._morning_high:
@@ -142,7 +142,7 @@ class MarketContext:
         now = _time.time()
         if not hasattr(self, '_last_range_fetch_time'):
             self._last_range_fetch_time = 0.0
-        if now - self._last_range_fetch_time < 600:  # Phase 91: Increased from 300s → 600s to prevent Fyers 429 rate limits
+        if now - self._last_range_fetch_time < 600:  # Increased from 300s → 600s to prevent Fyers 429 rate limits
             return
         self._last_range_fetch_time = now
 
@@ -173,7 +173,7 @@ class MarketContext:
             "[MarketContext] ⚠️ Morning range unavailable — range-dependent checks are bypassed."
         )
 
-    # ── Phase 61: G7 Consolidation & Caching ────────────────────
+    # G7 consolidation and caching
     
     def _get_index_data_cached(self, symbol=None):
         """Fetch index data.
@@ -187,7 +187,7 @@ class MarketContext:
 
         now = _time.time()
 
-        # ── Primary: Read directly from live WS cache (no REST call) ──────
+        # Primary: Read directly from live WS cache (no REST call)
         if self.broker is not None:
             try:
                 snap = self.broker.get_quote_cache_snapshot()
@@ -204,7 +204,7 @@ class MarketContext:
             except Exception as e:
                 logger.warning("[MarketContext] WS cache read failed for %s: %s", symbol, e)
 
-        # ── Fallback: REST History API ─────────────────────────────────────
+        # Fallback: REST History API
         if not hasattr(self, '_index_cache'):
             self._index_cache = {}
             self._index_cache_time = {}
@@ -272,7 +272,7 @@ class MarketContext:
 
     def get_volume_z_score(self, df: pd.DataFrame) -> float:
         """
-        Phase 65: Calculates Volume Z-Score for the current 1m candle 
+        Calculates the volume Z-score for the current 1m candle
         relative to the morning session mean/std.
         """
         if df is None or len(df) < 10: return 0.0
@@ -369,7 +369,7 @@ class MarketContext:
         """Returns the current regime label for ML logging."""
         return getattr(self, 'last_regime', "UNKNOWN")
 
-    # ── Phase 51: G3 Circuit Hitter Methods ────────────────────
+    # G3 circuit-hitter methods
     
     def mark_circuit_touched(self, symbol: str):
         """

@@ -199,7 +199,7 @@ class ProfileAnalyzer:
             # We must have been ABOVE VAH recently.
             
             # Count closes above VAH in recent history (Acceptance Check)
-            # If we accepted above VAH for too long (> 30 mins), VAH might migrate up. 
+            # If we accepted above VAH for too long (> 30 mins), VAH might migrate up.
             # But here we assume fixed/developing profile.
             
             return True, f"Look Above & Fail (VAH: {vah:.2f})"

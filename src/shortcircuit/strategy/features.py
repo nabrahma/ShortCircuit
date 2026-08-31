@@ -10,9 +10,7 @@ import pandas as pd
 from typing import Tuple, Optional
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # VWAP
-# ─────────────────────────────────────────────────────────────────────────────
 
 def compute_vwap_sd(df: pd.DataFrame, window: int = 20) -> float:
     """
@@ -69,10 +67,7 @@ def enrich_dataframe(df: pd.DataFrame) -> None:
     df['vwap'] = (tp * v).cumsum() / v.cumsum()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # RSI
-# ─────────────────────────────────────────────────────────────────────────────
-
 
 
 def compute_rsi_divergence(df: pd.DataFrame, window: int = 25) -> bool:
@@ -132,9 +127,7 @@ def compute_rsi_divergence(df: pd.DataFrame, window: int = 25) -> bool:
         return False
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # ATR
-# ─────────────────────────────────────────────────────────────────────────────
 
 def compute_atr(df: pd.DataFrame, period: int = 14) -> float:
     """
@@ -166,9 +159,7 @@ def compute_atr(df: pd.DataFrame, period: int = 14) -> float:
         return float('nan')
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Volume
-# ─────────────────────────────────────────────────────────────────────────────
 
 def compute_volume_fade_ratio(candles: list, lookback: int = 15, drop_forming: bool = True) -> float:
     """
@@ -196,11 +187,7 @@ def compute_volume_fade_ratio(candles: list, lookback: int = 15, drop_forming: b
     return round(current_avg / avg_prior, 3)
 
 
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 # Stretch & Gain
-# ─────────────────────────────────────────────────────────────────────────────
 
 def compute_stretch_score(gain_pct: float, scanner_min: float) -> float:
     """
@@ -212,9 +199,7 @@ def compute_stretch_score(gain_pct: float, scanner_min: float) -> float:
     return round((gain_pct - scanner_min) / scanner_min, 3)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Pattern Detection
-# ─────────────────────────────────────────────────────────────────────────────
 
 def detect_pattern(df: pd.DataFrame, vah: float = None) -> Tuple[str, float]:
     """
@@ -300,9 +285,7 @@ def detect_pattern(df: pd.DataFrame, vah: float = None) -> Tuple[str, float]:
     return "NORMAL", z_score
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Structure Checks
-# ─────────────────────────────────────────────────────────────────────────────
 
 def is_narrowing_highs(df: pd.DataFrame, n: int = 3) -> bool:
     """
@@ -314,11 +297,5 @@ def is_narrowing_highs(df: pd.DataFrame, n: int = 3) -> bool:
     highs = [df['high'].iloc[-(i + 2)] for i in range(n)]
     # highs[0] = most recent completed, highs[-1] = oldest
     return all(highs[i] < highs[i + 1] for i in range(len(highs) - 1))
-
-
-
-
-
-
 
 

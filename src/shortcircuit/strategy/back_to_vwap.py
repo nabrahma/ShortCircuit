@@ -37,9 +37,7 @@ class BackToVWAPShort:
     - Multi-edge detector (deleted)
     """
 
-    # ──────────────────────────────────────────────────────────────────
-    # PUBLIC API
-    # ──────────────────────────────────────────────────────────────────
+    # Public API
 
     def evaluate(
         self,
@@ -68,7 +66,7 @@ class BackToVWAPShort:
         """
         candles = df.to_dict('records')
 
-        # ── Pre-Filter: Gain, Circuit, and Spread ─────────────────────
+        # Pre-Filter: Gain, Circuit, and Spread
         min_gain = getattr(cfg, 'SCANNER_GAIN_MIN_PCT', 7.5)
         if gain_pct < min_gain:
             logger.debug("  [C0] %s REJECT: Gain %.1f%% < %.1f%%", symbol, gain_pct, min_gain)
@@ -90,7 +88,7 @@ class BackToVWAPShort:
             logger.debug("  [C0] %s REJECT: Spread %.4f > 0.004", symbol, spread_pct)
             return None
 
-        # ── Condition 1: VWAP Stretch ────────────────────────────────
+        # Condition 1: VWAP Stretch
         sd_floor = getattr(cfg, 'STRATEGY_VWAP_SD_FLOOR', 4.5)
         if vwap_sd < sd_floor:
             logger.debug(
@@ -99,7 +97,7 @@ class BackToVWAPShort:
             )
             return None
 
-        # ── Condition 2: Price above VAH / profile context ───────────
+        # Condition 2: Price above VAH / profile context
         if profile is None:
             logger.debug("  [C2] %s REJECT: Market profile unavailable", symbol)
             return None
@@ -124,7 +122,7 @@ class BackToVWAPShort:
             )
             return None
 
-        # ── Condition 3: Failed auction behavior ─────────────────────
+        # Condition 3: Failed auction behavior
         require_auction = getattr(cfg, 'STRATEGY_REQUIRE_FAILED_AUCTION', True)
         has_auction_fail = self._check_auction_failure(
             df, candles, profile, vah, profile_rejection
@@ -134,7 +132,7 @@ class BackToVWAPShort:
             logger.debug("  [C3] %s REJECT: No failed auction behavior", symbol)
             return None
 
-        # ── Condition 4: Divergence (RSI or price lower-high) ────────
+        # Condition 4: Divergence (RSI or price lower-high)
         rsi_div = F.compute_rsi_divergence(
             df, window=getattr(cfg, 'STRATEGY_RSI_DIVERGENCE_WINDOW', 25)
         )
@@ -147,8 +145,8 @@ class BackToVWAPShort:
             )
             return None
 
-        # ── Condition 5: Volume fading ───────────────────────────────
-        # PRD: No adaptive relaxation. No Spear bypass. Gate must pass on its own.
+        # Condition 5: Volume fading
+        # No adaptive relaxation and no bypass — this gate must pass on its own.
         lookback = getattr(cfg, 'STRATEGY_VOL_FADE_LOOKBACK', 15)
         max_ratio = getattr(cfg, 'STRATEGY_VOL_FADE_MAX_RATIO', 0.65)
 
@@ -161,10 +159,11 @@ class BackToVWAPShort:
             )
             return None
 
-        # ── Condition 6: Momentum decay (sign-safe) ──────────────────
-        # PRD: True price-velocity decay only. Fast slope must genuinely
-        # fall behind slow slope. No trivial flat-slope OR clause.
-        # FIXED: slope_fast < slope_slow * 0.85 inverts semantics when slope_slow <= 0.
+        # Condition 6: Momentum decay (sign-safe)
+        # True price-velocity decay only: the fast slope must genuinely fall
+        # behind the slow one, with no trivial flat-slope OR clause. Note that
+        # slope_fast < slope_slow * 0.85 inverts its meaning when slope_slow <= 0,
+        # which is why the comparison below is sign-safe.
         decay_ratio = getattr(cfg, 'STRATEGY_MOMENTUM_DECAY_RATIO', 0.85)
         min_slow = getattr(cfg, 'STRATEGY_MIN_SLOW_SLOPE_BPS', 0.0)
         if slope_slow > min_slow:
@@ -181,8 +180,8 @@ class BackToVWAPShort:
             )
             return None
 
-        # ── ALL 6 CONDITIONS PASSED ──────────────────────────────────
-        # Compute confidence tier (informational only — never influences gates)
+        # All six conditions passed. The confidence tier is informational only
+        # and never influences a gate.
         confidence = self._compute_confidence(
             vwap_sd, vol_fade, profile_rejection,
             rsi_div, price_lower_high, has_auction_fail,
@@ -213,9 +212,7 @@ class BackToVWAPShort:
             'snapshot_high': df['high'].max(),
         }
 
-    # ──────────────────────────────────────────────────────────────────
-    # INTERNAL HELPERS
-    # ──────────────────────────────────────────────────────────────────
+    # Internal helpers
 
     @staticmethod
     def _check_auction_failure(

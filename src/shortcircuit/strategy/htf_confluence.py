@@ -1,6 +1,6 @@
 """
 Higher Timeframe Confluence Module
-Math-First Architecture (Phase 61.1)
+Math-First Architecture
 Based on Leung & Li: "Optimal Mean Reversion" and Momentum Physics.
 """
 import logging
@@ -32,7 +32,7 @@ class HTFConfluence:
             self._last_range_fetch_time = 0.0
         cache_key = symbol
         if cache_key in self._htf_cache and (now - self._htf_cache_t.get(cache_key, 0)) < 600:
-            # Phase 91: TTL not expired — return the cached DataFrame, NOT None
+            # TTL not expired — return the cached DataFrame, NOT None
             return self._htf_cache[cache_key]
         self._last_range_fetch_time = now
         
@@ -50,7 +50,7 @@ class HTFConfluence:
             if response.get('s') == 'ok' and response.get('candles'):
                 candles = response['candles']
                 df = pd.DataFrame(candles, columns=['t', 'o', 'h', 'l', 'c', 'v'])
-                # Phase 91: Guard against malformed responses
+                # Guard against malformed responses
                 if 'c' not in df.columns or len(df) < 3:
                     logger.warning(f"G9: HTF data malformed for {symbol} — skipping")
                     return self._htf_cache.get(cache_key)  # stale is better than nothing
@@ -66,7 +66,7 @@ class HTFConfluence:
     
     def check_trend_exhaustion(self, symbol, df_15m=None, vwap_sd: float = 0.0):
         """
-        Math-First G9 (Phase 61.1):
+        Math-First G9:
         1. Alpha Strike (Bypass): If stretch is extreme, pass immediately.
         2. Acceleration Guard: Reject if momentum is accelerating up.
         3. Stall Check: Pass if momentum has slowed down at highs.
@@ -74,19 +74,19 @@ class HTFConfluence:
         Returns:
             tuple: (allowed, message)
         """
-        # ── Step 1: Alpha Strike (Leung & Li Bypass) ──────────
+        # Step 1: Alpha Strike (Leung & Li Bypass)
         if vwap_sd > config.P61_G9_BYPASS_SD_THRESHOLD:
             return True, f"G9 PASS: Alpha Strike (Stretch={vwap_sd:.1f}SD)"
 
-        # ── Step 2: Data Fetching ───────────────────────────
+        # Step 2: data fetching
         df = df_15m if df_15m is not None else self._get_htf_history(symbol, interval="15")
         
         if df is None or len(df) < 3:
             return False, "G9 BLOCK: HTF Data Unavailable"
 
-        # ── Step 3: Momentum Physics (Velocity/Acceleration) ─────
+        # Step 3: momentum physics (velocity/acceleration)
         try:
-            # Phase 98.1: Handle both column naming conventions
+            # Handle both column naming conventions
             # Analyzer DataFrames use 'close', HTF self-fetched uses 'c'
             close_col = 'c' if 'c' in df.columns else 'close'
             if close_col not in df.columns:
