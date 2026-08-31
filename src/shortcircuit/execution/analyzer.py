@@ -116,14 +116,10 @@ def keep_session_only(df: pd.DataFrame, session: datetime.date) -> pd.DataFrame:
     original = len(df)
     out = df[df['datetime'].dt.date == session]
 
-    # Same request also returns each bar roughly twice, out of order: 750 rows
-    # for 375 unique epochs, is_monotonic_increasing False. Two consequences,
-    # both silent:
-    #   * volume is double-counted, so RVOL, the volume-fade ratio and the
-    #     scanner's volume floor all read against an inflated total;
-    #   * df.iloc[-1] is used throughout as "the current bar" and is simply not
-    #     the latest bar when epochs are unsorted.
-    # Dedupe on the timestamp, keeping the last copy, then sort.
+    # The same request returns each bar roughly twice and out of order (750 rows
+    # for 375 epochs). Both effects are silent: volume double-counts, inflating
+    # RVOL and the volume floor, and df.iloc[-1] is not the latest bar. Dedupe on
+    # the timestamp keeping the last copy, then sort.
     if 'epoch' in out.columns:
         out = out.drop_duplicates(subset='epoch', keep='last').sort_values('epoch')
     else:
@@ -176,28 +172,14 @@ class FyersAnalyzer:
         Fetch intraday historical data for a symbol.
         Prefers local candle aggregator (1-minute). Falls back to REST.
         """
-        # 1. Try local aggregator first (1-minute only)
+        # Try the local aggregator first (1-minute only).
         #
-        # BUG-2026-08-12 (C1 was measuring the wrong thing):
-        # features.enrich_dataframe() computes a CUMULATIVE vwap over whatever
-        # frame it is handed:
-        #     df['vwap'] = (tp * v).cumsum() / v.cumsum()
-        # That is only the session VWAP if the frame starts at the session open.
-        # This asked for 100 bars, so the anchor slid forward every minute and
-        # C1 measured stretch against a ~100-minute rolling VWAP instead.
-        #
-        # NSE:ORISSAMINE-EQ on 12 Aug is the worked example. At 11:56 IST the
-        # anchor sat at ~10:16 — the day's peak — so price read as 1.52 SD BELOW
-        # VWAP while a session-anchored VWAP had it above. Every one of that
-        # day's 295 WS_CACHE scans used this path. The REST fallback below
-        # fetches range_from=today and was always correct, so the definition of
-        # "VWAP" silently depended on which data tier answered.
-        #
-        # RESTORED 2026-08-30: VWAP_ANCHOR_MODE selects which of the two readings
-        # C1 gets. 'SESSION' is the fix described above. 'ROLLING' reinstates the
-        # sliding anchor the profitable run was measured on — see the note on
-        # VWAP_ANCHOR_MODE in config for why that is a deliberate choice and what
-        # it costs. The ORISSAMINE defect above is real and returns with ROLLING.
+        # enrich_dataframe computes a CUMULATIVE vwap over whatever frame it gets,
+        # so the frame length IS the anchor. Asking for 100 bars makes C1 measure
+        # against a rolling VWAP, not the session one: on 12 Aug NSE:ORISSAMINE-EQ
+        # read 1.52 SD BELOW a VWAP it was actually above. The REST path below
+        # always fetched from the open, so "VWAP" depended on which tier answered.
+        # VWAP_ANCHOR_MODE now picks deliberately; the defect returns under ROLLING.
         _anchor = str(getattr(config, 'VWAP_ANCHOR_MODE', 'SESSION')).upper()
         _rolling = _anchor == 'ROLLING'
         _bars = int(getattr(config, 'VWAP_ROLLING_BARS', 100)) if _rolling else SESSION_BARS_1M
@@ -216,16 +198,12 @@ class FyersAnalyzer:
                     df['epoch'], unit='s'
                 ).dt.tz_localize('UTC').dt.tz_convert('Asia/Kolkata')
 
-                # Asking for enough bars is necessary but not sufficient: the
-                # aggregator only holds candles observed since the process
-                # started. After a mid-session restart the buffer begins at
-                # restart time, and its cumulative VWAP would be anchored there.
-                # Fall through to REST in that case — it returns the whole
-                # session, which is the only anchor C1 is defined against.
-                # Under ROLLING the anchor is *meant* to sit mid-session, so
-                # there is nothing to verify and no reason to fall through to
-                # REST — which would hand back a session-anchored frame and
-                # silently reintroduce the very split this flag exists to end.
+                # Bar count is necessary but not sufficient: the aggregator only
+                # holds candles seen since process start, so after a mid-session
+                # restart its VWAP is anchored at restart time. SESSION falls
+                # through to REST for a true session anchor. ROLLING wants a
+                # mid-session anchor, so falling through would silently restore
+                # the tier-dependent split this flag exists to end.
                 if _rolling:
                     return df
 
@@ -453,13 +431,9 @@ class FyersAnalyzer:
         signal_meta.update(result)
         pattern_desc = result.get('pattern_bonus', 'EXHAUSTION_FADE')
 
-        # G9: HTF Confluence
-        # Runs on a shared, long-lived pool. The previous version built a new
-        # ThreadPoolExecutor per symbol per scan and used it as a context manager,
-        # so __exit__ called shutdown(wait=True) — meaning a timed-out G9 check
-        # still blocked here until the worker finished, defeating the timeout it
-        # was written to enforce. It also churned thread creation across every
-        # candidate on every 60s cycle.
+        # G9: HTF confluence, on a shared long-lived pool. A per-symbol
+        # ThreadPoolExecutor used as a context manager would block here on
+        # shutdown(wait=True), defeating the very timeout below.
         try:
             _htf_future = _HTF_EXECUTOR.submit(
                 self.htf_confluence.check_trend_exhaustion,

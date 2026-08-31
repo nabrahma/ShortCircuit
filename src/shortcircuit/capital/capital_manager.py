@@ -218,12 +218,10 @@ class CapitalManager:
                 f"all new entries BLOCKED until position closes"
             )
 
-    # The margin refresh must never outlive the close path that triggered it.
-    # broker.get_funds() has its own 15s ceiling, but focus_engine waits only 10s
-    # on _finalize_closed_position — so on 2026-08-06 the finalize was reported as
-    # FAILED (with an empty message, since that is str(concurrent TimeoutError))
-    # while the underlying work actually completed 5s later. Releasing the slot is
-    # the part that matters and is instant; the margin number can lag.
+    # Must not outlive the close path that triggered it: get_funds allows 15s but
+    # focus_engine waits only 10s, so a finalize once reported FAILED while the
+    # work completed 5s later. Releasing the slot is instant and is what matters;
+    # the margin number may lag.
     RELEASE_SYNC_TIMEOUT = 6.0
 
     async def release_slot(self, broker=None):

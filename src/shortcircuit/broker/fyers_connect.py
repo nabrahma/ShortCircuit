@@ -10,30 +10,21 @@ from urllib3.util.retry import Retry
 # Configure Logging
 logger = logging.getLogger(__name__)
 
-# Resolved against the repository root rather than this file's directory.
-# `Path(__file__).parent / "data"` was correct only while this module sat in the
-# repository root; relocating it into a package would have pointed the cached
-# broker token at a directory inside the package, and the bot would have tried to
-# re-authenticate interactively on every start. Pinned by tests/unit/test_paths.py.
+# Resolved against the repository root, not this file's directory: a __file__
+# relative path would move the cached token when the module moves, forcing an
+# interactive re-auth on every start. Pinned by tests/unit/test_paths.py.
 from shortcircuit.paths import TOKEN_FILE  # noqa: E402
 
 # (connect, read) seconds. The Fyers SDK issues requests with NO timeout, so a
-# stalled socket blocks its caller forever. On 2026-07-29 that produced 41 scan
-# timeouts: a hung /history call held a scanner worker for ~80s past its own 8s
-# cap, and every one of those scan cycles returned zero candidates.
-# Fyers REST normally answers in well under a second; 8s is already generous. Kept
-# deliberately tight because these budgets stack: with 2 retries a 12s read meant a
-# 37s worst case on a path that reconciliation polls every 6 seconds.
+# stalled socket blocks its caller forever — on 2026-07-29 that cost 41 scans.
+# Kept tight because these budgets stack: with 2 retries a 12s read is a 37s
+# worst case on a path reconciliation polls every 6 seconds.
 DEFAULT_HTTP_TIMEOUT = (3.05, 8.0)
 
-# Every asyncio-level `wait_for` around a REST call MUST be longer than the HTTP
-# read timeout, otherwise the outer timeout always fires first and abandons a
-# request that is still in flight — leaving the caller with no idea whether it
-# succeeded. On 2026-08-07 that lost the day's only valid entry: place_order was
-# wrapped in a 5s wait_for while the socket had 12s to read, so it was abandoned
-# at 5s with the order state genuinely unknown.
-#
-# Derive the outer budgets from the transport, so raising one raises the others.
+# Every asyncio wait_for around a REST call MUST outlast the HTTP read timeout,
+# or it abandons a request still in flight and the caller cannot tell whether it
+# succeeded. On 2026-08-07 a 5s wait_for over a 12s socket read lost the day's
+# only entry. Derived from the transport so raising one raises the others.
 HTTP_MAX_RETRIES = 1                                 # GET/HEAD only; POSTs never retry
 HTTP_READ_TIMEOUT = DEFAULT_HTTP_TIMEOUT[1]          # 8.0s
 ASYNC_CALL_TIMEOUT = HTTP_READ_TIMEOUT + 4.0         # 12.0s — single attempt (POST)
@@ -151,13 +142,10 @@ def harden_fyers_session(client, label: str = "fyers") -> bool:
     makes every /history call — was left with library defaults: a 10-connection
     pool and no timeout whatsoever.
     """
-    # FyersModel does NOT expose `.session`. The real requests.Session lives on the
-    # inner service object: FyersModel.service.session (verified against
-    # fyers-apiv3 3.1.13). Code that checked `hasattr(client, 'session')` — including
-    # the broker's own pool-size fix — silently did nothing, which is why the
-    # 2026-08-06 log still shows "no .session to harden" plus 25 position-fetch
-    # timeouts and "Connection pool is full" warnings.
-    # 3.1.7 has no Session; bound the module-level calls instead.
+    # FyersModel does not expose `.session`. Later SDKs keep one at
+    # .service.session; the pinned 3.1.7 has none at all and calls requests.*
+    # directly, so the module-level calls are bounded instead. Checking
+    # hasattr(client, 'session') silently did nothing on either.
     global _REST_BOUNDED
     _REST_BOUNDED = enforce_rest_timeouts()
 
@@ -294,27 +282,14 @@ class FyersConnect:
         """
         from fyers_apiv3 import fyersModel
 
-        # Step 1: Try every token source, and *validate* each before using it.
+        # Step 1: try every token source, validating each before use.
         #
-        # NOT a way around the daily login. SEBI requires re-authentication each
-        # trading day and Fyers expires the access token nightly (~00:30 IST), so
-        # a fresh interactive login every morning is mandatory and correct. Do
-        # not "improve" this by persisting a token across days — it cannot work,
-        # and attempting it would be circumventing a regulatory control.
-        #
-        # What this fixes is narrower: choosing between token sources *within*
-        # one day, so a restart at 11:00 reuses the token obtained at 09:10
-        # instead of demanding another login, and so a dead value cannot beat a
-        # live one. FYERS_ACCESS_TOKEN still takes priority when it is valid,
-        # which keeps the manual-override workflow intact.
-        #
-        # BUG-2026-08-12: this preferred FYERS_ACCESS_TOKEN over the cached file
-        # unconditionally, on the strength of `len(token) > 20`, and logged
-        # " Found Valid Token in Env Var" without checking anything. A token
-        # left in .env from 2026-01-09 therefore beat a token cached minutes ago
-        # and still valid for hours, so every start burned a full interactive
-        # re-login. Under FYERS_NO_INTERACTIVE (the container) it raises instead,
-        # meaning a stale .env line stops the bot from starting at all.
+        # NOT a way around the daily login — SEBI requires re-authentication each
+        # trading day and Fyers expires the token nightly. Never persist one
+        # across days. This only chooses between sources WITHIN a day, so a
+        # restart at 11:00 reuses the 09:10 token. FYERS_ACCESS_TOKEN still wins
+        # when valid, but it is now validated: preferring it unconditionally let
+        # a stale .env line beat a live cached token and force a re-login.
         candidates = []
         env_token = (os.getenv("FYERS_ACCESS_TOKEN") or "").strip()
         if len(env_token) > 20:

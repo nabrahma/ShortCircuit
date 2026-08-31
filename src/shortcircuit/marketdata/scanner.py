@@ -241,15 +241,10 @@ class FyersScanner:
                         "range_from": five_back_str,
                         "range_to": today_str, "cont_flag": "1"
                     }
-                    # Submitted to a SHARED, long-lived pool.
-                    #
-                    # This used to be `with ThreadPoolExecutor(...) as _ex:`. On exit
-                    # the context manager calls shutdown(wait=True), so after the 8s
-                    # cap "expired" the block still waited for the hung REST call to
-                    # return. On 2026-07-29 that turned 41 slow /history calls into 41
-                    # scans that blew the 90s ceiling and returned zero candidates —
-                    # a perfect 1:1 correlation in the logs. Abandoning the future is
-                    # the whole point of a timeout.
+                    # Shared, long-lived pool — never a `with ThreadPoolExecutor`,
+                    # whose __exit__ calls shutdown(wait=True) and so waits out the
+                    # very call the 8s cap just abandoned. On 2026-07-29 that turned
+                    # 41 slow /history calls into 41 scans over the 90s ceiling.
                     rest_limiter.acquire()
                     _f = _HISTORY_EXECUTOR.submit(self.fyers.history, data_15m)
                     try:
@@ -527,26 +522,15 @@ class FyersScanner:
 
         logger.info(f"Pre-filter: {len(pre_candidates)} candidates. Starting parallel quality check...")
 
-        # MIS leverage screen
-        # Runs BEFORE the quality checks below, which are the expensive part —
-        # each one fetches history. On 2026-08-31, 10 of 22 candidates could not
-        # be traded intraday at all, so this drops ~45% of the work before any
-        # history is fetched.
+        # MIS leverage screen. Runs before the quality checks, which each fetch
+        # history: on 2026-08-31 it dropped 10 of 22 candidates before any fetch.
+        # Readings cache per symbol per session, so it costs one call per NEW
+        # symbol.
         #
-        # Cached per symbol per session in the broker, so this costs one call per
-        # NEW symbol, not one per scan. That session had 392 scans over 22
-        # distinct symbols.
-        #
-        # Fails OPEN by construction: get_symbol_leverage_sync returns None when
-        # it cannot get an answer, and None is kept. A broken lookup must never
-        # empty the funnel — that outcome is exactly why the previous leverage
-        # gate was torn out (cd178cc).
-        # A wall-clock budget caps the whole screen. Uncached symbols cost one
-        # HTTP call each at up to 8s; a slow morning with many new movers could
-        # otherwise eat the 90s scan timeout in main.py before a single history
-        # fetch had started. Past the budget every remaining symbol is allowed
-        # through unscreened — the broker rejection is still the backstop, and a
-        # slow margin API must never cost a trading day.
+        # Fails OPEN by construction — an unknown reading (None) is kept, and a
+        # wall-clock budget lets the remainder through unscreened. A broken or
+        # slow lookup must never empty the funnel or eat main.py's 90s scan
+        # timeout; that is what tore out the previous leverage gate (cd178cc).
         min_lev = getattr(config, 'SCANNER_MIN_LEVERAGE', 0.0)
         if min_lev > 0 and self.broker and hasattr(self.broker, 'get_symbol_leverage_sync'):
             budget_s = getattr(config, 'SCANNER_LEVERAGE_BUDGET_SECONDS', 15.0)

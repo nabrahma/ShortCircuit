@@ -217,16 +217,10 @@ class ShortCircuitBot:
         Non-blocking discovery queue.
         Returns correlation_id immediately without blocking scanner thread.
         """
-        # NOTE: `self._signal_msg_index_lock` is an asyncio.Lock, which implements
-        # only __aenter__/__aexit__. Both statements below used a plain `with`,
-        # which raises AttributeError on entry — and the second sat inside a
-        # SYNCHRONOUS done-callback, where `async with` is not even possible.
-        # The path survived only because EDITABLE_SIGNAL_FLOW_ENABLED is absent
-        # from shortcircuit.config.py and defaults to False, so none of it has ever run.
-        #
-        # The index is a plain dict guarded for short critical sections, so a
-        # threading.Lock is the correct primitive: usable from both the loop and
-        # a sync callback, and never held across an await.
+        # threading.Lock, not asyncio.Lock: the index is a plain dict guarded for
+        # short critical sections and touched from both the event loop and a
+        # synchronous done-callback, where `async with` is impossible. Never held
+        # across an await.
         correlation_id = str(uuid.uuid4())
         with self._signal_msg_index_lock:
             self._signal_msg_index[correlation_id] = SignalMsgState(created_at=time.time())

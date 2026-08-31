@@ -586,12 +586,9 @@ class FocusEngine:
                         self.start_focus(symbol, pos)
 
                     else:
-                        # No Telegram alert here. enter_position already sent one
-                        # carrying the broker's actual rejection text, the payload
-                        # and the cooldown. This second message duplicated it and
-                        # said "broker returned None", which is enter_position's
-                        # return value, not anything the broker said — on
-                        # 2026-08-11 that hid a real RMS rule behind a null.
+                        # No Telegram alert here — enter_position already sent one
+                        # with the broker's real rejection text. A second message
+                        # saying "broker returned None" once hid an RMS rule.
                         logger.warning(
                             "⚠️ [EXECUTION FAILED] %s — enter_position returned: %s",
                             symbol, pos,
@@ -774,12 +771,9 @@ class FocusEngine:
 
         tick = position_data.get('tick_size', 0.05)
 
-        # Take-profit levels (restored 2026-08-30, see config.TP_MODE).
-        #   tp_2 — the VWAP mean-reversion target, from OrderManager.
-        #   tp_1 — the midpoint between entry and tp_2.
-        # Under 'SCALE' the position sheds 50% at tp_1 and runs the rest to tp_2;
-        # under 'SINGLE' it closes 100% at tp_1. Both are None when TP_MODE is
-        # 'OFF', and every consumer below treats None as "no target".
+        # tp_2 is the VWAP target from OrderManager; tp_1 the midpoint to it.
+        # SCALE sheds 50% at tp_1 and runs the rest to tp_2, SINGLE closes fully
+        # at tp_1. Both are None under 'OFF', and None means "no target".
         tp_mode = str(getattr(config, 'TP_MODE', 'OFF')).upper()
         tp_1 = tp_2 = None
         if tp_mode in ('SCALE', 'SINGLE'):
@@ -828,14 +822,10 @@ class FocusEngine:
             'mae_pct':         0.0,  # Max Adverse Excursion (% from entry)
         }
         
-        # Per-trade detector state MUST be reset here.
-        #
-        # These live on the engine, not on the trade, and were never cleared when a
-        # new focus began. On 2026-08-06 NSE:STOVEKRAFT-EQ left _consecutive_flat_reads
-        # at 1; the very next trade (NSE:BAJAJELEC-EQ) needed only a single flat read
-        # to reach the "2 consecutive" threshold and was declared manually closed
-        # 23ms after entry. _last_broker_pos_check likewise left the 5s interval gate
-        # already open, so the check fired immediately instead of after 5s.
+        # Per-trade detector state MUST be reset here — it lives on the engine,
+        # not the trade. On 2026-08-06 STOVEKRAFT left _consecutive_flat_reads at 1,
+        # so the next trade needed a single flat read to hit the "2 consecutive"
+        # threshold and was declared manually closed 23ms after entry.
         self._consecutive_flat_reads = 0
         self._api_fail_streak = 0
         self._last_broker_pos_check = time.time()
@@ -878,16 +868,11 @@ class FocusEngine:
         """
         broker = self.order_manager.broker if self.order_manager else None
 
-        # Fast path: live WS position cache
-        # A cache HIT is authoritative. A cache MISS is NOT — it only means no
-        # position frame has arrived for this symbol yet.
-        #
-        # An earlier version of this method returned None (i.e. "flat") on a miss
-        # whenever ANY symbol had pushed an event in the last 15s. That global
-        # timestamp has nothing to do with this symbol. On 2026-08-06 it fired
-        # 23ms after entry on NSE:BAJAJELEC-EQ — the position's own first frame
-        # did not arrive until 540ms later — and the bot declared a manual close
-        # on a position that was perfectly fine at the broker.
+        # Fast path: live WS position cache. A HIT is authoritative; a MISS is
+        # NOT — it only means no frame has arrived for this symbol yet. An earlier
+        # version inferred "flat" from a miss whenever ANY symbol had pushed an
+        # event recently, and on 2026-08-06 declared NSE:BAJAJELEC-EQ manually
+        # closed 23ms after entry, 540ms before its own first frame arrived.
         if broker is not None:
             try:
                 with broker._position_cache_lock:
@@ -1078,13 +1063,10 @@ class FocusEngine:
                                 pnl = (exit_p - entry_p) * qty if entry_p > 0 else 0
                             else:
                                 pnl = (entry_p - exit_p) * qty if entry_p > 0 else 0
-                            # BUG-2026-08-11: the bot's own 15:10 square-off closed
-                            # NSE:DEVYANI-EQ and this branch reported it as a MANUAL
-                            # CLOSE, because all it can see is that the broker
-                            # position vanished. Past the square-off deadline that
-                            # is the scheduler's doing, not the operator's, and
-                            # mislabelling it corrupts exit-reason attribution in
-                            # both the EOD report and the ML log.
+                            # This branch only sees that the broker position
+                            # vanished. Past the square-off deadline that is the
+                            # scheduler's doing, not the operator's, and calling it
+                            # a manual close corrupts exit-reason attribution.
                             from shortcircuit.eod.eod_scheduler import EOD_TIME
                             _now_ist = datetime.datetime.now(
                                 pytz.timezone('Asia/Kolkata')
@@ -1157,22 +1139,12 @@ class FocusEngine:
                         self._api_fail_streak = 0
 
 
-                # There is deliberately no standalone breakeven stop here. The
-                # profit-triggered version (move the stop once the trade is 0.7%
-                # onside) was removed on 2026-08-12: it is a profit-side decision,
-                # and those are the operator's. The only breakeven left is the one
-                # tied to the scale-out partial below, behind P52_BREAKEVEN_AFTER_TP1.
+                # No standalone breakeven stop by design: the profit-triggered
+                # version was removed on 2026-08-12 as an operator-only decision.
+                # The only one left is tied to the scale-out partial below.
                 
-                # Take-profit engine (restored 2026-08-30).
-                # Removed on 6 Aug because the midpoint target "capped every
-                # winner". Replaying all 46 LIVE trades since 11 Jun on real
-                # 1-minute candles does not support that: no-TP scored -3.10 over
-                # the green era against +3.15 (SINGLE) and +3.27 (SCALE). Losers
-                # are untouched either way — 11 of 15 August trades hit the stop
-                # first and score identically under every policy. The TP only
-                # ever changes what happens to winners.
-                #
-                # Both stages respect manual_override: if the operator has taken
+                # Take-profit engine — see config.TP_MODE for the mode ranking.
+                # Both stages respect manual_override: once the operator has taken
                 # the wheel, the bot does not exit underneath them.
                 _tp_mode = t.get('tp_mode', 'OFF')
                 _tp_dir = t.get('direction', 'SHORT')
@@ -1231,25 +1203,13 @@ class FocusEngine:
                         else:
                             logger.info("[TP-1] %s has 1 share left — no partial to take", symbol)
 
-                        # Breakeven is on its own flag because it contradicts the
-                        # standing "no breakeven SL" rule — but it is also the half
-                        # of the June policy that made a 41% win rate profitable:
-                        # once this lands, the trade cannot lose.
-                        #
-                        # So the result is CHECKED, not dispatched and forgotten.
-                        # move_hard_stop returns False on a broker rejection and
-                        # leaves the ORIGINAL stop in place. On 2026-08-11 DEVYANI
-                        # that happened while the alert implied the stop had moved,
-                        # and the operator was told a trade was risk-free when it
-                        # was not. A wrong belief about risk is worse than no move.
-                        #
-                        # Blocking here stalls the 5Hz loop for up to 24s across both
-                        # attempts (a normal modify returns in ~1s). That is acceptable:
-                        # the original broker-side stop is live at the broker the whole
-                        # time, so the position stays protected throughout — just not at
-                        # breakeven yet. The EOD square-off has ~5 min of slack before
-                        # the exchange's own 15:15-15:20 auto-squareoff, so a stall here
-                        # cannot cause a missed close.
+                        # The result is CHECKED, not fire-and-forget: move_hard_stop
+                        # returns False on a rejection and leaves the ORIGINAL stop.
+                        # On 2026-08-11 DEVYANI the alert implied it had moved when
+                        # it had not, and a wrong belief about risk is worse than no
+                        # move. Blocking stalls the 5Hz loop up to 24s across both
+                        # attempts; the original stop is live at the broker the whole
+                        # time, and EOD square-off keeps ~5 min of slack.
                         if getattr(config, 'P52_BREAKEVEN_AFTER_TP1', False):
                             be_qty = t['remaining_qty'] if exit_qty > 0 else None
                             t['be_moved'] = False

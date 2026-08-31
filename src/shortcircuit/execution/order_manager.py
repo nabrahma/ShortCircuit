@@ -1041,12 +1041,9 @@ class OrderManager:
                 error_msg = str(e)
                 logger.error(f"❌ [ENTRY] Exception for {symbol}: {error_msg}")
 
-                # Set cooldown on broker exception
-                # Some broker rejections are permanent for the session, not
-                # transient. On 2026-08-11 NSE:SINGERIND-EQ was refused with
-                # "RED:RULE:{Allowed Basket} ... NSE_MIS_BASKET" — the symbol is
-                # simply not permitted for intraday margin that day. A 15-minute
-                # cooldown just retries something that cannot succeed, burning a
+                # Some rejections are permanent for the session, not transient:
+                # an "Allowed Basket" refusal means the symbol has no MIS margin
+                # that day. Retrying it on a 15-minute cooldown just burns a
                 # signal and a rate-limit slot each time.
                 _permanent = any(
                     marker in error_msg

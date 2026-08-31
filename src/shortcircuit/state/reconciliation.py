@@ -584,13 +584,10 @@ class ReconciliationEngine:
             f"@ avg ₹{avg_price:.2f} — starting adoption."
         )
 
-        # Tick size is NOT in the broker's position payload, so the old
-        # `broker_pos.get('tick_size', 0.05)` was always 0.05. NSE:TIINDIA-EQ
-        # trades on a 0.10 tick, so its stop was rejected — twice — and the
-        # position sat naked. A tick learned from a previous rejection wins.
-        # Order of authority: what a rejection already taught us, then the
-        # broker's own depth feed, then whatever the payload claimed, then a
-        # default that is known to be wrong for 0.1-tick symbols.
+        # Tick size is NOT in the position payload, so defaulting to 0.05 left
+        # NSE:TIINDIA-EQ (0.10 tick) naked after two rejected stops. Order of
+        # authority: a tick learned from a past rejection, then the depth feed,
+        # then the payload, then a default known to be wrong for 0.10 symbols.
         tick_size = _LEARNED_TICKS.get(symbol)
         if not tick_size:
             try:
@@ -721,17 +718,10 @@ class ReconciliationEngine:
                     self.order_manager.hard_stops[symbol] = sl_id
                 logger.info(f"[ADOPT] Position registered in active_positions: {symbol}")
 
-            # Step 4: Log to DB
-            # CRITICAL: This is what stops infinite re-detection.
-            # Without this, every reconcile cycle re-detects the same orphan.
-            # Persisting the adoption is what stops infinite re-detection: until the
-            # position exists in the DB, every reconcile cycle sees it as a fresh
-            # orphan and tries to adopt it again.
-            #
-            # The old chain had a dead middle branch keyed on `self.db_manager`, an
-            # attribute this class never defines (the constructor stores `self.db`),
-            # so it raised AttributeError inside adopt_orphan's try and aborted the
-            # whole adoption. Collapsed here into one ordered fallback.
+            # Step 4: log to DB. Persisting the adoption is what stops infinite
+            # re-detection — until the position is in the DB, every cycle sees a
+            # fresh orphan. One ordered fallback: the old chain had a middle branch
+            # keyed on a nonexistent attribute that aborted the whole adoption.
             entry_payload = {
                 'symbol':       symbol,
                 'direction':    side,

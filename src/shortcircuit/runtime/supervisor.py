@@ -759,15 +759,10 @@ async def main() -> int:
                 ctx.focus_engine.stop("EOD_SQUAREOFF")
                 logger.info("[EOD] FocusEngine validation monitor stopped before square-off.")
 
-            # Square-off is retried until the account is provably flat or the hard
-            # deadline passes — NOT attempted once with a 60s budget.
-            #
-            # On 2026-07-29 the single attempt hung 974s inside its very first
-            # REST call (self.fyers.positions(), on a client with no timeout), the
-            # 60s wait_for gave up, and the run was reported as complete. A
-            # one-shot square-off has no way to recover from a transient stall,
-            # and 15:10 leaves 20 minutes before the 15:30 close — ample room to
-            # keep trying.
+            # Retried until the account is provably flat or the deadline passes,
+            # never one-shot. On 2026-07-29 a single attempt hung 974s in its first
+            # REST call, the 60s wait_for gave up, and the run reported success.
+            # 15:10 leaves 20 minutes before the close — ample room to keep trying.
             deadline = datetime.now(IST).replace(
                 hour=15, minute=25, second=0, microsecond=0
             )

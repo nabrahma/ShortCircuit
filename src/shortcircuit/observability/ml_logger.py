@@ -256,14 +256,10 @@ class MLDataLogger:
             "upper_wick_pct": features.get("upper_wick_pct", 0),
             "lower_wick_pct": features.get("lower_wick_pct", 0),
 
-            # Strategy quality features
-            # These four are declared in FEATURE_COLUMNS and are passed in by
-            # analyzer._finalize_signal, but were never copied into the observation
-            # record — so _dataframe_from_buffer backfilled them as None and every
-            # row written since this logger was introduced has them null (verified:
-            # 99/99 across 27 session files). They are the most discriminative
-            # features the strategy produces; without them the parquet dataset
-            # cannot support any confidence- or fade-conditioned analysis.
+            # Strategy quality features. Declared in FEATURE_COLUMNS and passed by
+            # _finalize_signal, but never copied here — so every row written before
+            # this fix has them null (99/99 across 27 session files). They are the
+            # most discriminative features the strategy produces.
             "stretch_score": features.get("stretch_score", 0.0),
             "vol_fade_ratio": features.get("vol_fade_ratio", 0.0),
             "confidence": features.get("confidence", "MEDIUM"),

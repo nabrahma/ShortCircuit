@@ -136,15 +136,10 @@ class TradeManager:
                     res = self.fyers.place_order(data=data)
                     logger.info(f"Square-off Response: {res}")
 
-                    # PnL for the session risk tracker.
-                    #
-                    # This previously read pos.get('lp', ...) — but Fyers netPositions
-                    # records carry no 'lp'/'ltp' field at all, so exit_price was
-                    # always 0, pnl_estimate always 0.0, and every EOD square-off
-                    # recorded a flat ₹0 outcome into MAX_SESSION_LOSS tracking. A
-                    # day closed entirely by square-off therefore looked risk-free.
-                    # (The fallback also referenced an undefined `ltp` guarded by a
-                    # locals() check that could never be true.)
+                    # PnL for the session risk tracker. Do not read pos['lp'] —
+                    # Fyers netPositions carry no lp/ltp, so exit_price was always
+                    # 0 and every EOD square-off logged ₹0 into MAX_SESSION_LOSS,
+                    # making a day closed by square-off look risk-free.
                     pnl_estimate = self._estimate_exit_pnl(pos, symbol, net_qty)
 
                     logger.info(

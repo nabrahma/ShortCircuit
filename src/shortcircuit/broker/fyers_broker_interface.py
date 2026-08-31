@@ -412,13 +412,9 @@ class FyersBrokerInterface:
             log_path="logs/fyers_rest"
         )
         
-        # Connection pooling + hard timeout.
-        #
-        # This block used to test `hasattr(self.rest_client, 'session')`, which is
-        # ALWAYS False — FyersModel keeps its requests.Session on an inner service
-        # object (client.service.session). So the pool-size fix never applied, and
-        # every broker REST call ran with library defaults and no timeout at all.
-        # harden_fyers_session() resolves the real session and reports honestly.
+        # Connection pooling and a hard timeout. Testing hasattr(client, 'session')
+        # is always False on FyersModel, so the old pool fix never applied and every
+        # REST call ran untimed. harden_fyers_session resolves the real session.
         from shortcircuit.broker.fyers_connect import harden_fyers_session
         harden_fyers_session(self.rest_client, label="broker rest_client")
         
