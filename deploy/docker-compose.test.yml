@@ -43,4 +43,4 @@ services:
     # time — /opt/venv is root-owned and the runtime user cannot write to it.
     entrypoint: ["/bin/sh", "-c"]
     command:
-      - pytest tests/unit tests/property -v --cov=shortcircuit --cov-report=term
+      - pytest tests/unit tests/property tests/strategy -v --cov=shortcircuit --cov-report=term

@@ -8,7 +8,7 @@ actually occurred — each cross-references the incident in
 
 | Time (IST) | What happens |
 |---|---|
-| before 09:15 | Process starts, authenticates, primes the quote cache, applies migrations if needed |
+| before 09:15 | Process starts, authenticates, primes the quote cache |
 | 09:15 | Market opens. `TRADING_ENABLED` still false — warmup only |
 | 09:30 | `MarketSession` opens the trading gate. Scanning and execution begin |
 | 09:30–15:10 | Scan every 60s; reconciliation every 6s; capital resync every 5min |

@@ -50,7 +50,7 @@ jobs:
       - run: pip install -r requirements.txt -r requirements-dev.txt
       - name: Unit and property tests
         run: |
-          pytest tests/unit tests/property -v \
+          pytest tests/unit tests/property tests/strategy -v \
             --cov=shortcircuit \
             --cov-report=xml --cov-report=term
       - name: Upload coverage

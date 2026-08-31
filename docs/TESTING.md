@@ -7,7 +7,7 @@ make coverage          # per-package coverage
 make verify            # everything CI runs, locally
 ```
 
-155 tests. Full output: [`evidence/test-suite-full.txt`](evidence/test-suite-full.txt).
+344 tests — unit, property-based and strategy. Full output: [`evidence/test-suite-full.txt`](evidence/test-suite-full.txt).
 
 ## What is tested, and why that
 

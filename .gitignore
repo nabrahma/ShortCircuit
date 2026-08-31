@@ -78,3 +78,9 @@ md/
 
 # md folder
 md/
+
+# Coverage artefacts
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/

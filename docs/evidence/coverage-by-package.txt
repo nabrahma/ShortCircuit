@@ -1,45 +1,75 @@
-Coverage by module — measured 2026-08-08
-pytest tests/unit tests/property tests/strategy --cov=shortcircuit
-248 tests
+============================= test session starts ==============================
+platform linux -- Python 3.12.3, pytest-9.0.2, pluggy-1.6.0
+rootdir: /home/nabbaazz/ShortCircuit
+configfile: pyproject.toml
+plugins: cov-7.1.0, anyio-4.12.1, asyncio-1.3.0, hypothesis-6.165.2
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 344 items
 
+tests/unit/strategy/test_features.py .................................   [  9%]
+tests/unit/strategy/test_market_profile.py ............                  [ 13%]
+tests/unit/test_adoption.py ........................                     [ 20%]
+tests/unit/test_brain_isolation.py ..............                        [ 24%]
+tests/unit/test_capital_manager.py .....................                 [ 30%]
+tests/unit/test_exit_classification.py ...........                       [ 33%]
+tests/unit/test_exit_policy_restore.py .........................         [ 40%]
+tests/unit/test_leverage_screen.py ...................                   [ 46%]
+tests/unit/test_paths.py ............                                    [ 49%]
+tests/unit/test_reconciliation.py ............                           [ 53%]
+tests/unit/test_rest_limiter.py ...........                              [ 56%]
+tests/unit/test_symbols_and_config.py ...............................    [ 65%]
+tests/unit/test_vwap_anchoring.py .................                      [ 70%]
+tests/property/test_features_properties.py .........                     [ 72%]
+tests/strategy/test_back_to_vwap.py ..............................       [ 81%]
+tests/strategy/test_htf_confluence.py ..................                 [ 86%]
+tests/strategy/test_market_context.py .................................. [ 96%]
+...........                                                              [100%]
+
+================================ tests coverage ================================
+_______________ coverage: platform linux, python 3.12.3-final-0 ________________
+
+Name                                                   Stmts   Miss Branch BrPart  Cover   Missing
+--------------------------------------------------------------------------------------------------
 src/shortcircuit/__init__.py                               1      0      0      0   100%
 src/shortcircuit/__main__.py                               3      3      0      0     0%   7-10
 src/shortcircuit/broker/__init__.py                        0      0      0      0   100%
-src/shortcircuit/broker/fyers_broker_interface.py       1255   1090    352      0    10%   55-56, 96-101, 136-148, 154-164, 170-176, 182-199, 271-278, 282-334, 339-348, 355-382, 404-547, 555-572, 579-586, 590, 597-602, 647, 650-676, 681-706, 710-736, 740-745, 749-753, 757-765, 769-780, 784-791, 794-799, 802-806, 809-810, 813-814, 822-836, 842-919, 934-944, 953-1013, 1024-1058, 1068-1105, 1116-1165, 1169-1208, 1217-1273, 1280-1281, 1304-1358, 1361, 1365-1366, 1375-1383, 1391-1418, 1426, 1436, 1444-1445, 1468-1472, 1479-1480, 1483, 1487-1502, 1523-1545, 1550-1630, 1634-1682, 1686-1698, 1707-1811, 1815-1818, 1822-1834, 1852-1856, 1876-1945, 1948-1970, 1988-2058, 2067-2095, 2101-2117, 2130-2167, 2176-2214, 2222-2285, 2300-2322, 2345-2393, 2396-2402, 2408-2454
-src/shortcircuit/broker/fyers_connect.py                 165    132     42      0    16%   55-56, 59-61, 79-117, 135-138, 146-170, 177-207, 214-273, 277-292, 299-307, 311-315, 319-326, 333, 337, 342
+src/shortcircuit/broker/fyers_broker_interface.py       1271   1059    358      0    14%   50-51, 91-96, 131-143, 149-159, 165-171, 177-194, 266-273, 277-327, 332-341, 348-375, 397-536, 544-561, 568-575, 579, 586-591, 636, 639-665, 670-695, 699-725, 729-734, 738-742, 746-754, 758-769, 773-780, 783-788, 791-795, 798-799, 802-803, 811-825, 831-908, 921-931, 940-1000, 1011-1045, 1055-1092, 1103-1152, 1156-1195, 1204-1260, 1267-1268, 1291-1345, 1348, 1352-1353, 1360-1368, 1376-1403, 1411, 1421, 1429-1430, 1453-1457, 1464-1465, 1468, 1472-1487, 1508-1530, 1534-1614, 1618-1666, 1670-1682, 1691-1795, 1799-1802, 1806-1815, 1831-1835, 1855-1924, 1927-1949, 1967-2037, 2091-2119, 2125-2141, 2153-2190, 2199-2237, 2348-2370, 2393-2441, 2444-2449, 2455-2501
+src/shortcircuit/broker/fyers_connect.py                 219    179     58      0    14%   46-47, 50-52, 88-89, 92-101, 112-133, 150-200, 212-222, 241-244, 252-276, 283-328, 335-394, 398-413, 420-428, 432-436, 440-447, 454, 458, 463
 src/shortcircuit/broker/rest_limiter.py                  107     10     30      6    88%   111-113, 129, 182-183, 188, 194-197, 209
 src/shortcircuit/capital/__init__.py                       0      0      0      0   100%
-src/shortcircuit/capital/capital_manager.py              131     34     36      5    75%   63, 81-106, 135, 142, 146->152, 176, 252-267, 271-274, 293, 307
-src/shortcircuit/config.py                                65      1      2      0    99%   111
+src/shortcircuit/capital/capital_manager.py              131     34     36      5    75%   60, 76-101, 130, 137, 141->147, 169, 241-256, 260-263, 280, 293
+src/shortcircuit/config.py                                71      1      2      0    99%   104
 src/shortcircuit/eod/__init__.py                           0      0      0      0   100%
 src/shortcircuit/eod/eod_analyzer.py                     254    254     86      0     0%   1-514
-src/shortcircuit/eod/eod_scheduler.py                     58     58     12      0     0%   2-99
+src/shortcircuit/eod/eod_scheduler.py                     58     47     12      0    16%   17, 32-99
 src/shortcircuit/eod/eod_watchdog.py                      25     25      8      0     0%   12-54
 src/shortcircuit/execution/__init__.py                     0      0      0      0   100%
-src/shortcircuit/execution/analyzer.py                   239    239     48      0     0%   15-502
-src/shortcircuit/execution/focus_engine.py               640    640    274      0     0%   1-1238
-src/shortcircuit/execution/order_manager.py              752    752    308      0     0%   11-1546
-src/shortcircuit/execution/signal_manager.py             104    104     30      0     0%   6-240
-src/shortcircuit/execution/trade_manager.py              116    116     36      0     0%   1-248
+src/shortcircuit/execution/analyzer.py                   273    229     64      1    15%   53-64, 114, 150-151, 160-166, 183-261, 279-495, 504-618
+src/shortcircuit/execution/focus_engine.py               693    649    300      0     5%   57-76, 84-123, 130-140, 147-161, 165-171, 175-215, 219-242, 246-257, 261-285, 292-625, 640-718, 727-747, 753-850, 869-911, 914-1292, 1299-1311, 1315-1327, 1331-1346
+src/shortcircuit/execution/order_manager.py              772    732    318      0     4%   71-85, 89-91, 98-106, 110-112, 134-139, 159-193, 205-223, 233-241, 262-365, 373-402, 415-504, 512-613, 617-630, 638-689, 702-1090, 1099-1313, 1322-1401, 1411-1495, 1528-1590, 1593-1596
+src/shortcircuit/execution/signal_manager.py             104     87     30      0    13%   19-37, 41-50, 66-119, 131-152, 160-163, 174-186, 203-212, 216-217, 234-238
+src/shortcircuit/execution/trade_manager.py              116    116     36      0     0%   1-234
 src/shortcircuit/marketdata/__init__.py                    0      0      0      0   100%
 src/shortcircuit/marketdata/market_utils.py                9      0      2      0   100%
-src/shortcircuit/marketdata/scanner.py                   329    329    130      0     0%   1-601
-src/shortcircuit/marketdata/symbols.py                    23      5      8      0    77%   61-65
+src/shortcircuit/marketdata/scanner.py                   353    353    142      0     0%   1-635
+src/shortcircuit/marketdata/symbols.py                    23      5      8      0    77%   59-63
 src/shortcircuit/observability/__init__.py                 0      0      0      0   100%
-src/shortcircuit/observability/gate_result_logger.py     255    255     78      0     0%   15-575
-src/shortcircuit/observability/ml_logger.py              136    136     38      0     0%   20-400
-src/shortcircuit/observability/telegram_bot.py           604    604    172      0     0%   4-1217
+src/shortcircuit/observability/gate_result_logger.py     255    198     78      0    17%   86-98, 102-103, 106-107, 115-136, 139-145, 155-166, 170-175, 179-212, 218-240, 249-317, 368-383, 391-425, 434-476, 484-518, 529-537, 542-547, 558-561
+src/shortcircuit/observability/ml_logger.py              136    109     38      0    16%   114-129, 141-155, 159-169, 173-176, 179-184, 188-204, 216-310, 327-354, 359-373, 378-384, 393-395
+src/shortcircuit/observability/telegram_bot.py           604    604    172      0     0%   1-1177
 src/shortcircuit/paths.py                                 23      1      6      1    93%   40
 src/shortcircuit/runtime/__init__.py                       0      0      0      0   100%
-src/shortcircuit/runtime/market_session.py               159    159     46      0     0%   1-284
-src/shortcircuit/runtime/startup_recovery.py              66     66     18      0     0%   5-151
+src/shortcircuit/runtime/market_session.py               159    159     46      0     0%   1-283
+src/shortcircuit/runtime/startup_recovery.py              66     66     18      0     0%   7-153
 src/shortcircuit/state/__init__.py                         0      0      0      0   100%
-src/shortcircuit/state/database.py                       119     87     22      0    23%   39-41, 48-62, 66-69, 73, 77, 81-83, 87-89, 93-95, 99-101, 113-149, 160-175, 187-189, 203-245, 261
-src/shortcircuit/state/reconciliation.py                 360    262    132     11    26%   32-47, 56, 63-66, 73-75, 79-81, 85-88, 92-98, 101-121, 150, 152->160, 175-177, 205-209, 225-229, 249, 267-275, 294-321, 337-348, 367-595, 612, 632-633, 637->645, 642->637, 647-664, 698-806, 818-823, 831-833, 836-844
+src/shortcircuit/state/database.py                       119     87     22      0    23%   39-41, 48-62, 66-69, 73, 77, 81-83, 87-89, 93-95, 99-101, 113-149, 160-175, 187-189, 203-245, 254
+src/shortcircuit/state/reconciliation.py                 496    317    180     13    36%   32-33, 35, 68-91, 99, 106-109, 116-118, 180-181, 208-210, 214-217, 221-227, 230-250, 279, 281->289, 304-306, 334-338, 354-358, 378, 396-404, 423-450, 466-477, 495, 521-522, 527, 546-832, 849, 869-870, 874->882, 879->874, 884-901, 935-1068, 1084-1089, 1097-1099, 1102-1110
 src/shortcircuit/strategy/__init__.py                      0      0      0      0   100%
 src/shortcircuit/strategy/back_to_vwap.py                 90      0     38      0   100%
-src/shortcircuit/strategy/features.py                    149     16     60     12    86%   50, 56, 131-132, 163, 165-166, 237->240, 246, 262, 266-267, 271, 275, 280, 291, 298
+src/shortcircuit/strategy/features.py                    149     16     60     12    86%   48, 54, 126-127, 156, 158-159, 222->225, 231, 247, 251-252, 256, 260, 265, 276, 283
 src/shortcircuit/strategy/htf_confluence.py               63      0     22      0   100%
 src/shortcircuit/strategy/market_context.py              227      2     78      8    97%   121->119, 124, 185->188, 282->exit, 312->325, 320, 321->325, 356->362
 src/shortcircuit/strategy/market_profile.py              101     58     40      3    40%   54-56, 67-156, 170->exit, 205
-TOTAL                                                   6628   5438   2154     46    17%
+--------------------------------------------------------------------------------------------------
+TOTAL                                                   6971   5400   2288     49    21%
+============================= 344 passed in 16.47s =============================

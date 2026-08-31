@@ -166,8 +166,16 @@ Signal detected by the Brain
   → Active focus monitor
 ```
 
-Exits: the broker-side stop, or the 15:10 IST square-off. There is no
-take-profit. [ADR-009](docs/DECISIONS.md) explains why it was removed.
+Exits: a staged take-profit, the broker-side stop, or the 15:10 IST square-off.
+Under the default `TP_MODE='SCALE'` the position sheds half at the midpoint
+between entry and the VWAP target and runs the remainder to that target, moving
+the stop to breakeven once the partial fills. `'SINGLE'` closes fully at the
+midpoint; `'OFF'` leaves the stop and the square-off as the only exits.
+
+The take-profit was removed in August and restored on 2026-08-30 after a replay
+of every live trade reversed the original reading. [ADR-009](docs/DECISIONS.md)
+records the removal, [ADR-011](docs/DECISIONS.md) the reversal and why the
+evidence for it is a point estimate rather than a proven result.
 
 **Manual override.** If the operator changes a stop directly at the broker, the
 bot detects the structural change, sets `manual_override` and backs off. It
@@ -240,9 +248,11 @@ session, days later, in a way that looks like bad luck.
 
 ### Testing
 
-155 unit and property-based tests. Coverage is concentrated where an error is
-hardest to notice: the strategy math (`features.py` at 89%) and the capital
-layer (74%). Three strategy modules are not yet covered, and that is stated in
+344 unit, property-based and strategy tests. Coverage is concentrated where an
+error is hardest to notice: the `strategy/` package sits at 86% overall, with
+`back_to_vwap.py` and `htf_confluence.py` at 100% on statements and branches and
+`market_context.py` at 97%. `market_profile.py` (40%) and the capital layer (75%)
+are both below their floors, and that is stated in
 [docs/KNOWN_GAPS.md](docs/KNOWN_GAPS.md) rather than hidden behind a global
 average.
 
@@ -317,7 +327,7 @@ Engineering metrics only. No performance, profitability or return figures. See
 | Scan latency (p50 / p99) | 9 ms / 501 ms |
 | Cache priming, cold start | 4 to 25 s observed |
 | Reconciliation cadence | every 6 s during market hours |
-| Tests / runtime | 155 / ~6.5 s |
+| Tests / runtime | 344 / ~7 s |
 
 These describe how the system runs, not how the strategy performs. Gate
 thresholds, rejection distributions and anything else that characterises the
@@ -327,18 +337,34 @@ filter are deliberately not published.
 
 ## Running it
 
+**Prerequisites:** Python 3.11+, PostgreSQL 14+ (tested on 16), a Fyers API app,
+and a Telegram bot. There is no way to run this without a broker account.
+
 ```bash
 python -m venv .venv && source .venv/bin/activate
 make install
 ```
 
-Create `.env` from [`.env.example`](.env.example) with your Fyers credentials,
-Telegram token, and PostgreSQL connection.
+Copy [`.env.example`](.env.example) to `.env` and fill it in. Variable names
+matter — `DB_PASS`, not `DB_PASSWORD`, is what `deploy/docker-compose.yml`
+requires, and `AUTO_MODE` there is documentation only: it is a constant in
+`config.py`, armed on boot, and disarmed at runtime with `/auto off`.
+
+Create the database and apply the schema. **Migrations are not applied
+automatically** — run them once, in lexical order:
 
 ```bash
-python main.py      # live, requires credentials
-make test           # tests, no credentials needed
-make demo           # containerised suite, no credentials needed
+createdb shortcircuit_trading
+for f in migrations/*.sql; do psql -d shortcircuit_trading -v ON_ERROR_STOP=1 -f "$f"; done
+```
+
+The role you connect as should own the database; `v42_1_0_postgresql.sql` creates
+the `uuid-ossp` extension, which a database owner may do on PostgreSQL 14+.
+
+```bash
+make test           # 344 tests, no credentials or database needed
+make demo           # the same suite in a container, no credentials needed
+python main.py      # live — requires credentials and a migrated database
 ```
 
 **Live operation requires broker credentials.** There is no offline or paper
@@ -369,7 +395,7 @@ src/shortcircuit/
     ├── market_context.py     Nifty regime
     └── htf_confluence.py     Higher-timeframe gates
 
-tests/                        155 unit and property tests
+tests/                        344 unit, property and strategy tests
 docs/                         Architecture, strategy, operations, decisions, evidence
 deploy/                       Dockerfile and compose stacks
 scripts/                      Operational scripts

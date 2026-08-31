@@ -29,8 +29,8 @@ typecheck:  ## Run mypy (advisory — never blocks)
 
 # ── tests ────────────────────────────────────────────────────────────────
 .PHONY: test
-test:  ## Unit + property tests (no network, no credentials)
-	$(PY) -m pytest tests/unit tests/property -v
+test:  ## Unit + property + strategy tests (no network, no credentials)
+	$(PY) -m pytest tests/unit tests/property tests/strategy -v
 
 .PHONY: test-integration
 test-integration:  ## Integration tests (needs PostgreSQL)
@@ -41,7 +41,7 @@ test-all: test test-integration  ## Every test level
 
 .PHONY: coverage
 coverage:  ## Tests with per-package coverage
-	$(PY) -m pytest tests/unit tests/property $(COV_PKGS) --cov-report=term
+	$(PY) -m pytest tests/unit tests/property tests/strategy $(COV_PKGS) --cov-report=term
 
 # ── security ─────────────────────────────────────────────────────────────
 .PHONY: security
@@ -70,11 +70,11 @@ audit-purity:  ## Regenerate the module purity audit
 .PHONY: evidence
 evidence:  ## Regenerate every file in docs/evidence/
 	@mkdir -p docs/evidence
-	$(PY) -m pytest tests/unit tests/property -v > docs/evidence/test-suite-full.txt 2>&1 || true
+	$(PY) -m pytest tests/unit tests/property tests/strategy -v > docs/evidence/test-suite-full.txt 2>&1 || true
 	$(PY) -m pytest tests/unit/test_reconciliation.py -v > docs/evidence/reconciliation-divergence-table.txt 2>&1 || true
 	$(PY) -m pytest tests/property -v > docs/evidence/property-tests-hypothesis.txt 2>&1 || true
 	$(PY) -m pytest tests/unit/test_brain_isolation.py -v > docs/evidence/brain-isolation-test.txt 2>&1 || true
-	$(PY) -m pytest tests/unit tests/property $(COV_PKGS) --cov-report=term > docs/evidence/coverage-by-package.txt 2>&1 || true
+	$(PY) -m pytest tests/unit tests/property tests/strategy $(COV_PKGS) --cov-report=term > docs/evidence/coverage-by-package.txt 2>&1 || true
 	$(MAKE) --no-print-directory audit-purity > docs/evidence/module-purity-audit.txt
 	@echo "evidence regenerated"
 

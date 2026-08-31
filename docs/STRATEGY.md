@@ -235,8 +235,11 @@ ATR returns `NaN` rather than a sentinel on insufficient data — the value feed
 stop sizing, and a silent default of 1.0 would produce a plausible-looking but
 arbitrary stop.
 
-**Exit.** The stop, or the 15:10 square-off. No take-profit
-([ADR-009](DECISIONS.md)).
+**Exit.** A staged take-profit, the stop, or the 15:10 square-off. Under the
+default `TP_MODE='SCALE'` half the position closes at the midpoint between entry
+and the VWAP target, the remainder runs to the target, and the stop moves to
+breakeven once the partial fills. `'OFF'` reverts to stop-and-square-off only
+([ADR-011](DECISIONS.md), superseding [ADR-009](DECISIONS.md)).
 
 **Sizing.** From live broker margin at the leverage the broker actually grants
 for that symbol, with a 2% safety buffer and a 5x→4x fallback on margin

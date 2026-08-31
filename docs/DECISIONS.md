@@ -143,6 +143,10 @@ boundary that quietly stops existing.
 
 ## ADR-009 — No take-profit; positions run to the stop or the square-off
 
+> **Superseded by [ADR-011](#adr-011--the-take-profit-is-restored-as-a-scale-out).**
+> Kept as the record of a decision that was made on reasoning alone and later
+> reversed by measurement. The behaviour described below is no longer current.
+
 **Decision.** The take-profit exit was removed (2026-08-06), and the 45-minute
 time-based exit disabled.
 
