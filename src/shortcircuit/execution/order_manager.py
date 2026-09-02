@@ -25,6 +25,7 @@ from shortcircuit.broker.fyers_broker_interface import (
     FyersOrderStatus,
     OrderPlacementTimeout,
 )
+from shortcircuit.broker.rest_limiter import rest_limiter, Priority
 from shortcircuit.observability.ml_logger import get_ml_logger
 
 
@@ -663,6 +664,7 @@ class OrderManager:
                         await self.telegram.send_alert(f"⚠️ **ORPHAN**: {symbol} ({qty})")
 
             loop = asyncio.get_event_loop()
+            await rest_limiter.acquire_async(priority=Priority.HIGH)
             orderbook = await loop.run_in_executor(None, self.broker.rest_client.orderbook)
             if orderbook and isinstance(orderbook, dict) and orderbook.get('s') == 'ok':
                 pending = [
@@ -1122,6 +1124,7 @@ class OrderManager:
                     loop = asyncio.get_event_loop()
                     rest = getattr(self.broker, 'rest_client', None)
                     if rest:
+                        await rest_limiter.acquire_async(priority=Priority.HIGH)
                         ob = await loop.run_in_executor(None, rest.orderbook)
                         if isinstance(ob, dict) and ob.get('s') == 'ok':
                             for o in ob.get('orderBook', []):
@@ -1425,10 +1428,17 @@ class OrderManager:
                 logger.error(f"[MOVE_SL] No rest_client for {symbol}")
                 return False
 
-            # Get current SL order details to preserve qty if new_qty is not provided
+            # Get current SL order details to preserve qty if new_qty is not provided.
+            # Throttled: this used to race the partial exit it follows, and both calls
+            # landed on Fyers inside the same millisecond. The orderbook lost, came
+            # back 429, and the stop was never resized — see the 1 Sep ENGINERSIN flip.
+            await rest_limiter.acquire_async(priority=Priority.HIGH)
             orderbook = await loop.run_in_executor(None, rest.orderbook)
             if not isinstance(orderbook, dict) or orderbook.get('s') != 'ok':
-                logger.error(f"[MOVE_SL] Orderbook fetch failed for {symbol}")
+                logger.error(
+                    "[MOVE_SL] Orderbook fetch failed for %s: %s",
+                    symbol, orderbook if isinstance(orderbook, dict) else type(orderbook).__name__,
+                )
                 return False
 
             current_sl_order = None
@@ -1476,6 +1486,7 @@ class OrderManager:
                 "stopPrice":  stop_rounded,
             }
 
+            await rest_limiter.acquire_async(priority=Priority.HIGH)
             resp = await loop.run_in_executor(
                 None,
                 lambda: rest.modify_order(data=modify_data)
@@ -1484,7 +1495,10 @@ class OrderManager:
             if resp and resp.get('s') == 'ok':
                 # Update our internal state to reflect the new SL
                 pos['stop_loss'] = new_stop_price
-                logger.info(f"✅ [MOVE_SL] {symbol} broker SL moved → ₹{new_stop_price:.2f} (order {sl_id})")
+                logger.info(
+                    "✅ [MOVE_SL] %s broker SL moved → ₹%.2f qty=%s (order %s)",
+                    symbol, new_stop_price, qty, sl_id,
+                )
                 return True
             else:
                 logger.error(f"❌ [MOVE_SL] modify_order failed for {symbol}: {resp}")
@@ -1494,6 +1508,34 @@ class OrderManager:
             logger.error(f"[MOVE_SL] Exception for {symbol}: {e}")
             return False
 
+    async def verify_stop_qty(self, symbol: str) -> Optional[int]:
+        """Quantity of the stop actually resting at the broker, or None if unknown.
+
+        A modify returning 's': 'ok' is the broker accepting the request, not proof
+        the resting order changed. The invariant that matters — a stop must never be
+        larger than the position it protects — is only worth asserting against what
+        the orderbook really says.
+        """
+        try:
+            pos = self.active_positions.get(symbol)
+            sl_id = (pos or {}).get('sl_order_id')
+            rest = getattr(self.broker, 'rest_client', None)
+            if not sl_id or not rest:
+                return None
+            await rest_limiter.acquire_async(priority=Priority.HIGH)
+            loop = asyncio.get_event_loop()
+            book = await loop.run_in_executor(None, rest.orderbook)
+            if not isinstance(book, dict) or book.get('s') != 'ok':
+                logger.warning("[VERIFY_SL] orderbook unavailable for %s: %s", symbol, book)
+                return None
+            for order in book.get('orderBook', []):
+                if (str(order.get('id')) == str(sl_id)
+                        and order.get('status') in FYERS_STATUS_WORKING):
+                    return int(order.get('qty') or 0)
+            return 0          # no working stop found — nothing is resting
+        except Exception as e:
+            logger.warning("[VERIFY_SL] %s: %s", symbol, e)
+            return None
 
     async def _place_protective_stop(
         self,

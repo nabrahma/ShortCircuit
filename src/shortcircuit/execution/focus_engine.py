@@ -9,6 +9,7 @@ from shortcircuit.broker.fyers_connect import FyersConnect
 from shortcircuit import config
 from shortcircuit.execution.order_manager import OrderManager
 
+from shortcircuit.broker.rest_limiter import rest_limiter, Priority
 from shortcircuit.observability.gate_result_logger import get_gate_result_logger
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -674,6 +675,7 @@ class FocusEngine:
                 is_short = qty < 0
                 sl_price = entry_price * (1.01 if is_short else 0.99)  # conservative default
                 try:
+                    rest_limiter.acquire(priority=Priority.HIGH)
                     orders = self.fyers.orderbook()
                     for o in (orders or {}).get('orderBook', []):
                         if o.get('symbol') != symbol:
@@ -745,6 +747,102 @@ class FocusEngine:
                 logger.info("[ALERT] Deferred (no event loop yet): %s", message[:60])
         except Exception as e:
             logger.warning(f"[ALERT] Dispatch failed: {e}")
+
+    def _resize_stop_after_partial(self, symbol: str, t: dict) -> bool:
+        """Shrink the broker-side stop to match what is left after a partial fill.
+
+        Returns True if the trade is still open, False if the remainder was closed.
+
+        This is a safety invariant, not a feature, and it is deliberately NOT gated on
+        P52_BREAKEVEN_AFTER_TP1. On 2026-09-01 the two were the same code path: the
+        breakeven move failed, so nothing resized the stop, and a BUY x10 stop rested
+        against a short of 5. When it triggered it bought 10, flipping the account
+        LONG 5 — reconciliation then adopted that as a manual entry.
+
+        Breakeven only decides the stop PRICE. The quantity is corrected either way,
+        and if it cannot be corrected the remainder is closed rather than left under
+        an oversized stop.
+        """
+        new_qty = t['remaining_qty']
+        be_enabled = getattr(config, 'P52_BREAKEVEN_AFTER_TP1', False)
+        target_price = t['entry'] if be_enabled else t['sl']
+        t['be_moved'] = False
+
+        # Real backoff. The old retry fired both attempts 51ms apart, which against a
+        # rate limit is one attempt with extra logging.
+        for attempt, delay in ((1, 0.0), (2, 1.5), (3, 4.0)):
+            if delay:
+                time.sleep(delay)
+            try:
+                ok = asyncio.run_coroutine_threadsafe(
+                    self.order_manager.move_hard_stop(symbol, target_price, new_qty=new_qty),
+                    self._event_loop,
+                ).result(timeout=15)
+            except Exception as err:
+                logger.error("[SL_RESIZE] %s attempt %d raised: %s", symbol, attempt, err)
+                continue
+            if not ok:
+                logger.error("[SL_RESIZE] %s attempt %d returned False", symbol, attempt)
+                continue
+
+            # 's': 'ok' is the broker accepting the request, not proof the resting
+            # order changed. Assert the invariant against the orderbook itself.
+            try:
+                resting = asyncio.run_coroutine_threadsafe(
+                    self.order_manager.verify_stop_qty(symbol), self._event_loop,
+                ).result(timeout=15)
+            except Exception as err:
+                logger.warning("[SL_RESIZE] %s verify raised: %s", symbol, err)
+                resting = None
+
+            if resting is not None and resting > new_qty:
+                logger.error(
+                    "[SL_RESIZE] %s broker accepted the modify but the resting stop is "
+                    "still %s against a position of %s — retrying",
+                    symbol, resting, new_qty,
+                )
+                continue
+
+            t['be_moved'] = be_enabled
+            logger.info(
+                "🔒 [SL_RESIZE] %s stop now ₹%.2f x%s (verified=%s)%s",
+                symbol, target_price, new_qty,
+                'unavailable' if resting is None else resting,
+                " — remainder is risk-free" if be_enabled else "",
+            )
+            return True
+
+        # Could not guarantee the stop matches the position. An oversized stop is how
+        # a short becomes a long, so close the remainder instead of carrying it.
+        logger.critical(
+            "🚨 [SL_RESIZE] %s could not resize the stop to %s after 3 attempts — "
+            "flattening the remainder rather than leaving an oversized stop resting.",
+            symbol, new_qty,
+        )
+        self._dispatch_alert(
+            f"🚨 *STOP RESIZE FAILED*\n\n"
+            f"Symbol: `{symbol}`\n"
+            f"Took the partial at ₹{t['tp_1']:.2f}, but the broker stop could not be "
+            f"reduced to {new_qty}.\n\n"
+            f"Closing the remainder now — an oversized stop would flip the position."
+        )
+        try:
+            asyncio.run_coroutine_threadsafe(
+                self.order_manager.safe_exit(symbol, "SL_RESIZE_FAILED"),
+                self._event_loop,
+            ).result(timeout=30)
+        except Exception as err:
+            logger.critical(
+                "🚨 [SL_RESIZE] %s flatten also failed: %s — MANUAL INTERVENTION NEEDED",
+                symbol, err,
+            )
+            self._dispatch_alert(
+                f"🚨🚨 *MANUAL ACTION NEEDED*\n\n`{symbol}` has an oversized stop "
+                f"resting and the automatic close failed. Close it by hand now."
+            )
+            return False
+        self.stop_focus("SL_RESIZE_FAILED")
+        return False
 
     def start_focus(self, symbol, position_data, message_id=None, trade_id=None, qty=1):
         """
@@ -1183,80 +1281,47 @@ class FocusEngine:
 
                 # Stage 2: the midpoint partial (SCALE only)
                 if (not manual_override and _tp_mode == 'SCALE'
-                        and not t.get('tp_1_hit') and target_reached(ltp, t.get('tp_1'), _tp_dir)):
+                        and not t.get('tp_1_hit') and target_reached(ltp, t.get('tp_1'), _tp_dir)
+                        and self.order_manager and self._event_loop):
                     exit_qty = t['remaining_qty'] // 2
-                    logger.info(
-                        "🎯 [TP-1 HIT] %s hit midpoint ₹%.2f — scaling out %s of %s",
-                        symbol, t['tp_1'], exit_qty, t['remaining_qty'],
-                    )
-                    # Latch before dispatching. These are fire-and-forget, so a
-                    # slow broker must not let the next 5Hz tick fire a second
-                    # partial against the same fill.
-                    t['tp_1_hit'] = True
-                    if self.order_manager and self._event_loop:
-                        if exit_qty > 0:
-                            asyncio.run_coroutine_threadsafe(
+                    if exit_qty <= 0:
+                        t['tp_1_hit'] = True
+                        logger.info("[TP-1] %s has 1 share left — no partial to take", symbol)
+                    else:
+                        logger.info(
+                            "🎯 [TP-1 HIT] %s hit midpoint ₹%.2f — scaling out %s of %s",
+                            symbol, t['tp_1'], exit_qty, t['remaining_qty'],
+                        )
+                        # Latched before dispatch so a slow broker cannot let the next
+                        # 5Hz tick fire a second partial against the same fill.
+                        t['tp_1_hit'] = True
+
+                        # BLOCKING, and the result decides everything below. This was
+                        # fire-and-forget until 2026-09-02, when a 429 killed the
+                        # partial on NSE:IFCI-EQ while the engine went on believing
+                        # 15 of 29 shares had been sold.
+                        partial_filled = False
+                        try:
+                            partial_filled = asyncio.run_coroutine_threadsafe(
                                 self.order_manager.partial_exit(symbol, exit_qty, "TP_1_HIT"),
                                 self._event_loop,
+                            ).result(timeout=25)
+                        except Exception as pe:
+                            logger.error("[TP-1] %s partial_exit raised: %s", symbol, pe)
+
+                        if not partial_filled:
+                            # Nothing sold. Position and stop still agree, so the trade
+                            # is safe exactly as it stands — unlatch and let a later
+                            # tick retry while price is still beyond the midpoint.
+                            t['tp_1_hit'] = False
+                            logger.warning(
+                                "[TP-1] %s partial did not fill — position unchanged, "
+                                "stop still matches. Will retry on a later tick.", symbol,
                             )
-                            t['remaining_qty'] -= exit_qty
                         else:
-                            logger.info("[TP-1] %s has 1 share left — no partial to take", symbol)
-
-                        # The result is CHECKED, not fire-and-forget: move_hard_stop
-                        # returns False on a rejection and leaves the ORIGINAL stop.
-                        # On 2026-08-11 DEVYANI the alert implied it had moved when
-                        # it had not, and a wrong belief about risk is worse than no
-                        # move. Blocking stalls the 5Hz loop up to 24s across both
-                        # attempts; the original stop is live at the broker the whole
-                        # time, and EOD square-off keeps ~5 min of slack.
-                        if getattr(config, 'P52_BREAKEVEN_AFTER_TP1', False):
-                            be_qty = t['remaining_qty'] if exit_qty > 0 else None
-                            t['be_moved'] = False
-                            for attempt in (1, 2):
-                                try:
-                                    be_future = asyncio.run_coroutine_threadsafe(
-                                        self.order_manager.move_hard_stop(
-                                            symbol, t['entry'], new_qty=be_qty,
-                                        ),
-                                        self._event_loop,
-                                    )
-                                    if be_future.result(timeout=12):
-                                        t['be_moved'] = True
-                                        logger.info(
-                                            "🔒 [BE] %s stop moved to breakeven ₹%.2f — "
-                                            "remainder is now risk-free",
-                                            symbol, t['entry'],
-                                        )
-                                        break
-                                    logger.error(
-                                        "[BE] %s move_hard_stop returned False (attempt %d)",
-                                        symbol, attempt,
-                                    )
-                                except Exception as be_err:
-                                    logger.error(
-                                        "[BE] %s move_hard_stop raised on attempt %d: %s",
-                                        symbol, attempt, be_err,
-                                    )
-
-                            if not t['be_moved']:
-                                logger.error(
-                                    "❌ [BE] %s STILL ON ORIGINAL STOP ₹%.2f after 2 attempts",
-                                    symbol, t['sl'],
-                                )
-                                if self.telegram_bot and self._event_loop:
-                                    asyncio.run_coroutine_threadsafe(
-                                        self.telegram_bot.send_alert(
-                                            f"⚠️ *BREAKEVEN MOVE FAILED*\n\n"
-                                            f"Symbol: `{symbol}`\n"
-                                            f"Took 50% at ₹{t['tp_1']:.2f}\n"
-                                            f"Stop is STILL ₹{t['sl']:.2f}, not "
-                                            f"breakeven ₹{t['entry']:.2f}\n\n"
-                                            f"The remainder is *not* risk-free."
-                                        ),
-                                        self._event_loop,
-                                    )
-
+                            t['remaining_qty'] -= exit_qty
+                            if not self._resize_stop_after_partial(symbol, t):
+                                return
 
                 # Soft stop. Kept as the non-partial-exit fallback path.
                 partial_enabled = False
@@ -1297,6 +1362,7 @@ class FocusEngine:
         Used to remove Stop Loss orders after exit.
         """
         try:
+            rest_limiter.acquire(priority=Priority.HIGH)
             orderbook = self.fyers.orderbook()
             if 'orderBook' in orderbook:
                 count = 0

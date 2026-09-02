@@ -5,6 +5,7 @@ from datetime import datetime
 
 from shortcircuit import config
 from shortcircuit.capital.capital_manager import CapitalManager
+from shortcircuit.broker.rest_limiter import rest_limiter, Priority
 
 
 logger = logging.getLogger(__name__)
@@ -71,6 +72,7 @@ class TradeManager:
         """
         logger.info(f"🧹 [SAFETY] Cleaning up orphaned orders for {symbol}")
         try:
+            rest_limiter.acquire(priority=Priority.HIGH)
             orders = self.fyers.orderbook()
             if "orderBook" not in orders:
                 return
@@ -96,6 +98,7 @@ class TradeManager:
 
             # Cancel all pending orders first
             try:
+                rest_limiter.acquire(priority=Priority.HIGH)
                 orders = self.fyers.orderbook()
                 if 'orderBook' in orders:
                     cleaned = 0
