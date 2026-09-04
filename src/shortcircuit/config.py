@@ -32,7 +32,20 @@ MAX_HOLD_TIME_MINUTES = 45
 
 # Scanner universe filters
 SCANNER_GAIN_MIN_PCT: float = 7.5  # Kept in sync with the G1 gate floor
-SCANNER_GAIN_MAX_PCT: float = 18.0 # Protection against upper-circuit runners
+# Held at 18.0 deliberately. NSE upper circuits are commonly 20%, and a short that
+# goes limit-up cannot be covered at all — the position carries overnight with a
+# margin penalty. 18 keeps entries clear of that.
+#
+# This is NOT redundant with C0's circuit check, which was the argument for raising
+# it to 25.0 on 2026-09-04 (reverted the same day). C0 only runs when the analyzer
+# managed to read upper_ckt from the depth feed; that fetch is wrapped in a bare
+# `except: pass`, so on any failure upper_circuit stays 0.0 and C0's guard is
+# skipped entirely. This ceiling is the backstop for exactly that case.
+#
+# It is also not a proxy for "20% band": measured bands across this universe run
+# from 11% to 41%, so where the band is tighter than 18% the circuit binds first
+# and this never applies.
+SCANNER_GAIN_MAX_PCT: float = 18.0
 # Lowered twice from 333,333: low-float movers cleared the old floor ~26 min
 # after the move. Admits thinner books, so watch slippage.
 SCANNER_MIN_VOLUME:   int   = 111111
@@ -46,7 +59,13 @@ SCANNER_MIN_LEVERAGE: float = 3.5
 # Per-scan budget for the leverage screen. Past it, symbols pass unscreened
 # rather than delay the scan, which main.py times out at 90s.
 SCANNER_LEVERAGE_BUDGET_SECONDS: float = 15.0
-CANDLE_BODY_RATIO_MIN: float = 0.382   # Fibonacci 0.382 — body must dominate the candle
+# Lowered from 0.382 on 2026-09-04. 0.382 was picked for being a Fibonacci number,
+# not from measurement, and it sat directly on top of the population: 98 of 155
+# quality rejections over 2-4 Sep were at ratios of 0.34 or better. NSE:ANTELOPUS-EQ
+# was dropped at 0.38 against 0.382 and stayed dropped for the rest of the day while
+# it ran to +17%. Violent movers are wick-heavy by nature, so the old floor selected
+# against exactly the setups this strategy exists to catch.
+CANDLE_BODY_RATIO_MIN: float = 0.34
 
 DAY_GAIN_PCT_THRESHOLD = 7.5       # Alias for SCANNER_GAIN_MIN_PCT, still read by legacy paths
 
@@ -54,7 +73,15 @@ SCANNER_PARALLEL_WORKERS = 3  # Above 3, Fyers starts returning 429s
 WS_TICK_FRESHNESS_TTL_SECONDS = 180.0
 
 # Strategy: BackToVWAPShort
-STRATEGY_VWAP_SD_FLOOR: float = 3.3       # C1 gate: minimum stretch, in SD
+# C1 gate: minimum stretch, in SD. Lowered from 3.3 on 2026-09-04 at the operator's
+# instruction. C1 rejects 61-70% of all evaluations, and the rejected symbols pile up
+# immediately under the old floor — 20 of 55 over 2-4 Sep peaked between 3.20 and
+# 3.30, and not one cleared. That clustering is the signature of a floor set slightly
+# too tight rather than of setups that genuinely failed.
+#
+# Against that: June's +38.9% was earned at 3.3, and this has never been measured
+# head-to-head. Revert to 3.3 first if results degrade.
+STRATEGY_VWAP_SD_FLOOR: float = 3.2
 STRATEGY_VWAP_SD_HIGH: float = 5.0        # HIGH confidence tier threshold
 STRATEGY_VWAP_SD_EXTREME: float = 6.0     # EXTREME confidence tier threshold
 STRATEGY_REQUIRE_FAILED_AUCTION: bool = True  # Hard gate: require auction failure behavior
@@ -134,7 +161,14 @@ MARKET_REGIME_CONFIG = {
 }
 ENABLE_MARKET_REGIME_FILTER = False  # Nifty 50 trend block, currently off
 
-P61_G9_BYPASS_SD_THRESHOLD = 5.0
+# Stretch above which G9 (higher-timeframe confluence) is bypassed. Lowered from 5.0
+# on 2026-09-04. G9 blocks on "Momentum Accel" and "Sustained Trend", but a parabolic
+# pump IS accelerating momentum on a 15-minute chart, so G9 was structurally vetoing
+# the setups this strategy hunts. On 4 Sep NSE:JINDWORLD-EQ passed all six conditions
+# at +17.6% gain with a VAH_REJECTION pattern and SD=4.09, and G9 killed it. Of the
+# three G9 blocks over 2-4 Sep, this recovers two (SD 4.09 and 4.18); MOREPENLAB at
+# 3.95 stays blocked. Only signals that already cleared every other gate are affected.
+P61_G9_BYPASS_SD_THRESHOLD = 4.0
 P61_G9_ACCEL_REJECT_THRESHOLD = 0.5
 P61_G9_STALL_PASS_THRESHOLD = 0.1
 

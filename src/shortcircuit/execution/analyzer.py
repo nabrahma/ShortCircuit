@@ -391,8 +391,20 @@ class FyersAnalyzer:
                 if ltp > 0:
                     spread_pct = (ask - bid) / ltp
                     
-        except Exception:
-            pass
+        except Exception as depth_err:
+            # Deliberately non-fatal, but no longer silent. When this fails
+            # upper_circuit stays 0.0, and C0's circuit branch is `if upper_circuit
+            # > 0`, so the guard against shorting into a limit-up move is skipped
+            # for this evaluation. SCANNER_GAIN_MAX_PCT is the backstop; this log
+            # is what makes the gap measurable rather than invisible.
+            logger.warning(
+                "[DEPTH] %s unavailable (%s) — circuit and spread checks skipped "
+                "this pass; only the gain ceiling is protecting the entry",
+                symbol, depth_err,
+            )
+
+        if upper_circuit <= 0:
+            logger.debug("[DEPTH] %s no upper_ckt — C0 circuit branch inactive", symbol)
 
         is_circuit_hitter = self.market_context.is_circuit_hitter(symbol)
 
