@@ -43,6 +43,7 @@ class TradeManager:
             dict with 'net_qty', 'symbol', 'raw' or None on error
         """
         try:
+            rest_limiter.acquire(priority=Priority.HIGH)
             positions = self.fyers.positions()
 
             if positions.get('s') != 'ok' and 'netPositions' not in positions:
@@ -92,6 +93,7 @@ class TradeManager:
         """
         logger.warning("[ALERT] INITIATING AUTO-SQUARE OFF...")
         try:
+            rest_limiter.acquire(priority=Priority.HIGH)
             positions_response = self.fyers.positions()
             if 'netPositions' not in positions_response:
                 logger.info("No positions to close.")

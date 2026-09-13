@@ -9,6 +9,7 @@ import time
 from shortcircuit.broker.fyers_connect import ASYNC_RETRIED_TIMEOUT
 from shortcircuit.state.database import DatabaseManager
 from shortcircuit.broker.fyers_broker_interface import FyersBrokerInterface
+from shortcircuit.broker.rest_limiter import rest_limiter, Priority
 
 logger = logging.getLogger(__name__)
 FORCE_REST_SYNC_INTERVAL = 300  # 5 minutes
@@ -493,6 +494,7 @@ class ReconciliationEngine:
             client = getattr(self.broker, 'rest_client', None) or getattr(self.broker, 'fyers', None)
             if client is None:
                 return None
+            await rest_limiter.acquire_async(priority=Priority.HIGH)
             book = await asyncio.to_thread(client.orderbook)
             orders = (book or {}).get('orderBook') or []
         except Exception as exc:
@@ -549,11 +551,36 @@ class ReconciliationEngine:
         side      = 'SHORT' if net_qty < 0 else 'LONG'
         avg_price = broker_pos.get('avg_price', 0.0)
 
-        # Fallback to LTP if avg_price is 0 (WS cache didn't have it)
-        if avg_price == 0 or avg_price is None:
+        # The cost basis decides every P&L number this position will ever produce,
+        # so exhaust the authoritative sources before estimating one. The WS cache
+        # often has no avg_price yet; REST always does.
+        basis_estimated = False
+        if not avg_price:
+            try:
+                for bp in await self.broker.get_all_positions(force_rest=True):
+                    if bp.get('symbol') == symbol and bp.get('qty', 0) != 0:
+                        avg_price = bp.get('avgPrice', 0.0) or 0.0
+                        if avg_price:
+                            logger.info(
+                                "[ADOPT] %s real avg price from REST: ₹%.2f", symbol, avg_price
+                            )
+                        break
+            except Exception as e:
+                logger.warning(f"[ADOPT] REST avg_price lookup failed for {symbol}: {e}")
+
+        # Last resort only. LTP is the price NOW, not the price paid, so a P&L
+        # computed against it is fiction — on 2026-09-09 it reported NSE:GRAPHITE-EQ
+        # at -₹23.40 when the real figure on those shares was -₹3.70, and wrote
+        # PNL=0.00% into the ML dataset. Flagged so nothing downstream trusts it.
+        if not avg_price:
             try:
                 avg_price = await self.broker.get_ltp(symbol) or 0.0
-                logger.info(f"[ADOPT] avg_price was 0 for {symbol}, using LTP fallback: ₹{avg_price:.2f}")
+                basis_estimated = True
+                logger.warning(
+                    "[ADOPT] %s has no real avg price — falling back to LTP ₹%.2f. "
+                    "P&L for this position is an ESTIMATE and is excluded from ML.",
+                    symbol, avg_price,
+                )
             except Exception as e:
                 logger.error(f"[ADOPT] LTP fallback failed for {symbol}: {e}")
 
@@ -713,6 +740,7 @@ class ReconciliationEngine:
                     'entry_price': avg_price,
                     'stop_loss':   sl_price if sl_id else 0.0,
                     'source':      'MANUAL_ENTRY_ADOPTED',
+                    'cost_basis_estimated': basis_estimated,
                 }
                 if sl_id:
                     self.order_manager.hard_stops[symbol] = sl_id

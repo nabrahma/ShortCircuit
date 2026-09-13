@@ -23,6 +23,7 @@ from typing import Optional, Dict, Any, Tuple
 import pandas as pd
 
 from shortcircuit import config
+from shortcircuit.broker.rest_limiter import rest_limiter
 from shortcircuit.strategy import features as F
 from shortcircuit.observability.gate_result_logger import GateResult, get_gate_result_logger
 from shortcircuit.strategy.htf_confluence import HTFConfluence
@@ -376,6 +377,11 @@ class FyersAnalyzer:
         spread_pct = 0.0
         is_circuit_hitter = False
         try:
+            # One call per candidate, run concurrently across a scan — easily a
+            # dozen in the same second. Unmetered, that alone could exceed the
+            # whole per-second budget and starve the order path of the headroom
+            # the limiter believed it was reserving.
+            rest_limiter.acquire()
             full_depth = self.fyers.depth(data={"symbol": symbol, "ohlcv_flag": "1"})
             if 'd' in full_depth and symbol in full_depth['d']:
                 depth_data = full_depth['d'][symbol]

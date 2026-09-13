@@ -24,6 +24,7 @@ from shortcircuit.broker.fyers_broker_interface import (
     FyersBrokerInterface,
     FyersOrderStatus,
     OrderPlacementTimeout,
+    PositionFetchError,
 )
 from shortcircuit.broker.rest_limiter import rest_limiter, Priority
 from shortcircuit.observability.ml_logger import get_ml_logger
@@ -84,6 +85,33 @@ class OrderManager:
         # Execution failure cooldown tracker
         # { symbol: datetime_unblock }
         self._exec_cooldowns: Dict[str, datetime] = {}
+
+        self._warned_no_reconciler = False
+
+
+    def _notify_reconciler(self, symbol: str, dirty: bool = False) -> None:
+        """
+        Tell the reconciler we just touched `symbol`, so it does not mistake our
+        own position for someone else's.
+
+        The wiring this depends on was absent for the whole life of the feature and
+        nothing said so, because the call sites guarded it with `getattr(..., None)`
+        and moved on. A missing engine is a deployment fault, not a normal state, so
+        it now says so once instead of silently disabling orphan suppression.
+        """
+        engine = getattr(getattr(self, 'trade_manager', None), 'reconciliation_engine', None)
+        if engine is None:
+            if not self._warned_no_reconciler:
+                self._warned_no_reconciler = True
+                logger.error(
+                    "[WIRING] TradeManager has no reconciliation_engine — orphan "
+                    "suppression is INACTIVE and every open position will be "
+                    "reported as an orphan. Check supervisor back-injection."
+                )
+            return
+        if dirty:
+            engine.mark_dirty()
+        engine.mark_recently_modified(symbol)
 
 
     def _get_lock(self, symbol: str) -> asyncio.Lock:
@@ -415,7 +443,21 @@ class OrderManager:
         
         pos = self.active_positions.get(symbol)
 
-        if pos and pos.get('obs_id'):
+        # An unknown result is not a breakeven. exit_price == 0 means no fill price
+        # was ever established, and writing that as PNL=0.00% mislabelled four of
+        # twelve trades over 7-10 Sep — exactly the ones that failed, which is the
+        # information the dataset most needed. An estimated cost basis is excluded
+        # for the same reason: its P&L is arithmetic on a price nobody traded at.
+        if pos and pos.get('obs_id') and exit_price <= 0:
+            logger.warning(
+                "[ML] %s closed with no known exit price (%s) — outcome left "
+                "UNRESOLVED rather than recorded as breakeven.", symbol, reason,
+            )
+        elif pos and pos.get('obs_id') and pos.get('cost_basis_estimated'):
+            logger.warning(
+                "[ML] %s has an estimated cost basis — outcome not recorded.", symbol,
+            )
+        elif pos and pos.get('obs_id'):
             try:
                 outcome = "BREAKEVEN"
                 if pnl > 0: 
@@ -550,9 +592,16 @@ class OrderManager:
                 ]
                 manual_override_detected = False
                 
+                ours: set = getattr(self.broker, 'bot_order_ids', set())
                 for o in pending_orders:
                     # 1. Did the user place a new Limit/Market target order?
+                    # An order we placed ourselves is not an override, however
+                    # briefly it sits in the book. Comparing against sl_id alone
+                    # made our own partial-exit order indistinguishable from the
+                    # operator's and stood the bot down mid-scale-out.
                     if str(o.get('id')) != str(sl_id):
+                        if str(o.get('id')) in ours:
+                            continue
                         manual_override_detected = True
                         break
                     
@@ -781,6 +830,13 @@ class OrderManager:
                 f"[PRE-EXEC] {symbol} {side} qty={qty} @ ₹{ltp:.2f} "
                 f"cost=₹{required_capital:.2f} margin_req=₹{margin_req:.2f}"
             )
+
+            # Open the reconciler's grace window BEFORE the order exists. A fill can
+            # land at the broker milliseconds after placement and a reconcile cycle
+            # can see it before this method has registered anything — which is how
+            # NSE:RAYMOND-EQ was adopted as a manual entry 541ms after the bot
+            # placed it on 2026-09-08. Claiming the symbol first closes that race.
+            self._notify_reconciler(symbol)
 
             try:
                 final_leverage = dynamic_leverage
@@ -1024,9 +1080,10 @@ class OrderManager:
                             'entry_id':  entry_id,   # Pass order ID for dedup
                             'leverage':  final_leverage
                         })
-                        if getattr(self, 'trade_manager', None) and getattr(self.trade_manager, 'reconciliation_engine', None):
-                            self.trade_manager.reconciliation_engine.mark_dirty()
-                            self.trade_manager.reconciliation_engine.mark_recently_modified(symbol)
+                        # Tells the reconciler this symbol is legitimately ours, and
+                        # grants the grace window that stops it adopting our own
+                        # order before enter_position has finished registering it.
+                        self._notify_reconciler(symbol, dirty=True)
                     except Exception as db_err:
                         # A DB failure must not abort an order that already filled.
                         logger.error(f"❌ [ENTRY-DB] Failed to log entry for {symbol}: {db_err}")
@@ -1093,6 +1150,32 @@ class OrderManager:
 
     # EXIT
 
+    async def verify_position_at_broker(self, symbol: str, attempts: int = 3):
+        """
+        Ask the broker whether `symbol` is still open. Returns the position dict,
+        None if verified flat, or raises PositionFetchError if it cannot tell.
+
+        Retries, because the failure this guards against is transient: a 429 during
+        the burst of calls an exit produces. Three tries at 0/0.8/2.0s cost under
+        three seconds and covered every failure seen in the 7-10 Sep sessions.
+        """
+        last_err = None
+        for attempt in range(1, attempts + 1):
+            try:
+                for bp in await self.broker.get_all_positions(force_rest=True):
+                    if bp.get('symbol') == symbol and bp.get('qty', 0) != 0:
+                        return bp
+                return None
+            except PositionFetchError as err:
+                last_err = err
+                logger.warning(
+                    "[VERIFY] %s position fetch attempt %d/%d failed: %s",
+                    symbol, attempt, attempts, err,
+                )
+                if attempt < attempts:
+                    await asyncio.sleep((0.8, 2.0)[attempt - 1] if attempt <= 2 else 2.0)
+        raise PositionFetchError(f"{symbol} unverifiable after {attempts} attempts: {last_err}")
+
     async def safe_exit(self, symbol: str, reason: str, emergency: bool = False) -> bool:
         """
         Async Safe Exit with WebSocket Race Condition Protection.
@@ -1117,7 +1200,33 @@ class OrderManager:
                     return False
 
                 logger.info(f"🔻 [EXIT] Initiating Safe Exit for {symbol} ({reason})")
-                
+
+                # Step 0: establish the position's state BEFORE touching its stop.
+                # Everything below cancels protection, so an unverifiable position
+                # must abort here while it is still covered. Cancelling first and
+                # asking afterwards is what left four positions naked on 7-9 Sep.
+                try:
+                    pos_on_broker = await self.verify_position_at_broker(symbol)
+                except PositionFetchError as verify_err:
+                    logger.critical(
+                        "🚨 [SAFE_EXIT] %s could not be verified at the broker (%s). "
+                        "ABORTING the exit with the stop left in place — the position "
+                        "stays protected and managed. Exit will be retried.",
+                        symbol, verify_err,
+                    )
+                    pos['status'] = 'OPEN'
+                    if self.telegram:
+                        await self.telegram.send_alert(
+                            f"⚠️ *EXIT DEFERRED*\n\n"
+                            f"Symbol: `{symbol}`\n"
+                            f"Reason: `{reason}`\n\n"
+                            f"The broker would not confirm whether this position is "
+                            f"still open, so the exit was abandoned rather than "
+                            f"cancelling the stop on an unknown position.\n"
+                            f"✅ Stop is still in place. Position still tracked."
+                        )
+                    return False
+
                 # Cancel all pending orders BEFORE placing exit order
                 # Prevents phantom SL from executing AFTER position is closed
                 try:
@@ -1160,57 +1269,52 @@ class OrderManager:
                     if symbol in self.hard_stops:
                         del self.hard_stops[symbol]
 
-                # Step 2: does the position still exist at the broker?
-                # If SL already filled (fast price action), position is already closed.
-                try:
-                    # force_rest: this decides whether we skip placing an exit order.
-                    # A stale or empty cache reading "flat" would leave a live position
-                    # open with its stop already cancelled above — the worst possible
-                    # outcome. Only the broker's own answer is good enough here.
-                    broker_positions = await self.broker.get_all_positions(force_rest=True)
-                    pos_on_broker = None
-                    for bp in broker_positions:
-                        if bp.get('symbol') == symbol and bp.get('qty', 0) != 0:
-                            pos_on_broker = bp
-                            break
+                # Step 2: act on the verdict from Step 0. `None` there came from a
+                # broker response that actually listed positions, so it is evidence
+                # of flat rather than the absence of evidence.
+                if pos_on_broker is None:
+                    logger.info(f"[SAFE_EXIT] {symbol} already flat on broker (SL/manual close). Finalizing cleanup.")
+                    # Try to get actual exit price from the SL order that filled
+                    exit_price = 0.0
+                    pnl = 0.0
+                    if sl_id:
+                        try:
+                            exit_price = await self.broker.get_order_avg_price(sl_id)
+                        except Exception:
+                            pass
+                    if exit_price > 0:
+                        entry_price = pos.get('entry_price', 0)
+                        qty = pos.get('qty', 0)
+                        if pos['side'] == 'SHORT':
+                            pnl = (entry_price - exit_price) * qty
+                        else:
+                            pnl = (exit_price - entry_price) * qty
 
-                    if pos_on_broker is None:
-                        logger.info(f"[SAFE_EXIT] {symbol} already flat on broker (SL/manual close). Finalizing cleanup.")
-                        # Try to get actual exit price from the SL order that filled
-                        exit_price = 0.0
-                        pnl = 0.0
-                        if sl_id:
-                            try:
-                                exit_price = await self.broker.get_order_avg_price(sl_id)
-                            except Exception:
-                                pass
-                        if exit_price > 0:
-                            entry_price = pos.get('entry_price', 0)
-                            qty = pos.get('qty', 0)
-                            if pos['side'] == 'SHORT':
-                                pnl = (entry_price - exit_price) * qty
-                            else:
-                                pnl = (exit_price - entry_price) * qty
-                        
-                        await self._finalize_closed_position(
-                            symbol=symbol,
-                            reason=reason,
-                            exit_price=exit_price,
-                            pnl=pnl,
-                            send_alert=True,
-                        )
-                        return True
-                except Exception as pos_check_err:
-                    logger.warning(f"[SAFE_EXIT] Position check failed: {pos_check_err} — proceeding with exit order anyway.")
+                    await self._finalize_closed_position(
+                        symbol=symbol,
+                        reason=reason,
+                        exit_price=exit_price,
+                        pnl=pnl,
+                        send_alert=True,
+                    )
+                    return True
 
-                # Step 3: place the exit order.
+                # Step 3: place the exit order, sized from what the broker says is
+                # actually open. Our own count can be stale after a partial, and an
+                # exit larger than the position does not close it — it reverses it.
                 exit_side = 'BUY' if pos['side'] == 'SHORT' else 'SELL'
+                exit_qty = abs(pos_on_broker.get('qty', 0) or 0) or pos['qty']
+                if exit_qty != pos['qty']:
+                    logger.warning(
+                        "[SAFE_EXIT] %s internal qty %s vs broker %s — exiting the "
+                        "broker's quantity.", symbol, pos['qty'], exit_qty,
+                    )
                 exit_id = None
                 try:
                     exit_id = await self.broker.place_order(
                         symbol=symbol,
                         side=exit_side,
-                        qty=pos['qty'],
+                        qty=exit_qty,
                         order_type='MARKET'
                     )
                     logger.info(f"[EXIT] Exit Order Placed: {exit_id}")
@@ -1221,7 +1325,7 @@ class OrderManager:
                         exit_id = await self.broker.place_order(
                             symbol=symbol,
                             side=exit_side,
-                            qty=pos['qty'],
+                            qty=exit_qty,
                             order_type='MARKET'
                         )
                         logger.info(f"[EXIT] Emergency retry succeeded: {exit_id}")
@@ -1288,6 +1392,34 @@ class OrderManager:
 
             except Exception as e:
                 logger.error(f"❌ [EXIT] Critical Error: {e}")
+
+                # Releasing the slot is only safe once the position is known to be
+                # gone. Doing it unconditionally frees the bot to open a second
+                # trade against a first one that is still live, and drops the symbol
+                # from active_positions — which is what let the reconciler re-adopt
+                # a running position as a manual entry on 7 and 9 Sep. Ask first;
+                # if it is still open or unanswerable, hold the slot and let the
+                # reconciler be the backstop it already is.
+                try:
+                    still_open = await self.verify_position_at_broker(symbol, attempts=2)
+                except PositionFetchError:
+                    still_open = self.active_positions.get(symbol)
+
+                if still_open:
+                    logger.critical(
+                        "🚨 [EXIT] %s crashed mid-exit and is STILL OPEN — keeping the "
+                        "capital slot and tracking it rather than abandoning it.", symbol,
+                    )
+                    if self.telegram:
+                        await self.telegram.send_alert(
+                            f"🚨 *EXIT ERROR — POSITION STILL OPEN*\n\n"
+                            f"Symbol: `{symbol}`\n"
+                            f"Error: {str(e)[:100]}\n\n"
+                            f"Slot held and position still tracked.\n"
+                            f"⚠️ *CHECK YOUR BROKER APP.*"
+                        )
+                    return False
+
                 # SAFETY NET: Even on crash, try to release capital
                 try:
                     await self._finalize_closed_position(
@@ -1387,8 +1519,7 @@ class OrderManager:
             # Update internal state
             pos['qty'] -= exit_qty
 
-            if getattr(self, 'trade_manager', None) and getattr(self.trade_manager, 'reconciliation_engine', None):
-                self.trade_manager.reconciliation_engine.mark_recently_modified(symbol)
+            self._notify_reconciler(symbol, dirty=True)
 
             if self.telegram:
                 pnl_str = f"+₹{pnl:.2f}" if pnl >= 0 else f"-₹{abs(pnl):.2f}"

@@ -62,6 +62,9 @@ class FocusEngine:
         self.discretionary_engine = discretionary_engine
         
         self.active_trade = None # Reference to OrderManager position
+        # Backoff state for exits that declined to complete — see _retire_or_retry.
+        self._exit_retry_at: dict[str, float] = {}
+        self._exit_retry_count: dict[str, int] = {}
         self.is_running = False
         self.telegram_bot = None # Injected by main.py
         
@@ -640,6 +643,7 @@ class FocusEngine:
         """
         try:
             logger.info("[RECOVERY] Scanning for orphaned trades...")
+            rest_limiter.acquire(priority=Priority.HIGH)
             positions = self.fyers.positions()
 
             if not isinstance(positions, dict) or 'netPositions' not in positions:
@@ -718,6 +722,45 @@ class FocusEngine:
 
         except Exception as e:
             logger.error(f"[RECOVERY] Failed: {e}", exc_info=True)
+
+    def _retire_or_retry(self, symbol: str, exited: bool, reason: str) -> bool:
+        """
+        True to stop watching this position, False to keep the loop alive.
+
+        `safe_exit` can now legitimately decline — it refuses to cancel a stop on
+        a position the broker will not confirm. Treating that as done would strand
+        a live position with its exit level already breached and nothing left
+        watching it, which is a worse outcome than the bug it replaces.
+
+        Retries are throttled: the focus loop runs at 5Hz and the failure this
+        handles is a rate limit, so hammering it is what caused the problem.
+        """
+        if exited:
+            self.stop_focus(reason)
+            return True
+
+        now = time.time()
+        last = self._exit_retry_at.get(symbol, 0.0)
+        if now - last < 10.0:
+            time.sleep(0.2)
+            return False
+
+        self._exit_retry_at[symbol] = now
+        attempts = self._exit_retry_count.get(symbol, 0) + 1
+        self._exit_retry_count[symbol] = attempts
+        logger.warning(
+            "[EXIT-RETRY] %s %s did not complete (attempt %d) — still watching.",
+            symbol, reason, attempts,
+        )
+        if attempts == 3:
+            self._dispatch_alert(
+                f"⚠️ *EXIT STILL PENDING*\n\n"
+                f"Symbol: `{symbol}`\n"
+                f"Reason: `{reason}`\n\n"
+                f"Three attempts have not completed. The stop is still in place and "
+                f"the bot is still watching, but check your broker app."
+            )
+        return False
 
     def _dispatch_alert(self, message: str) -> None:
         """
@@ -990,8 +1033,13 @@ class FocusEngine:
             except Exception as e:
                 logger.debug(f"[SAFETY] WS position cache read failed: {e}")
 
-        # Authoritative path: REST
+        # Authoritative path: REST.
+        # Through the limiter: this runs from the 5Hz focus loop on every cache
+        # miss, and going around it spent budget the limiter could not see — so
+        # the HIGH-priority reserve was guarding a number that was already wrong
+        # by the time a stop-loss placement needed it.
         try:
+            rest_limiter.acquire(priority=Priority.HIGH)
             positions = self.fyers.positions()
             if not isinstance(positions, dict) or positions.get('s') != 'ok' \
                     or 'netPositions' not in positions:
@@ -1267,16 +1315,25 @@ class FocusEngine:
                         symbol, _full_exit_level, t['remaining_qty'],
                     )
                     if self.order_manager and self._event_loop:
+                        exited = False
                         future = asyncio.run_coroutine_threadsafe(
                             self.order_manager.safe_exit(symbol, "TP_HIT"), self._event_loop
                         )
                         try:
+                            exited = future.result(timeout=30)
                             logger.info("[TP] safe_exit completed for %s: success=%s",
-                                        symbol, future.result(timeout=30))
+                                        symbol, exited)
                         except Exception as tp_exit_err:
                             logger.error("[TP] safe_exit failed/timed out for %s: %s",
                                          symbol, tp_exit_err)
-                    self.stop_focus("TP_HIT")
+                        # An exit that did not happen must not end the watch. safe_exit
+                        # now declines to act on a position it cannot verify, and
+                        # stopping here would strand it with only its broker stop until
+                        # EOD. Back off and let the next pass try again.
+                        if not self._retire_or_retry(symbol, exited, "TP_HIT"):
+                            continue
+                    else:
+                        self.stop_focus("TP_HIT")
                     return
 
                 # Stage 2: the midpoint partial (SCALE only)
@@ -1336,6 +1393,7 @@ class FocusEngine:
                         decision = self.discretionary_engine.evaluate_soft_stop(symbol, t)
                         if decision == 'EXIT':
                             if self.order_manager and self._event_loop:
+                                result = False
                                 future = asyncio.run_coroutine_threadsafe(
                                     self.order_manager.safe_exit(symbol, "SOFT_STOP"),
                                     self._event_loop
@@ -1345,7 +1403,10 @@ class FocusEngine:
                                     logger.info(f"[SOFT_STOP] safe_exit completed for {symbol}: success={result}")
                                 except Exception as ss_err:
                                     logger.error(f"[SOFT_STOP] safe_exit failed for {symbol}: {ss_err}")
-                            self.stop_focus("SOFT_STOP")
+                                if not self._retire_or_retry(symbol, result, "SOFT_STOP"):
+                                    continue
+                            else:
+                                self.stop_focus("SOFT_STOP")
                             return
 
                                 # 5 Hz heartbeat.
@@ -1382,6 +1443,9 @@ class FocusEngine:
         symbol = trade['symbol'] if trade else None
         self.is_running = False
         self.active_trade = None
+        if symbol:
+            self._exit_retry_at.pop(symbol, None)
+            self._exit_retry_count.pop(symbol, None)
         logger.info(f"[FOCUS] Stop. Reason: {reason}")
         
         # Cancel ALL pending orders on any stop

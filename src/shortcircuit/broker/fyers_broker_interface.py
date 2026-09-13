@@ -67,6 +67,20 @@ class OrderPlacementTimeout(Exception):
     """
 
 
+class PositionFetchError(Exception):
+    """
+    The broker could not tell us what positions are open.
+
+    Deliberately distinct from an empty list: `[]` means "verified flat", this
+    means "unknown". Returning `[]` for both is how NSE:GRAPHITE-EQ was left
+    naked on 2026-09-09 — safe_exit cancelled the stop, read a rate-limited
+    fetch as "already closed", and never placed the cover order.
+
+    Anything that decides whether a position still exists must catch this and
+    treat it as "still open until proven otherwise".
+    """
+
+
 class FyersOrderStatus(int, Enum):
     """
     Fyers API v3 numeric order status codes.
@@ -440,6 +454,10 @@ class FyersBrokerInterface:
         
         # Event waiters (for async notification)
         self.order_fill_events: Dict[str, asyncio.Event] = {}  # order_id -> asyncio.Event
+        # Ids of every order this process placed. Anything working at the broker
+        # that is NOT in here was placed outside the bot — which is the only
+        # honest definition of a manual order.
+        self.bot_order_ids: set[str] = set()
         self.position_change_events = defaultdict(asyncio.Event)
         
         # Callbacks (for strategy integration)
@@ -1907,6 +1925,12 @@ class FyersBrokerInterface:
 
             if isinstance(response, dict) and response.get('s') == 'ok':
                 order_id = str(response['id'])
+                # Every order the bot places passes through here, so this set is the
+                # complete answer to "did we place this?". Manual-override detection
+                # needs it: without it the bot's own partial-exit order looks exactly
+                # like an operator's, and on 2026-09-08 it stood down from
+                # NSE:ASIANENE-EQ 131ms after its own TP-1 scale-out.
+                self.bot_order_ids.add(order_id)
                 self.order_fill_events.setdefault(order_id, asyncio.Event())
                 # If an update for this id already arrived, don't wait for another.
                 if order_id in self.order_status_cache:
@@ -2301,6 +2325,10 @@ class FyersBrokerInterface:
                 "Authorization": f"{self.client_id}:{self.access_token}",
                 "Content-Type": "application/json",
             }
+            # Counts against the same account-wide budget as every SDK call, so it
+            # goes through the same limiter. Every one of the 54 failures over
+            # 7-10 Sep was an HTTP 429 from skipping it.
+            rest_limiter.acquire()
             resp = requests.post(f"{base}/multiorder/margin", headers=headers,
                                  json=payload, timeout=8)
             response = resp.json() if resp.status_code == 200 else {}
@@ -2428,17 +2456,23 @@ class FyersBrokerInterface:
                     for pos in response.get('netPositions', [])
                     if (pos.get('netQty', 0) or 0) != 0
                 ]
+            # Reached only when the broker answered with something that is not a
+            # position list — a 429, an auth failure, a malformed body. None of
+            # those mean "flat", so none of them may return a list.
             logger.warning("get_all_positions: unexpected response: %s", response)
+            raise PositionFetchError(f"broker returned {response}")
         except asyncio.TimeoutError:
             self._reconcile_timeout_count += 1
             logger.warning(
-                "[RECONCILE] get_all_positions timed out (10s). Timeout #%d. "
-                "Returning empty list — callers must NOT treat this as flat.",
+                "[RECONCILE] get_all_positions timed out (10s). Timeout #%d.",
                 self._reconcile_timeout_count,
             )
+            raise PositionFetchError("positions fetch timed out")
+        except PositionFetchError:
+            raise
         except Exception as e:
             logger.error(f"Get all positions error: {e}")
-        return []
+            raise PositionFetchError(str(e)) from e
 
     async def shutdown(self):
         logger.info("Shutting down broker interface...")

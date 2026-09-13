@@ -367,6 +367,14 @@ async def _initialize_runtime() -> RuntimeContext:
         order_manager=order_manager,
     )
 
+    # Back-injection. Without this the engine is reachable FROM the order manager
+    # but not from it: entry could never call mark_dirty() or mark_recently_modified(),
+    # so the reconciler compared live positions against a DB snapshot frozen before
+    # the open and called every one of them an orphan. 1,031 false CRITICALs over
+    # 7-10 Sep, and on 8 Sep it adopted NSE:RAYMOND-EQ 541ms after the bot placed it.
+    trade_manager.reconciliation_engine = reconciliation_engine
+    logger.info("[INIT] ✅ ReconciliationEngine wired into TradeManager.")
+
     await order_manager.startup_reconciliation()
 
     # Startup Recovery (now adopts orphans)
