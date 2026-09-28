@@ -1048,6 +1048,13 @@ class OrderManager:
                 self.hard_stops[symbol] = sl_id
 
                 # Step 4: Register Position
+                # 'EOD_HOLD' (TopCoilShort) runs without a take-profit ladder and
+                # without the 45-minute time stop, to the 15:10 square-off. Every
+                # exit variant that cut the trade shorter scored worse across the
+                # sweep: TP1/breakeven/TP2 at a 90-minute cap took the same entries
+                # from +0.09% to -0.21% per trade over 206 of them.
+                _exit_profile = str(signal.get('exit_profile') or 'DEFAULT').upper()
+                _eod_hold = _exit_profile == 'EOD_HOLD'
                 pos_state = {
                     'symbol':     symbol,
                     'qty':        qty,
@@ -1059,8 +1066,11 @@ class OrderManager:
                     'entry_price': ltp,
                     'stop_loss':  stop_price,
                     'obs_id':     signal.get('obs_id'),  # ML Link
+                    'exit_profile': _exit_profile,
                     # G13 Targets for trade_manager monitoring
-                    'tp_targets': self.compute_take_profits(ltp, signal),
+                    'tp_targets': (
+                        None if _eod_hold else self.compute_take_profits(ltp, signal)
+                    ),
                     'leverage':   final_leverage,
                     # Carried so move_hard_stop can round to the SYMBOL's real tick
                     # instead of assuming 0.05 and getting rejected.

@@ -110,6 +110,61 @@ TP_MODE: str = 'SCALE'
 # because it is the one exception to the standing "no breakeven SL" rule.
 P52_BREAKEVEN_AFTER_TP1: bool = True
 
+# Master switch for the original strategy (C1-C6 exhaustion reversal at a VWAP
+# stretch). Turned OFF 2026-09-21 at the operator's instruction so that one week
+# isolates TopCoilShort with no other detector firing. With this False the bot
+# takes ONLY top-coil signals; the C0 pre-filters that live inside
+# back_to_vwap.evaluate stop running with it, which is why TopCoilShort carries
+# its own copies (TC0) rather than relying on them.
+BACKTOVWAP_ENABLED: bool = False
+
+# --- TopCoilShort: the coil-at-the-high breakdown ------------------------------
+# A SECOND detector, running beside BackToVWAPShort, not replacing it. It fires on
+# contraction at the day's high; C1 fires on expansion away from VWAP. A range
+# tighter than 1% within 1.5% of the high clears the 3.2 SD floor 0.31% of the
+# time, so the existing stack is blind to this pattern by construction.
+#
+# MEASURED, AND IT DOES NOT MAKE MONEY. 997 stock-days (Jun-Sep 2026), 0.212%
+# entry slippage plus 0.106% statutory cost, stop above the coil high, held to the
+# 15:10 square-off, simulating the engine's own validation gate:
+#
+#   gain floor   n     mean/trade   t       bootstrap 95% CI
+#   10.0       262     -0.223%    -1.42     [-0.518, +0.092]
+#   11.0       211     -0.070%    -0.37     [-0.423, +0.305]
+#   12.0       181     -0.124%    -0.60     [-0.517, +0.294]   <- shipped
+#   13.0       144     -0.004%    -0.02     [-0.434, +0.460]
+#   14.0       112     -0.124%    -0.52     [-0.573, +0.357]
+#
+# Every cell is negative and every interval contains zero. An earlier pass showed
+# +0.091% at an 11% floor; that was an artifact of filling at the break LEVEL
+# while entering on a bar CLOSE. Honest fills removed it entirely. See
+# md/FINDINGS_2026-09-21_top_coil.md.
+#
+# Driving the SHIPPED detector bar by bar over the same 993 stock-days, through a
+# simulation of this engine's own validation gate, scores -0.165%/trade at the
+# 12.0 floor over 175 trades (CI [-0.560, +0.255], 3.6 trades/session, median risk
+# 1.69%). That end-to-end figure is the one to trust: it is the code below, not a
+# harness. Re-run it before changing any threshold here —
+# md/replay/11_verify_live_detector.py.
+#
+# The floor is 12.0 on BASE-RATE grounds, not because the sweep prefers it — the
+# sweep cannot tell these cells apart, and 13.0 is its best corner, which is
+# exactly the kind of choice that keeps being wrong here. Independent of any
+# backtest, a coil at the high has an up/down excursion ratio of 1.25 below ~12%
+# (a bull flag — this would be shorting INTO the drift) and 0.82 above it, with
+# 0.56/0.60/0.59 above 15% across three separate months. 12.0 is where the base
+# rate starts supporting the trade at all. Do not lower it to widen the funnel.
+TOPCOIL_ENABLED: bool = True
+TOPCOIL_GAIN_MIN_PCT: float = 12.0
+TOPCOIL_GAIN_MAX_PCT: float = 30.0   # above SCANNER_GAIN_MAX_PCT on purpose: the
+                                     # pattern is strongest on the biggest movers
+TOPCOIL_COIL_BARS: int = 15          # 1-minute bars forming the range
+TOPCOIL_NEAR_HOD_PCT: float = 1.5    # range high must sit within this of the HOD
+TOPCOIL_MAX_RANGE_PCT: float = 2.0   # and the range must be at least this tight
+TOPCOIL_BREAK_BUFFER_PCT: float = 0.1  # trigger sits this far below the coil low
+TOPCOIL_FIRST_MIN: int = 585         # 09:45 — no coil is meaningful before this
+TOPCOIL_LAST_MIN: int = 880          # 14:40 — past this there is no room to work
+
 LOG_FILE = "logs/bot.log"
 
 RVOL_VALIDITY_GATE_ENABLED = True

@@ -905,10 +905,29 @@ class FocusEngine:
         # Provide fallback if DISCRETIONARY_CONFIG was removed
         soft_stop_pct = getattr(config, 'DISCRETIONARY_CONFIG', {}).get('soft_stop_pct', 0.015)
 
+        exit_profile = str(position_data.get('exit_profile') or 'DEFAULT').upper()
+        eod_hold = exit_profile == 'EOD_HOLD'
+
         if is_long:
             soft_sl = entry_price * (1 - soft_stop_pct)
         else:
             soft_sl = entry_price * (1 + soft_stop_pct)
+
+        # EOD_HOLD was measured against the hard stop above the coil high — median
+        # risk 1.63%. The 1.5% soft stop sits INSIDE that on most of these trades
+        # and would quietly exit roughly half of them early, which is a different
+        # strategy from the one that was backtested. Push it just past the hard
+        # stop so it still backstops a broker stop that never fired, but never
+        # governs the exit.
+        if eod_hold and sl_price > 0:
+            if is_long:
+                soft_sl = min(soft_sl, sl_price * 0.999)
+            else:
+                soft_sl = max(soft_sl, sl_price * 1.001)
+            logger.info(
+                "[TOPCOIL] %s EOD_HOLD — soft stop moved to ₹%.2f, behind the hard "
+                "stop at ₹%.2f", symbol, soft_sl, sl_price,
+            )
 
         tick = position_data.get('tick_size', 0.05)
 
@@ -916,6 +935,10 @@ class FocusEngine:
         # SCALE sheds 50% at tp_1 and runs the rest to tp_2, SINGLE closes fully
         # at tp_1. Both are None under 'OFF', and None means "no target".
         tp_mode = str(getattr(config, 'TP_MODE', 'OFF')).upper()
+        if eod_hold:
+            # Not a tuning choice: across 206 trades the same entries scored
+            # +0.09% held to the square-off and -0.21% under TP1/breakeven/TP2.
+            tp_mode = 'OFF'
         tp_1 = tp_2 = None
         if tp_mode in ('SCALE', 'SINGLE'):
             tps = {}
@@ -1078,13 +1101,20 @@ class FocusEngine:
 
                 # Manual-override check
                 manual_override = False
+                _eod_hold = False
                 if self.order_manager:
                     pos = self.order_manager.active_positions.get(symbol, {})
                     manual_override = pos.get('manual_override', False)
+                    _eod_hold = str(
+                        pos.get('exit_profile') or 'DEFAULT'
+                    ).upper() == 'EOD_HOLD'
 
                 # Time-based stop: the mean-reversion thesis has expired.
+                # It does not apply to EOD_HOLD, whose thesis is distribution into
+                # the close and whose measured edge comes from the trades that take
+                # longer than 45 minutes to work. The 15:10 square-off still ends it.
                 _max_hold = getattr(config, 'MAX_HOLD_TIME_MINUTES', 0) or 0
-                if not manual_override and _max_hold > 0 and self.order_manager:
+                if not manual_override and not _eod_hold and _max_hold > 0 and self.order_manager:
                     om_pos = self.order_manager.active_positions.get(symbol)
                     if om_pos and om_pos.get('status') == 'OPEN' and 'entry_time' in om_pos:
                         hold_duration = (datetime.datetime.now() - om_pos['entry_time']).total_seconds() / 60.0

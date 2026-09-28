@@ -32,6 +32,7 @@ from shortcircuit.strategy.market_profile import ProfileAnalyzer
 from shortcircuit.observability.ml_logger import get_ml_logger
 from shortcircuit.execution.signal_manager import get_signal_manager
 from shortcircuit.strategy.back_to_vwap import BackToVWAPShort
+from shortcircuit.strategy.top_coil import TopCoilShort
 
 logger = logging.getLogger(__name__)
 
@@ -165,6 +166,7 @@ class FyersAnalyzer:
         self.htf_confluence = HTFConfluence(fyers)
         self.profile_analyzer = ProfileAnalyzer()
         self.strategy = BackToVWAPShort()
+        self.top_coil = TopCoilShort()
 
     # Data fetching
 
@@ -415,29 +417,65 @@ class FyersAnalyzer:
         is_circuit_hitter = self.market_context.is_circuit_hitter(symbol)
 
         # Strategy evaluation, replacing gates G1-G6.
-        result = self.strategy.evaluate(
-            symbol=symbol,
-            ltp=ltp,
-            df=df,
-            profile=profile,
-            profile_rejection=profile_rejection,
-            vwap_sd=vwap_sd,
-            atr=atr,
-            gain_pct=gain_pct,
-            slope_fast=slope_5m,
-            slope_slow=slope_30m,
-            is_decaying=is_decaying,
-            upper_circuit=upper_circuit,
-            lower_circuit=lower_circuit,
-            spread_pct=spread_pct,
-            is_circuit_hitter=is_circuit_hitter,
-        )
+        # BACKTOVWAP_ENABLED is the master switch for the primary detector. When it
+        # is False the bot runs on TopCoilShort alone — note that back_to_vwap's own
+        # C0 pre-filters (gain floor, circuit proximity, spread) go quiet with it,
+        # which is why TopCoilShort carries its own TC0 equivalents.
+        result = None
+        if getattr(config, 'BACKTOVWAP_ENABLED', True):
+            result = self.strategy.evaluate(
+                symbol=symbol,
+                ltp=ltp,
+                df=df,
+                profile=profile,
+                profile_rejection=profile_rejection,
+                vwap_sd=vwap_sd,
+                atr=atr,
+                gain_pct=gain_pct,
+                slope_fast=slope_5m,
+                slope_slow=slope_30m,
+                is_decaying=is_decaying,
+                upper_circuit=upper_circuit,
+                lower_circuit=lower_circuit,
+                spread_pct=spread_pct,
+                is_circuit_hitter=is_circuit_hitter,
+            )
+
+        # Second detector. It runs ONLY on symbols the primary strategy has already
+        # turned down, so it can never loosen an existing gate — it can only add
+        # setups C1 is structurally incapable of seeing (a coil at the high clears
+        # the 3.2 SD floor 0.31% of the time). Everything downstream of here — G9
+        # HTF confluence, G8 cooldown and daily target, depth and circuit checks —
+        # applies to it unchanged.
+        is_top_coil = False
+        if result is None and getattr(config, 'TOPCOIL_ENABLED', False):
+            try:
+                result = self.top_coil.evaluate(
+                    symbol=symbol,
+                    ltp=ltp,
+                    df=df,
+                    gain_pct=gain_pct,
+                    spread_pct=spread_pct,
+                    upper_circuit=upper_circuit,
+                    lower_circuit=lower_circuit,
+                    is_circuit_hitter=is_circuit_hitter,
+                )
+            except Exception as tc_err:
+                # Fail closed and keep the primary verdict. A detector that is not
+                # yet trusted must never be able to take the process down with it.
+                logger.error("[TOPCOIL] %s evaluate raised: %s", symbol, tc_err)
+                result = None
+            is_top_coil = result is not None
 
         if result is None:
             gr.g5_pass = False
             gr.verdict = "REJECTED"
             gr.first_fail_gate = "G5_STRATEGY"
-            gr.rejection_reason = "BackToVWAPShort conditions not met"
+            gr.rejection_reason = (
+                "No detector matched"
+                if getattr(config, 'TOPCOIL_ENABLED', False)
+                else "BackToVWAPShort conditions not met"
+            )
             grl.record(gr)
             return None
 
@@ -492,12 +530,18 @@ class FyersAnalyzer:
             return None
 
         # Reward/risk: a smaller target multiple on weaker moves.
-        if gain_pct < 9.0:
+        if is_top_coil:
+            pass          # EOD_HOLD carries no take-profit for a multiple to scale
+        elif gain_pct < 9.0:
             signal_meta['tp_atr_mult_override'] = 0.5
         else:
             signal_meta['tp_atr_mult_override'] = 1.0
 
-        signal_meta['snapshot_high'] = day_high
+        # TopCoilShort sets snapshot_high to the COIL high, which is what the stop
+        # was measured against. It sits at or below the day high by construction,
+        # so overwriting it here would silently widen every top-coil stop.
+        if not is_top_coil:
+            signal_meta['snapshot_high'] = day_high
 
         # Finalize
         gr.verdict = "ANALYZER_PASS"
@@ -632,5 +676,22 @@ class FyersAnalyzer:
         # TP scaling override
         if 'tp_atr_mult_override' in signal_meta:
             signal_data['tp_atr_mult_override'] = signal_meta['tp_atr_mult_override']
+
+        # Exit profile. Absent means the engine default (SCALE TP + time stop);
+        # 'EOD_HOLD' means no ladder and no time stop, run to the 15:10 square-off.
+        if signal_meta.get('exit_profile'):
+            signal_data['exit_profile'] = signal_meta['exit_profile']
+        for _k in ('coil_high', 'coil_low', 'trigger_price'):
+            if _k in signal_meta:
+                signal_data[_k] = signal_meta[_k]
+
+        # The validation gate watches signal_low at 5Hz and enters the moment price
+        # crosses it. TopCoilShort wants that level to be the coil low, not the
+        # previous bar's low: entering AT the level instead of after a confirming
+        # 1-minute close is worth 0.23pp per trade (-0.070% vs -0.302% over 211
+        # and 165 trades respectively), because by the close price is already
+        # through it and the stop is correspondingly wider.
+        if signal_meta.get('signal_low_override'):
+            signal_data['signal_low'] = float(signal_meta['signal_low_override'])
 
         return signal_data
