@@ -29,6 +29,10 @@ class TradeManager:
         # Reconciliation Engine (Injected)
         self.reconciliation_engine = None
 
+        # Order Manager (Injected). The EOD square-off needs it to tell a position
+        # the bot is tracking from one it is not — see close_all_positions.
+        self.order_manager = None
+
         # Scalper Position Manager (Injected)
         self.scalper_manager = None
 
@@ -151,11 +155,25 @@ class TradeManager:
                         f"[EXIT] {symbol} reason=EOD_SQUAREOFF pnl=₹{pnl_estimate:.2f}"
                     )
 
-                    # Record outcome
-                    try:
-                        self.record_trade_outcome(symbol, pnl_estimate)
-                    except Exception as e:
-                        logger.error(f"G13 outcome recording failed in square-off: {e}")
+                    # Book the outcome only for a position nobody else will book.
+                    # A position the order manager is tracking gets exactly one
+                    # outcome, from its close path (_finalize_closed_position), which
+                    # also writes the ML label, the DB exit and the capital release.
+                    # Booking it here as well counted every square-off twice: on
+                    # 23 Sep NSE:JAYKAY-EQ made ₹35.50 and session PnL read ₹71.45.
+                    # That was rare while trades seldom reached 15:10; EOD_HOLD sends
+                    # every surviving trade there.
+                    om = self.order_manager
+                    tracked = om is not None and symbol in getattr(om, 'active_positions', {})
+                    if tracked:
+                        logger.info(
+                            "[EOD] %s is tracked — outcome left to its close path", symbol
+                        )
+                    else:
+                        try:
+                            self.record_trade_outcome(symbol, pnl_estimate)
+                        except Exception as e:
+                            logger.error(f"G13 outcome recording failed in square-off: {e}")
 
                     closed_count += 1
 

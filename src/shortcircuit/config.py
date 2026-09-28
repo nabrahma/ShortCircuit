@@ -147,6 +147,21 @@ BACKTOVWAP_ENABLED: bool = False
 # harness. Re-run it before changing any threshold here —
 # md/replay/11_verify_live_detector.py.
 #
+# CORRECTION, 2026-09-28. Every figure above charged 0.212% entry slippage, read
+# from the bot's own "[ENTRY] ... slippage" lines. That line compared the fill with
+# the SIGNAL price, so 0.094pp of it was the move from signal to trigger, and it
+# printed only fills worse than 0.1%. Against the trigger, over 32 fills, slippage
+# was 0.118% (itself biased high by the unlogged good fills). Re-run on 194 trades
+# (Jun-24 Sep) with 0.118% entry, 0.08% on stop fills and the gate's real 15-minute
+# expiry: -0.007%/trade, CI [-0.385, +0.389]. Flat, not losing, and still no edge:
+# held to 15:10 with no stop at all, the short is right 51% of the time.
+#
+# The stop stays where it is. Of the trades it closes, 70% kept rising (median
+# +0.95% above entry at 15:10). Wider stops were tested and none is significant —
+# entry +3%: +0.046%, entry +5%: +0.158%, no stop: +0.296% (t=1.30) — while the
+# worst single trade grows from -2.7% to -7.4%. ASTEC and KSCL (22 and 24 Sep),
+# stopped and then collapsing, are the 30%. md/replay/12_stop_geometry.py.
+#
 # The floor is 12.0 on BASE-RATE grounds, not because the sweep prefers it — the
 # sweep cannot tell these cells apart, and 13.0 is its best corner, which is
 # exactly the kind of choice that keeps being wrong here. Independent of any

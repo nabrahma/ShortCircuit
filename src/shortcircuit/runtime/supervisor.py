@@ -4,6 +4,7 @@ from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 import logging
+import re
 import logging.handlers
 import os
 import signal
@@ -62,9 +63,11 @@ def _configure_logging() -> None:
         encoding="utf-8",
     )
     file_handler.setFormatter(log_formatter)
+    file_handler.addFilter(_RedactTelegramToken())
 
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setFormatter(log_formatter)
+    console_handler.addFilter(_RedactTelegramToken())
 
     logging.basicConfig(
         level=logging.DEBUG,
@@ -77,7 +80,26 @@ def _configure_logging() -> None:
     logging.getLogger("websockets").setLevel(logging.WARNING)
     logging.getLogger("fyers_apiv3").setLevel(logging.WARNING)
     logging.getLogger("asyncio").setLevel(logging.INFO)
+    # httpx logs every request URL at INFO, and a Telegram Bot API URL embeds the
+    # bot token — every session log to 24 Sep carried it in plain text. httpcore
+    # adds ~14 DEBUG lines per 10-second long-poll, most of each log's volume.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
     
+
+class _RedactTelegramToken(logging.Filter):
+    """Backstop for the httpx silencing: masks a Bot API token anywhere in a
+    record, so an exception that carries the request URL cannot leak it either."""
+
+    _PATTERN = re.compile(r"bot\d{6,}:[A-Za-z0-9_-]{30,}")
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        if "bot" in msg and self._PATTERN.search(msg):
+            record.msg = self._PATTERN.sub("bot<redacted>", msg)
+            record.args = None
+        return True
+
 
 def _install_signal_handlers(loop: asyncio.AbstractEventLoop, shutdown_event: asyncio.Event):
     def _handler(signum: Optional[int] = None, frame: Optional[Any] = None):
@@ -374,6 +396,8 @@ async def _initialize_runtime() -> RuntimeContext:
     # 7-10 Sep, and on 8 Sep it adopted NSE:RAYMOND-EQ 541ms after the bot placed it.
     trade_manager.reconciliation_engine = reconciliation_engine
     logger.info("[INIT] ✅ ReconciliationEngine wired into TradeManager.")
+    trade_manager.order_manager = order_manager
+    logger.info("[INIT] ✅ OrderManager wired into TradeManager.")
 
     await order_manager.startup_reconciliation()
 

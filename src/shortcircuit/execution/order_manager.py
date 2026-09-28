@@ -967,12 +967,24 @@ class OrderManager:
                 # by the slippage amount.
                 actual_fill = await self.broker.get_order_avg_price(entry_id)
                 if actual_fill and actual_fill > 0:
-                    if abs(actual_fill - ltp) / max(ltp, 0.01) > 0.001:
-                        logger.info(
-                            "[ENTRY] %s fill ₹%.2f vs signal ₹%.2f (slippage %.2f%%)",
-                            symbol, actual_fill, ltp,
-                            ((actual_fill - ltp) / ltp) * 100,
-                        )
+                    # Logged for EVERY fill. It used to print only beyond 0.1%, so
+                    # the good fills were never recorded and any slippage figure
+                    # read back from these lines was biased toward the bad ones.
+                    #
+                    # "vs signal" is kept for continuity but is NOT a cost: the
+                    # signal price is where the setup was spotted, and the move
+                    # from there to the trigger is the trade happening. Over 32
+                    # fills to 24 Sep it averaged -0.213%, of which -0.094% was that
+                    # move; the fill against the trigger was -0.118%. The trigger
+                    # figure is the one a backtest should charge.
+                    _trig = float(signal.get('gate_trigger') or 0)
+                    logger.info(
+                        "[ENTRY] %s fill ₹%.2f vs signal ₹%.2f (slippage %.2f%%)%s",
+                        symbol, actual_fill, ltp,
+                        ((actual_fill - ltp) / ltp) * 100,
+                        (f" | vs trigger ₹{_trig:.2f} ({(actual_fill - _trig) / _trig * 100:+.3f}%)"
+                         if _trig > 0 else ""),
+                    )
                     ltp = actual_fill
 
                 # Acquire the capital slot only AFTER a confirmed fill.

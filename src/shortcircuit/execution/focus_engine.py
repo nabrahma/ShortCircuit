@@ -404,6 +404,9 @@ class FocusEngine:
                     tick_size = pending['data'].get('tick_size', 0.05)
                     adjusted_entry = trigger_price - tick_size
                     pending['data']['adjusted_entry'] = adjusted_entry
+                    # Carried to the fill log: slippage is only meaningful against
+                    # the level that actually triggered the order.
+                    pending['data']['gate_trigger'] = trigger_price
 
                     # Record the gate outcome.
                     _gr = pending.get('data', {}).get('_gate_result')

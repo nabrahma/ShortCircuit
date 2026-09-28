@@ -75,6 +75,9 @@ def log_signal(symbol: str, ltp: float, pattern: str, stop_loss: float,
 # than to wherever a truncated frame happens to begin.
 SESSION_OPEN_IST = dtime(9, 15)
 SESSION_BARS_1M = 400          # 375 + slack; the aggregator's deque holds 500
+# Matches the validation gate's fixed 15-minute expiry, which every re-arm refreshes:
+# inside it a re-qualifying coil is one continuing setup, not a new one.
+TOPCOIL_EPISODE_GAP = datetime.timedelta(minutes=15)
 
 
 def keep_session_only(df: pd.DataFrame, session: datetime.date) -> pd.DataFrame:
@@ -167,6 +170,10 @@ class FyersAnalyzer:
         self.profile_analyzer = ProfileAnalyzer()
         self.strategy = BackToVWAPShort()
         self.top_coil = TopCoilShort()
+        # symbol -> (obs_id, last re-arm). A coil re-qualifies on every bar it
+        # stays tight, so without this one JAYKAY setup on 23 Sep wrote 43 ML rows
+        # and 43 signal-log lines, each graded as a separate 'missed trade'.
+        self._topcoil_episodes: Dict[str, Tuple[str, datetime.datetime]] = {}
 
     # Data fetching
 
@@ -575,78 +582,114 @@ class FyersAnalyzer:
         setup_high = peak_high
         sl_price = setup_high + buffer
 
+        # A top-coil re-arm inside the validation gate's 15-minute window is the
+        # SAME setup with a refreshed trigger, not a new signal. It keeps its first
+        # observation and only moves the levels on it.
+        is_top_coil = signal_meta.get('exit_profile') == 'EOD_HOLD'
+        now_ist = datetime.datetime.now()
+        rearm_obs = None
+        if is_top_coil:
+            prev = self._topcoil_episodes.get(symbol)
+            if prev and now_ist - prev[1] <= TOPCOIL_EPISODE_GAP:
+                rearm_obs = prev[0]
+                self._topcoil_episodes[symbol] = (rearm_obs, now_ist)
+
         # Logging
-        logger.info(f"[OK] SIGNAL: {symbol} | {pattern_desc}")
+        logger.info(f"[OK] SIGNAL: {symbol} | {pattern_desc}"
+                    + (" (re-arm)" if rearm_obs else ""))
 
         meta_str = f"Slope:{slope:.1f}, ATR:{atr:.2f}"
-        log_signal(
-            symbol, ltp, pattern_desc, sl_price, meta_str,
-            setup_high=setup_high,
-            tick_size=signal_meta.get('tick_size', 0.05),
-            atr=atr,
-            stretch_score=signal_meta.get('stretch_score', 0.0),
-            vol_fade_ratio=signal_meta.get('vol_fade_ratio', 0.0),
-            confidence=signal_meta.get('confidence', ''),
-            pattern_bonus=signal_meta.get('pattern_bonus', 'None'),
-            oi_direction=signal_meta.get('oi_direction', 'unknown'),
-        )
+        if rearm_obs is None:
+            log_signal(
+                symbol, ltp, pattern_desc, sl_price, meta_str,
+                setup_high=setup_high,
+                tick_size=signal_meta.get('tick_size', 0.05),
+                atr=atr,
+                stretch_score=signal_meta.get('stretch_score', 0.0),
+                vol_fade_ratio=signal_meta.get('vol_fade_ratio', 0.0),
+                confidence=signal_meta.get('confidence', ''),
+                pattern_bonus=signal_meta.get('pattern_bonus', 'None'),
+                oi_direction=signal_meta.get('oi_direction', 'unknown'),
+            )
 
         # Calculate VWAP for both ML logging and TP targeting
         vwap = df['vwap'].iloc[-1] if 'vwap' in df.columns else ltp
 
+        # Levels a ghost audit needs to grade a top-coil setup the way the engine
+        # trades it: enter only if the trigger breaks, then stop or 15:10.
+        topcoil_fields = {
+            'exit_profile': 'EOD_HOLD',
+            'trigger_price': signal_meta.get('signal_low_override'),
+            'coil_high': signal_meta.get('coil_high'),
+            'sl_price': sl_price,
+            'armed_at': now_ist.isoformat(timespec='seconds'),
+        } if is_top_coil else {}
+
         # ML Data Logging
         obs_id = None
-        try:
-            ml_logger = get_ml_logger()
-            prev_candle = df.iloc[-2]
+        if rearm_obs is not None:
+            obs_id = rearm_obs
+            try:
+                get_ml_logger().update_fields(rearm_obs, **topcoil_fields)
+            except Exception as e:
+                logger.warning(f"   [ML] Re-arm update error: {e}")
+        else:
+            try:
+                ml_logger = get_ml_logger()
+                prev_candle = df.iloc[-2]
 
-            body = abs(prev_candle['close'] - prev_candle['open'])
-            total_range = prev_candle['high'] - prev_candle['low']
-            upper_wick = prev_candle['high'] - max(prev_candle['open'], prev_candle['close'])
-            lower_wick = min(prev_candle['open'], prev_candle['close']) - prev_candle['low']
+                body = abs(prev_candle['close'] - prev_candle['open'])
+                total_range = prev_candle['high'] - prev_candle['low']
+                upper_wick = prev_candle['high'] - max(prev_candle['open'], prev_candle['close'])
+                lower_wick = min(prev_candle['open'], prev_candle['close']) - prev_candle['low']
 
-            vwap_dist = ((ltp - vwap) / vwap) * 100 if vwap > 0 else 0
+                vwap_dist = ((ltp - vwap) / vwap) * 100 if vwap > 0 else 0
 
-            vol_avg = df['volume'].iloc[-20:].mean() if len(df) > 20 else df['volume'].mean()
-            rvol = prev_candle['volume'] / vol_avg if vol_avg > 0 else 1
+                vol_avg = df['volume'].iloc[-20:].mean() if len(df) > 20 else df['volume'].mean()
+                rvol = prev_candle['volume'] / vol_avg if vol_avg > 0 else 1
 
-            features = {
-                "prev_close": df.iloc[0]['open'],
-                "day_high": df['high'].max(),
-                "day_low": df['low'].min(),
-                "gain_pct": ((ltp - df.iloc[0]['open']) / df.iloc[0]['open']) * 100,
-                "vwap": vwap,
-                "vwap_distance_pct": vwap_dist,
-                "vwap_sd": F.compute_vwap_sd(df.iloc[:-1]),
-                "vwap_slope": slope,
-                "volume_current": prev_candle['volume'],
-                "volume_avg_20": vol_avg,
-                "rvol": rvol,
-                "pattern": pattern_desc.split(" + ")[0],
-                "candle_body_pct": (body / total_range * 100) if total_range > 0 else 0,
-                "upper_wick_pct": (upper_wick / total_range * 100) if total_range > 0 else 0,
-                "lower_wick_pct": (lower_wick / total_range * 100) if total_range > 0 else 0,
-                "stretch_score": signal_meta.get('stretch_score', 0.0),
-                "vol_fade_ratio": signal_meta.get('vol_fade_ratio', 0.0),
-                "confidence": signal_meta.get('confidence', 'MEDIUM'),
-                "pattern_bonus": signal_meta.get('pattern_bonus', 'None'),
-                "num_confirmations": pattern_desc.count(",") + 1 if "+" in pattern_desc else 0,
-                "confirmations": pattern_desc.split(" + ")[1:] if " + " in pattern_desc else [],
-                "nifty_trend": (
-                    self.market_context.get_trend_label()
-                    if hasattr(self.market_context, 'get_trend_label') else "UNKNOWN"
-                ),
-                "atr": atr,
-                "sl_price": sl_price,
-                "tp_price": vwap, # Update TP price in ML logs to reflect VWAP target
-                "direction": getattr(config, "TRADE_DIRECTION", "SHORT"),
-                "leverage": getattr(config, 'INTRADAY_LEVERAGE', 5.0),
-            }
+                features = {
+                    "prev_close": df.iloc[0]['open'],
+                    "day_high": df['high'].max(),
+                    "day_low": df['low'].min(),
+                    "gain_pct": ((ltp - df.iloc[0]['open']) / df.iloc[0]['open']) * 100,
+                    "vwap": vwap,
+                    "vwap_distance_pct": vwap_dist,
+                    "vwap_sd": F.compute_vwap_sd(df.iloc[:-1]),
+                    "vwap_slope": slope,
+                    "volume_current": prev_candle['volume'],
+                    "volume_avg_20": vol_avg,
+                    "rvol": rvol,
+                    "pattern": pattern_desc.split(" + ")[0],
+                    "candle_body_pct": (body / total_range * 100) if total_range > 0 else 0,
+                    "upper_wick_pct": (upper_wick / total_range * 100) if total_range > 0 else 0,
+                    "lower_wick_pct": (lower_wick / total_range * 100) if total_range > 0 else 0,
+                    "stretch_score": signal_meta.get('stretch_score', 0.0),
+                    "vol_fade_ratio": signal_meta.get('vol_fade_ratio', 0.0),
+                    "confidence": signal_meta.get('confidence', 'MEDIUM'),
+                    "pattern_bonus": signal_meta.get('pattern_bonus', 'None'),
+                    "num_confirmations": pattern_desc.count(",") + 1 if "+" in pattern_desc else 0,
+                    "confirmations": pattern_desc.split(" + ")[1:] if " + " in pattern_desc else [],
+                    "nifty_trend": (
+                        self.market_context.get_trend_label()
+                        if hasattr(self.market_context, 'get_trend_label') else "UNKNOWN"
+                    ),
+                    "atr": atr,
+                    "sl_price": sl_price,
+                    # EOD_HOLD has no target; a VWAP figure here made the ghost audit
+                    # grade top-coil setups against an exit they never use.
+                    "tp_price": None if is_top_coil else vwap,
+                    "direction": getattr(config, "TRADE_DIRECTION", "SHORT"),
+                    "leverage": getattr(config, 'INTRADAY_LEVERAGE', 5.0),
+                    **topcoil_fields,
+                }
 
-            obs_id = ml_logger.log_observation(symbol, ltp, features)
-            logger.info(f"   [ML] Logged observation: {obs_id}")
-        except Exception as e:
-            logger.warning(f"   [ML] Logging error: {e}")
+                obs_id = ml_logger.log_observation(symbol, ltp, features)
+                logger.info(f"   [ML] Logged observation: {obs_id}")
+                if is_top_coil and obs_id:
+                    self._topcoil_episodes[symbol] = (obs_id, now_ist)
+            except Exception as e:
+                logger.warning(f"   [ML] Logging error: {e}")
 
         # Build signal dict
         signal_data = {

@@ -16,6 +16,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 IST = ZoneInfo("Asia/Kolkata")
+EOD_SQUAREOFF_TIME = datetime.strptime("15:10", "%H:%M").time()
 
 REPORT_DIR = "logs/eod_reports"
 
@@ -94,7 +95,8 @@ class EODAnalyzer:
             return {"processed": 0, "wins": 0, "losses": 0}
 
         logger.info(f"Auditing {len(unlabeled)} missed signals for {target_date}...")
-        results = {"processed": 0, "wins": 0, "losses": 0, "tp_hits": 0, "eod_wins": 0}
+        results = {"processed": 0, "wins": 0, "losses": 0, "tp_hits": 0, "eod_wins": 0,
+                   "not_triggered": 0}
         
         # Global audit timeout to prevent EOD hang
         audit_start_ts = time.monotonic()
@@ -149,8 +151,14 @@ class EODAnalyzer:
                 if relevant_candles.empty:
                     continue
 
-                # 2. Simulate Path
-                outcome_data = self._simulate_path(obs, relevant_candles)
+                # 2. Simulate Path — with the exit the signal was actually going
+                # to use. A top-coil setup has no take-profit and only exists if
+                # its trigger breaks, so grading it on the VWAP-target path counted
+                # setups that never triggered as trades and exited real ones early.
+                if str(obs.get("exit_profile") or "").upper() == "EOD_HOLD":
+                    outcome_data = self._simulate_eod_hold(obs, relevant_candles)
+                else:
+                    outcome_data = self._simulate_path(obs, relevant_candles)
                 
                 # 3. Update ML Logger
                 if outcome_data:
@@ -166,7 +174,9 @@ class EODAnalyzer:
                         exit_reason=outcome_data["exit_reason"],
                     )
                     results["processed"] += 1
-                    if outcome_data["outcome"] == "WIN":
+                    if outcome_data["outcome"] == "NOT_TRIGGERED":
+                        results["not_triggered"] += 1
+                    elif outcome_data["outcome"] == "WIN":
                         results["wins"] += 1
                         if outcome_data.get("exit_reason") == "TP_HIT":
                             results["tp_hits"] += 1
@@ -202,6 +212,86 @@ class EODAnalyzer:
         obs_date = obs.get("date") or target_date.isoformat()
         sig_dt = datetime.strptime(f"{obs_date} {signal_time_str}", "%Y-%m-%d %H:%M:%S")
         return sig_dt.replace(tzinfo=IST)
+
+    # The validation gate's fixed expiry, refreshed on every re-arm.
+    TOPCOIL_PENDING_MINUTES = 15
+
+    def _simulate_eod_hold(self, obs, df):
+        """
+        Grade a top-coil (EOD_HOLD) setup the way the engine trades it.
+
+        From the last re-arm: the trigger has 15 minutes to break, and a push
+        through coil_high * 1.002 cancels it first. Once in, the only exits are
+        the stop and the 15:10 square-off. A setup that never triggers is labelled
+        NOT_TRIGGERED, not WIN or LOSS — it was never a trade.
+
+        Within one 1-minute bar the order of events is unknown; a bar that touches
+        both the trigger and the invalidation is counted as entered, because the
+        engine tests the trigger first on each tick.
+        """
+        try:
+            trig = float(obs.get("trigger_price"))
+            coil_high = float(obs.get("coil_high"))
+            sl_price = float(obs.get("sl_price"))
+        except (TypeError, ValueError):
+            return None
+        if not (trig > 0 and coil_high > 0 and sl_price > trig):
+            return None
+
+        armed_at = obs.get("armed_at")
+        if armed_at and not pd.isna(armed_at):
+            ts = pd.Timestamp(armed_at)
+            armed = ts.tz_localize(IST) if ts.tzinfo is None else ts.tz_convert(IST)
+            df = df[df["dt"] > armed]
+        else:
+            armed = df.iloc[0]["dt"] if not df.empty else None
+        if df.empty or armed is None:
+            return None
+
+        not_triggered = {
+            "outcome": "NOT_TRIGGERED", "exit_price": 0.0, "max_favorable": 0.0,
+            "max_adverse": 0.0, "pnl_pct": 0.0, "hold_time_mins": 0,
+        }
+        inval = coil_high * 1.002
+        entry_pos = None
+        for k, row in enumerate(df.itertuples(index=False)):
+            if (row.dt - armed).total_seconds() > self.TOPCOIL_PENDING_MINUTES * 60:
+                return {**not_triggered, "exit_reason": "EXPIRED"}
+            if row.low <= trig:
+                entry_pos = k
+                break
+            if row.high >= inval:
+                return {**not_triggered, "exit_reason": "INVALIDATED"}
+        if entry_pos is None:
+            return {**not_triggered, "exit_reason": "EXPIRED"}
+
+        held = df.iloc[entry_pos:]
+        held = held[held["dt"].dt.time < EOD_SQUAREOFF_TIME]
+        if held.empty:
+            return None
+        entry_time = held.iloc[0]["dt"]
+        mfe = mae = 0.0
+        exit_price, exit_reason, exit_time = None, None, None
+        for row in held.itertuples(index=False):
+            mae = max(mae, (row.high - trig) / trig * 100)
+            if row.high >= sl_price:
+                exit_price, exit_reason, exit_time = sl_price, "SL_HIT", row.dt
+                break
+            mfe = max(mfe, (trig - row.low) / trig * 100)
+        if exit_price is None:
+            last = held.iloc[-1]
+            exit_price, exit_reason, exit_time = float(last["close"]), "EOD_SQUAREOFF", last["dt"]
+
+        pnl_pct = (trig - exit_price) / trig * 100
+        return {
+            "exit_reason": exit_reason,
+            "outcome": "WIN" if pnl_pct > 0 else "LOSS",
+            "exit_price": exit_price,
+            "max_favorable": mfe,
+            "max_adverse": max(0.0, mae),
+            "pnl_pct": pnl_pct,
+            "hold_time_mins": (exit_time - entry_time).total_seconds() / 60,
+        }
 
     def _simulate_path(self, obs, df):
         """
@@ -449,14 +539,20 @@ class EODAnalyzer:
         ]
         
         if ghost_stats and ghost_stats.get("processed", 0) > 0:
+            # A setup whose trigger never broke was never a trade, so it is counted
+            # apart and kept out of the win rate.
+            _traded = ghost_stats["wins"] + ghost_stats["losses"]
             lines.extend([
                 "## 👻 Ghost Signal Audit (Missed Trades)",
                 f"- **Processed**: {ghost_stats['processed']}",
-                f"- **Real TP Hits (1.0x ATR)**: {ghost_stats.get('tp_hits', 0)} 🎯",
+                f"- **Trigger never broke**: {ghost_stats.get('not_triggered', 0)}",
+                f"- **TP Hits**: {ghost_stats.get('tp_hits', 0)} 🎯",
                 f"- **EOD Profit Closures**: {ghost_stats.get('eod_wins', 0)} ⏰",
                 f"- **Losses**: {ghost_stats['losses']}",
-                f"- **Win Rate**: {round(ghost_stats['wins'] / ghost_stats['processed'] * 100, 1) if ghost_stats['processed'] else 0}%",
-                "> These signals were validated by the bot but not traded (risk/cooldown/skip).",
+                f"- **Win Rate**: {round(ghost_stats['wins'] / _traded * 100, 1) if _traded else 0}%",
+                "> Setups the analyzer passed that the bot did not trade "
+                "(cooldown, capital slot busy, or it would have triggered while another "
+                "position was open), graded with the exit each one would have used.",
                 "",
             ])
 

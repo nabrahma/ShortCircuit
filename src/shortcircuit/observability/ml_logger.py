@@ -289,6 +289,14 @@ class MLDataLogger:
             
             "oi": features.get("oi", 0),
             "oi_change_pct": features.get("oi_change_pct", 0),
+
+            # How the trade is meant to be exited, and the levels a ghost audit
+            # needs to grade it the way the engine would actually have traded it.
+            # Absent (None) for BackToVWAPShort rows.
+            "exit_profile": features.get("exit_profile"),
+            "trigger_price": features.get("trigger_price"),
+            "coil_high": features.get("coil_high"),
+            "armed_at": features.get("armed_at"),
             
             # Labels (empty, filled at EOD)
             "outcome": None,
@@ -353,6 +361,20 @@ class MLDataLogger:
             logger.warning(f"[ML] Outcome update skipped; obs_id not found: {obs_id}")
         return found
     
+    def update_fields(self, obs_id: str, **fields: Any) -> bool:
+        """Overwrite feature fields on an existing observation (not its label)."""
+        with self._lock:
+            for obs in self._buffer:
+                if obs["obs_id"] == obs_id:
+                    obs.update(fields)
+                    found = True
+                    break
+            else:
+                found = False
+        if found:
+            self._save()
+        return found
+
     def _extract_sector(self, symbol: str) -> str:
         """Extract sector from symbol (simplified)."""
         # Could be enhanced with a sector mapping file

@@ -961,10 +961,21 @@ class ReconciliationEngine:
         # We must: (1) run the full close path, (2) release capital, (3) reset DB cache.
         for phantom in phantoms:
             sym = phantom['symbol']
-            logger.critical(
-                f"👻 POSITION VANISHED: {sym} — broker is flat but internal "
-                f"registry says open. Running full close path."
-            )
+            # Past the square-off deadline, flat-at-broker is the scheduler's own
+            # doing. It fired as a CRITICAL on every EOD exit, and the DB recorded
+            # the close as MANUAL_CLOSE_DETECTED — wrong on both counts.
+            from shortcircuit.eod.eod_scheduler import EOD_TIME
+            _eod_close = datetime.now(pytz.timezone('Asia/Kolkata')).time() >= EOD_TIME
+            if _eod_close:
+                logger.info(
+                    f"🌆 [EOD] {sym} flat at broker after the square-off — "
+                    f"running the close path."
+                )
+            else:
+                logger.critical(
+                    f"👻 POSITION VANISHED: {sym} — broker is flat but internal "
+                    f"registry says open. Running full close path."
+                )
 
             # Snapshot before the close path pops it from active_positions.
             # The exit classifier below needs entry price, qty and side, and by
@@ -1002,7 +1013,7 @@ class ReconciliationEngine:
 
                     await self.order_manager._finalize_closed_position(
                         symbol=sym,
-                        reason='MANUAL_CLOSE_DETECTED',
+                        reason='EOD_SQUAREOFF' if _eod_close else 'MANUAL_CLOSE_DETECTED',
                         exit_price=exit_price,
                         pnl=pnl,
                         send_alert=False,
