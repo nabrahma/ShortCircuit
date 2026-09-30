@@ -8,6 +8,7 @@ from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
 from shortcircuit import config
+from shortcircuit.strategy.features import compute_rsi_wilder
 from shortcircuit.state.database import DatabaseManager
 
 logging.basicConfig(
@@ -156,7 +157,7 @@ class EODAnalyzer:
                 # its trigger breaks, so grading it on the VWAP-target path counted
                 # setups that never triggered as trades and exited real ones early.
                 if str(obs.get("exit_profile") or "").upper() == "EOD_HOLD":
-                    outcome_data = self._simulate_eod_hold(obs, relevant_candles)
+                    outcome_data = self._simulate_eod_hold(obs, relevant_candles, session=df)
                 else:
                     outcome_data = self._simulate_path(obs, relevant_candles)
                 
@@ -216,7 +217,7 @@ class EODAnalyzer:
     # The validation gate's fixed expiry, refreshed on every re-arm.
     TOPCOIL_PENDING_MINUTES = 15
 
-    def _simulate_eod_hold(self, obs, df):
+    def _simulate_eod_hold(self, obs, df, session=None):
         """
         Grade a top-coil (EOD_HOLD) setup the way the engine trades it.
 
@@ -224,6 +225,11 @@ class EODAnalyzer:
         through coil_high * 1.002 cancels it first. Once in, the only exits are
         the stop and the 15:10 square-off. A setup that never triggers is labelled
         NOT_TRIGGERED, not WIN or LOSS — it was never a trade.
+
+        With TOPCOIL_RSI_TP_ENABLED and the full session passed as `session`, the
+        operator's RSI take-profit applies too, exactly as the live loop runs it:
+        on a completed bar at least TOPCOIL_RSI_TP_SKIP_MINUTES after the entry
+        bar, in profit, 1-minute RSI below the threshold -> covered at that close.
 
         Within one 1-minute bar the order of events is unknown; a bar that touches
         both the trigger and the invalidation is counted as entered, because the
@@ -270,14 +276,32 @@ class EODAnalyzer:
         if held.empty:
             return None
         entry_time = held.iloc[0]["dt"]
+
+        rsi_by_dt = {}
+        if session is not None and getattr(config, "TOPCOIL_RSI_TP_ENABLED", False):
+            sess = session.sort_values("dt")
+            if len(sess) >= int(getattr(config, "TOPCOIL_RSI_TP_MIN_CANDLES", 30)):
+                period = int(getattr(config, "TOPCOIL_RSI_TP_PERIOD", 14))
+                closes = sess["close"].astype(float).tolist()
+                for k, ts in enumerate(sess["dt"]):
+                    if k + 1 >= int(getattr(config, "TOPCOIL_RSI_TP_MIN_CANDLES", 30)):
+                        rsi_by_dt[ts] = compute_rsi_wilder(closes[: k + 1], period)
+        rsi_thr = float(getattr(config, "TOPCOIL_RSI_TP_THRESHOLD", 40.0))
+        rsi_skip = int(getattr(config, "TOPCOIL_RSI_TP_SKIP_MINUTES", 5))
+
         mfe = mae = 0.0
         exit_price, exit_reason, exit_time = None, None, None
-        for row in held.itertuples(index=False):
+        for bars_after, row in enumerate(held.itertuples(index=False)):
             mae = max(mae, (row.high - trig) / trig * 100)
             if row.high >= sl_price:
                 exit_price, exit_reason, exit_time = sl_price, "SL_HIT", row.dt
                 break
             mfe = max(mfe, (trig - row.low) / trig * 100)
+            r = rsi_by_dt.get(row.dt)
+            if (r is not None and r == r and bars_after >= rsi_skip
+                    and row.close < trig and r < rsi_thr):
+                exit_price, exit_reason, exit_time = float(row.close), "RSI_TP", row.dt
+                break
         if exit_price is None:
             last = held.iloc[-1]
             exit_price, exit_reason, exit_time = float(last["close"]), "EOD_SQUAREOFF", last["dt"]

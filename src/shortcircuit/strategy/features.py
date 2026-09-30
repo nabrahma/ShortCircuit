@@ -70,6 +70,28 @@ def enrich_dataframe(df: pd.DataFrame) -> None:
 # RSI
 
 
+def compute_rsi_wilder(closes, period: int = 14) -> float:
+    """
+    Latest RSI of a close series, Wilder-smoothed — the RSI TradingView and most
+    broker charts draw, and so the one the operator reads off the screen.
+
+    Returns float('nan') when there are too few closes to say anything. Callers
+    should also demand a warm-up well beyond `period`: Wilder smoothing starts
+    from the first bar, so the first few dozen readings are not yet stable.
+    """
+    s = pd.Series(list(closes), dtype=float)
+    if len(s) < period + 1:
+        return float('nan')
+    d = s.diff()
+    avg_up = d.clip(lower=0).ewm(alpha=1 / period, adjust=False).mean().iloc[-1]
+    avg_dn = (-d.clip(upper=0)).ewm(alpha=1 / period, adjust=False).mean().iloc[-1]
+    if not np.isfinite(avg_up) or not np.isfinite(avg_dn):
+        return float('nan')
+    if avg_dn == 0:
+        return 100.0 if avg_up > 0 else 50.0
+    return float(100 - 100 / (1 + avg_up / avg_dn))
+
+
 def compute_rsi_divergence(df: pd.DataFrame, window: int = 25) -> bool:
     """
     Swing-based bearish RSI divergence.

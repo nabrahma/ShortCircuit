@@ -180,6 +180,27 @@ TOPCOIL_BREAK_BUFFER_PCT: float = 0.1  # trigger sits this far below the coil lo
 TOPCOIL_FIRST_MIN: int = 585         # 09:45 — no coil is meaningful before this
 TOPCOIL_LAST_MIN: int = 880          # 14:40 — past this there is no room to work
 
+# RSI take-profit on top-coil shorts (operator's rule, 30 Sep 2026): once the trade
+# is in profit, cover when the 1-minute RSI(14) closes below 40, because a relief
+# rally follows. The rally is real — after the first such dip, price bounced within
+# 30 minutes in 82% of 147 historical cases (median +1.02%).
+#
+# What it does to the money, over 190 trades with identical entries:
+#                     net/trade  win rate  stopped out  per-trade swing  max drawdown
+#   hold to 15:10      +0.058%     36%        53%           2.76%          -39.3%
+#   RSI<40 cover       +0.009%     66%        20%           1.14%          -16.8%
+# The difference in average (-0.049pp, t=-0.27) is noise; the difference in risk
+# is not. It trades the rare big afternoon slide (best trade +9.96% -> +3.28%) for a
+# far steadier ride, since after the bounce price is usually lower again by 15:10.
+# Thresholds of 38, 35 and 30 all measured worse than 40. The first 5 minutes are
+# ignored because the breakdown that triggers the entry drags RSI under 40 by
+# itself (NSE:FERMENTA-EQ read 39.6 on its entry bar on 29 Sep).
+TOPCOIL_RSI_TP_ENABLED: bool = True
+TOPCOIL_RSI_TP_THRESHOLD: float = 40.0
+TOPCOIL_RSI_TP_PERIOD: int = 14
+TOPCOIL_RSI_TP_SKIP_MINUTES: int = 5     # completed bars after the entry bar
+TOPCOIL_RSI_TP_MIN_CANDLES: int = 30     # warm-up; fewer and the rule stays off
+
 LOG_FILE = "logs/bot.log"
 
 RVOL_VALIDITY_GATE_ENABLED = True

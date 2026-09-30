@@ -7,6 +7,7 @@ import pytz
 
 from shortcircuit.broker.fyers_connect import FyersConnect
 from shortcircuit import config
+from shortcircuit.strategy import features as F
 from shortcircuit.execution.order_manager import OrderManager
 
 from shortcircuit.broker.rest_limiter import rest_limiter, Priority
@@ -726,6 +727,62 @@ class FocusEngine:
         except Exception as e:
             logger.error(f"[RECOVERY] Failed: {e}", exc_info=True)
 
+    def _rsi_take_profit_due(self, symbol: str, t: dict):
+        """
+        The operator's relief-rally exit for EOD_HOLD shorts: once the trade is in
+        profit, cover when the 1-minute RSI(14) closes below the threshold.
+
+        Returns the RSI reading when the exit should fire, else None. Evaluated once
+        per COMPLETED 1-minute bar — a forming bar's RSI swings on every tick and
+        the rule was measured on closes. Built from the broker's own tick-aggregated
+        candles, so it costs no REST calls. Anything that cannot be read (no broker,
+        too few candles for the RSI to have warmed up) leaves the position on its
+        stop and the 15:10 square-off, exactly as before the rule existed.
+        """
+        if not getattr(config, 'TOPCOIL_RSI_TP_ENABLED', False):
+            return None
+        if t.get('exit_profile') != 'EOD_HOLD' or t.get('direction', 'SHORT') != 'SHORT':
+            return None
+        # An exit already decided but not yet completed is retried every 10s,
+        # not re-decided: the rule fired on a closed bar, and a bounce since then
+        # is exactly what it was taking profit ahead of.
+        retry_at = t.get('_rsi_retry_at')
+        if retry_at is not None:
+            return t.get('_rsi_reading') if time.time() >= retry_at else None
+
+        broker = getattr(self.order_manager, 'broker', None) if self.order_manager else None
+        if broker is None or not hasattr(broker, 'get_local_candles'):
+            return None
+        try:
+            candles = broker.get_local_candles(symbol, 400)
+        except Exception as e:
+            logger.debug("[RSI-TP] %s candles unavailable: %s", symbol, e)
+            return None
+
+        now_minute = int(time.time() // 60 * 60)
+        done = [c for c in candles if int(c.epoch) < now_minute]    # drop the forming bar
+        if len(done) < int(getattr(config, 'TOPCOIL_RSI_TP_MIN_CANDLES', 30)):
+            return None
+        last_epoch = int(done[-1].epoch)
+        if t.get('_rsi_checked_epoch') == last_epoch:
+            return None
+        t['_rsi_checked_epoch'] = last_epoch
+
+        entry_minute = int(t.get('entry_minute') or 0)
+        bars_after_entry = sum(1 for c in done if int(c.epoch) >= entry_minute) - 1
+        if bars_after_entry < int(getattr(config, 'TOPCOIL_RSI_TP_SKIP_MINUTES', 5)):
+            return None
+        if not float(done[-1].close) < float(t.get('entry') or 0):
+            return None                           # not in profit: not a take-profit
+
+        rsi = F.compute_rsi_wilder(
+            [c.close for c in done], int(getattr(config, 'TOPCOIL_RSI_TP_PERIOD', 14))
+        )
+        threshold = float(getattr(config, 'TOPCOIL_RSI_TP_THRESHOLD', 40.0))
+        if rsi == rsi and rsi < threshold:        # rsi == rsi rejects NaN
+            return rsi
+        return None
+
     def _retire_or_retry(self, symbol: str, exited: bool, reason: str) -> bool:
         """
         True to stop watching this position, False to keep the loop alive.
@@ -987,6 +1044,11 @@ class FocusEngine:
             # MFE/MAE tracking for the ML trainer.
             'mfe_pct':         0.0,  # Max Favorable Excursion (% from entry)
             'mae_pct':         0.0,  # Max Adverse Excursion (% from entry)
+
+            # Read by the RSI take-profit: which exit rules apply, and from which
+            # 1-minute bar the position has existed.
+            'exit_profile':    exit_profile,
+            'entry_minute':    int(time.time() // 60 * 60),
         }
         
         # Per-trade detector state MUST be reset here — it lives on the engine,
@@ -1322,6 +1384,39 @@ class FocusEngine:
                 # version was removed on 2026-08-12 as an operator-only decision.
                 # The only one left is tied to the scale-out partial below.
                 
+                # RSI relief-rally take-profit (EOD_HOLD shorts). Respects
+                # manual_override like every other bot-initiated exit.
+                _rsi_hit = None if manual_override else self._rsi_take_profit_due(symbol, t)
+                if _rsi_hit is not None:
+                    logger.info(
+                        "🎯 [RSI-TP] %s 1-min RSI %.1f < %.0f while in profit "
+                        "(entry ₹%.2f, ltp ₹%.2f) — covering %s shares",
+                        symbol, _rsi_hit,
+                        float(getattr(config, 'TOPCOIL_RSI_TP_THRESHOLD', 40.0)),
+                        t['entry'], ltp, t['remaining_qty'],
+                    )
+                    if self.order_manager and self._event_loop:
+                        exited = False
+                        future = asyncio.run_coroutine_threadsafe(
+                            self.order_manager.safe_exit(symbol, "RSI_TP"), self._event_loop
+                        )
+                        try:
+                            exited = future.result(timeout=30)
+                            logger.info("[RSI-TP] safe_exit completed for %s: success=%s",
+                                        symbol, exited)
+                        except Exception as rsi_exit_err:
+                            logger.error("[RSI-TP] safe_exit failed/timed out for %s: %s",
+                                         symbol, rsi_exit_err)
+                        if not self._retire_or_retry(symbol, exited, "RSI_TP"):
+                            # Keep the decision, retry it every 10s — not at 5Hz,
+                            # which is how a rate limit gets hit in the first place.
+                            t['_rsi_reading'] = _rsi_hit
+                            t['_rsi_retry_at'] = time.time() + 10.0
+                            continue
+                    else:
+                        self.stop_focus("RSI_TP")
+                    return
+
                 # Take-profit engine — see config.TP_MODE for the mode ranking.
                 # Both stages respect manual_override: once the operator has taken
                 # the wheel, the bot does not exit underneath them.
