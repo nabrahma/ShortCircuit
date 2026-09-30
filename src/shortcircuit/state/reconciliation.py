@@ -365,6 +365,24 @@ class ReconciliationEngine:
 
         for symbol, db_qty in db_positions.items():
             if symbol not in broker_positions:
+                # A position the bot itself just closed is still in the cached DB
+                # snapshot for a few seconds. That is lag, not a vanished position:
+                # on 29 Sep NSE:FERMENTA-EQ's own stop fill was booked, then 0.6s
+                # later raised a CRITICAL "POSITION VANISHED" and a second Telegram
+                # close alert. The grace period only ever covered orphans.
+                import time
+                closed_at = self._recently_closed.get(symbol, 0)
+                still_tracked = bool(
+                    self.order_manager
+                    and symbol in getattr(self.order_manager, 'active_positions', {})
+                )
+                if time.time() - closed_at < self._orphan_grace_secs and not still_tracked:
+                    logger.debug(
+                        f"[RECONCILE] Suppressed phantom for {symbol} — closed "
+                        f"{time.time() - closed_at:.1f}s ago; refreshing the DB snapshot"
+                    )
+                    self._db_dirty = True
+                    continue
                 phantoms.append({'symbol': symbol, 'qty': db_qty})
 
         # Step 5: Act on divergence — only when the broker view is trustworthy.
