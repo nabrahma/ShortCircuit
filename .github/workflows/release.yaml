@@ -43,6 +43,8 @@ jobs:
           ' CHANGELOG.md > release-notes.md
           test -s release-notes.md \
             || { echo "::error::CHANGELOG.md has no section for ${version}"; exit 1; }
+          # Relative links do not resolve on a release page; pin them to the tag.
+          perl -pi -e 's{\]\((?!https?://|#)([^)]+)\)}{](https://github.com/$ENV{GITHUB_REPOSITORY}/blob/$ENV{GITHUB_REF_NAME}/$1)}g' release-notes.md
 
       # Image references must be lower case; the repository name is not.
       - name: Image name
