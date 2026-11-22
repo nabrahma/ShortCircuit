@@ -49,3 +49,32 @@ CVE-2025-69223   # aiohttp 3.9.3, pinned by fyers_apiv3
 CVE-2026-69244   # aiohttp 3.9.3, pinned by fyers_apiv3
 CVE-2025-4565    # protobuf 5.29.3, pinned by fyers_apiv3
 CVE-2026-0994    # protobuf 5.29.3, pinned by fyers_apiv3
+
+
+# ── aiohttp advisories published Oct–Nov 2026 ────────────────────────────────
+#
+# Same pin, still unfixable: fyers_apiv3 3.3.0, the newest release, declares
+# aiohttp==3.9.3 and the fixes need 3.14.4.
+#
+# Some of these are client-side (WebSocket frame reassembly, connection upgrade
+# buffering, domain-mask matching), so "nothing here runs a server" does not
+# cover them. What covers them is that no aiohttp code executes at all. The SDK
+# imports aiohttp at module load but only opens a ClientSession on its
+# is_async=True path, and both FyersModel clients here are synchronous; their
+# HTTP goes through `requests` (broker/transport.py). Telegram uses httpx, and
+# the Fyers sockets use websocket-client.
+#
+# tests/unit/test_dependency_reachability.py fails the build if that premise
+# stops holding: an async FyersModel, or a direct aiohttp import in our code.
+# Reviewed: 2026-11-22
+CVE-2026-111064  # missing initial request timeout (server)
+CVE-2026-111066  # fd exhaustion in multipart request handling (server)
+CVE-2026-123817  # memory exhaustion in WebSocket frame reassembly
+CVE-2026-128124  # inefficient domain-mask wildcard matching
+CVE-2026-128126  # aiohttp 3.9.3, pinned by fyers_apiv3
+CVE-2026-128127  # aiohttp 3.9.3, pinned by fyers_apiv3
+CVE-2026-128128  # aiohttp 3.9.3, pinned by fyers_apiv3
+CVE-2026-128129  # unbounded buffering during connection upgrades
+CVE-2026-128130  # pure-Python parser buffer growth
+CVE-2026-128131  # aiohttp 3.9.3, pinned by fyers_apiv3
+CVE-2026-128132  # aiohttp 3.9.3, pinned by fyers_apiv3

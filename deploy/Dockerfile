@@ -57,7 +57,7 @@ RUN groupadd --system --gid 1001 shortcircuit \
  && useradd  --system --uid 1001 --gid shortcircuit --create-home shortcircuit \
  && apt-get update \
  && apt-get install -y --no-install-recommends libpq5 \
- && apt-get install -y --only-upgrade openssl libssl3t64 openssl-provider-legacy \
+ && apt-get install -y --only-upgrade openssl libssl3t64 openssl-provider-legacy zlib1g \
  && rm -rf /var/lib/apt/lists/*
 
 ENV PATH="/opt/venv/bin:$PATH" \

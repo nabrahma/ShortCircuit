@@ -27,8 +27,9 @@ python-dotenv>=1.0.0
 # ── Async / Networking ─────────────────────────────────────
 # Pinned to match fyers_apiv3, which requires aiohttp==3.9.3 exactly. Asking
 # for anything newer makes this file unsatisfiable against every published
-# fyers release (pip: ResolutionImpossible). Carries three advisories we cannot
-# clear until the broker SDK relaxes its pin - see docs/SECURITY.md.
+# fyers release (pip: ResolutionImpossible). Carries advisories we cannot clear
+# until the broker SDK relaxes its pin; none is reachable because no aiohttp
+# code runs here - see docs/SECURITY.md.
 aiohttp==3.9.3
 websockets>=12.0
 # pytz is imported by config, market_utils, reconciliation and the supervisor.

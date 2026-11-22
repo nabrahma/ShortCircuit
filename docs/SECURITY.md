@@ -106,25 +106,33 @@ The exploit paths are archive extraction and package-index traversal. The
 trading runtime performs neither and never imports those modules. This is
 re-evaluated whenever `fyers_apiv3` drops its `pkg_resources` dependency.
 
-Five further HIGH findings are suppressed for a different and harder reason:
+Sixteen further HIGH findings are suppressed for a different and harder reason:
 `fyers_apiv3` declares its dependencies with `==` rather than `>=`.
 
 | CVE | Package | Pinned by the SDK to |
 |---|---|---|
 | CVE-2024-30251, CVE-2025-69223, CVE-2026-69244 | `aiohttp` | `==3.9.3` |
+| CVE-2026-111064, CVE-2026-111066, CVE-2026-123817, CVE-2026-128124, CVE-2026-128126 – CVE-2026-128132 | `aiohttp` | `==3.9.3` |
 | CVE-2025-4565, CVE-2026-0994 | `protobuf` | `==5.29.3` |
 
 Requesting a patched version of either makes `requirements.txt` unsatisfiable
-against **every published fyers release**. pip returns `ResolutionImpossible`
-rather than a warning, so there is no version of the broker SDK that permits the
-fixed versions. This is not a decision we can make differently; it is a
-constraint the vendor imposes.
+against **every published fyers release**, up to and including 3.3.0 (checked
+2026-11-22). pip returns `ResolutionImpossible` rather than a warning, so there
+is no version of the broker SDK that permits the fixed versions. This is not a
+decision we can make differently; it is a constraint the vendor imposes.
 
-Reachability was assessed rather than assumed. The aiohttp advisories are
-server-side, covering malformed POST parsing and a zip bomb through
-`auto_decompress`; nothing here runs an aiohttp server, it is a client against
-Fyers and Telegram. The protobuf advisories are unbounded recursion while parsing
-untrusted messages, and the only protobuf this process decodes arrives over an
+Reachability was assessed rather than assumed. **No aiohttp code executes in
+this process.** `fyers_apiv3` imports aiohttp at module load, but opens a
+`ClientSession` only on its `is_async=True` path, and both `FyersModel` clients
+here are synchronous: their HTTP goes through `requests`, via
+`broker/transport.py`. Telegram uses `httpx`; the Fyers sockets use
+`websocket-client`. That covers the client-side advisories (WebSocket frame
+reassembly, upgrade buffering, domain-mask matching) as well as the server-side
+ones. `tests/unit/test_dependency_reachability.py` pins the premise: it fails if
+any `FyersModel` is built async or if our code imports aiohttp directly.
+
+The protobuf advisories are unbounded recursion while parsing untrusted
+messages, and the only protobuf this process decodes arrives over an
 authenticated Fyers market data socket.
 
 `msgpack` was genuinely fixable and was bumped rather than suppressed.

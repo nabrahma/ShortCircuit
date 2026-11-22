@@ -148,10 +148,12 @@ def _load_package_dir(directory: Path, catalog: Catalog) -> None:
 
 
 def _load_file_dir(directory: Path, catalog: Catalog) -> None:
+    # Namespaces the module so two plug-in directories may each hold a `fade.py`.
+    # An identifier, not a security boundary.
+    digest = hashlib.sha1(str(directory).encode("utf-8"), usedforsecurity=False).hexdigest()[:10]
     for path in sorted(directory.glob("*.py")):
         if path.stem.startswith(("_", "test")) or path.stem == "conftest":
             continue
-        digest = hashlib.sha1(str(directory).encode("utf-8")).hexdigest()[:10]
         module_name = f"shortcircuit_plugin_{digest}_{path.stem}"
         try:
             spec = importlib.util.spec_from_file_location(module_name, path)
