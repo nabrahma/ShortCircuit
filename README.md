@@ -337,7 +337,7 @@ Engineering metrics only. No performance, profitability or return figures. See
 | Scan latency (p50 / p99) | 9 ms / 501 ms |
 | Cache priming, cold start | 4 to 25 s observed |
 | Reconciliation cadence | every 6 s during market hours |
-| Tests / runtime | 344 / ~7 s |
+| Tests (public suite) / runtime | 496 / ~30 s |
 
 These describe how the system runs, not how the strategy performs. Gate
 thresholds, rejection distributions and anything else that characterises the
@@ -372,7 +372,7 @@ The role you connect as should own the database; `v42_1_0_postgresql.sql` create
 the `uuid-ossp` extension, which a database owner may do on PostgreSQL 14+.
 
 ```bash
-make test           # 344 tests, no credentials or database needed
+make test           # 496 tests, no credentials or database needed
 make demo           # the same suite in a container, no credentials needed
 python main.py      # live — requires credentials and a migrated database
 ```

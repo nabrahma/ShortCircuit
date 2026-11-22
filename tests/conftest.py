@@ -1,95 +1,21 @@
 """
-Shared fixtures and safety guards for the ShortCircuit test suite.
+Shared fixtures for the ShortCircuit test suite.
 
-Two principles hold throughout:
+The safety guards (no network, no real credentials) are in the repository-root
+conftest.py, so that they cover strategies/ as well as tests/.
 
-1. **Unit tests never touch the network.** This is enforced structurally by the
-   `no_network` autouse fixture below, not by convention. A test that
-   accidentally reaches a live broker API fails loudly instead of quietly
-   passing (or quietly placing an order).
-
-2. **Every fixture is deterministic.** No `random`, no `datetime.now()`, no
-   dependence on the machine's timezone. A test that passes at 09:00 and fails
-   at 15:30 is worse than no test.
+**Every fixture is deterministic.** No `random`, no `datetime.now()`, no
+dependence on the machine's timezone. A test that passes at 09:00 and fails at
+15:30 is worse than no test.
 """
 from __future__ import annotations
 
-import os
-import socket
-import sys
 from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 import pytest
 
-# src/ layout: the package lives under src/, so that is what goes on the path.
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
-
 IST = timezone(timedelta(hours=5, minutes=30))
-
-
-# Windows: socket.socketpair() is implemented in Python on top of
-# socket.socket.connect to 127.0.0.1, and every asyncio event loop creates one.
-# The no_network guard below patches connect, so without this every async test
-# fails on Windows while passing on Linux. Rebuilt here with the connect captured
-# before the guard exists — loopback self-pairs only; all other connects stay
-# blocked.
-if sys.platform == "win32":
-    _unguarded_connect = socket.socket.connect
-
-    def _loopback_socketpair(family=socket.AF_INET, type=socket.SOCK_STREAM, proto=0):
-        listener = socket.socket(family, type, proto)
-        try:
-            listener.bind(("127.0.0.1", 0))
-            listener.listen()
-            client = socket.socket(family, type, proto)
-            _unguarded_connect(client, listener.getsockname())
-            server, _ = listener.accept()
-        finally:
-            listener.close()
-        return server, client
-
-    socket.socketpair = _loopback_socketpair
-
-
-# Safety guards
-
-@pytest.fixture(autouse=True)
-def no_network(monkeypatch, request):
-    """
-    Block outbound sockets in unit and property tests.
-
-    Integration tests opt out via the `integration` marker, because they
-    legitimately talk to a local PostgreSQL instance.
-    """
-    if "integration" in request.keywords:
-        return
-
-    def guard(*args, **kwargs):
-        raise RuntimeError(
-            "network access attempted in a unit test — "
-            "mock the broker or mark the test @pytest.mark.integration"
-        )
-
-    monkeypatch.setattr(socket.socket, "connect", guard)
-    monkeypatch.setattr(socket.socket, "connect_ex", guard)
-
-
-@pytest.fixture(autouse=True)
-def no_real_credentials(monkeypatch, request):
-    """
-    Ensure tests never pick up the developer's real `.env` values.
-
-    Without this, a test asserting "config loads" would pass on the author's
-    machine using live broker credentials and fail everywhere else.
-    """
-    if "integration" in request.keywords:
-        return
-    for key in (
-        "FYERS_CLIENT_ID", "FYERS_SECRET_ID", "FYERS_ACCESS_TOKEN",
-        "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "DB_PASS", "DB_PASSWORD",
-    ):
-        monkeypatch.delenv(key, raising=False)
 
 
 # Candle fixtures — deterministic OHLCV frames

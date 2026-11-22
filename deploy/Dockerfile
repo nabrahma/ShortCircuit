@@ -60,7 +60,12 @@ RUN groupadd --system --gid 1001 shortcircuit \
  && apt-get install -y --only-upgrade openssl libssl3t64 openssl-provider-legacy zlib1g \
  && rm -rf /var/lib/apt/lists/*
 
+# PYTHONPATH, not `pip install .`: paths.py finds the repository root by walking
+# up from its own file, so the package must stay at /app/src/shortcircuit for
+# logs/, data/ and the mounted strategies/ to resolve under /app. Without it the
+# ENTRYPOINT and the HEALTHCHECK both fail with "No module named shortcircuit".
 ENV PATH="/opt/venv/bin:$PATH" \
+    PYTHONPATH=/app/src \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
 

@@ -10,9 +10,12 @@ help:  ## Show this help
 	  | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
 
 # ── setup ────────────────────────────────────────────────────────────────
+# The package is installed editable, so `python -m shortcircuit` works and
+# paths.py still resolves logs/, data/ and strategies/ against this checkout.
 .PHONY: install
-install:  ## Install runtime + dev dependencies
+install:  ## Install runtime + dev dependencies, and the package (editable)
 	$(PIP) install -r requirements.txt -r requirements-dev.txt
+	$(PIP) install --no-deps -e .
 
 # ── quality ──────────────────────────────────────────────────────────────
 .PHONY: lint

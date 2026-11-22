@@ -47,6 +47,8 @@ asyncio_mode = "auto"
 # strategies/ holds private plug-ins and their tests; absent in a public clone,
 # where pytest simply skips the path.
 testpaths = ["tests", "strategies"]
+# src/ for the package; the root so plug-in tests can `from strategies.x import Y`.
+pythonpath = ["src", "."]
 asyncio_default_fixture_loop_scope = "function"
 python_files = ["test_*.py"]
 addopts = "-ra --strict-markers"

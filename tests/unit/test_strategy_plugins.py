@@ -396,3 +396,39 @@ def test_private_strategies_never_reach_the_repository(path):
 
 def test_the_strategies_readme_is_public():
     assert not _git_ignored("strategies/README.md")
+
+
+# ── a fresh clone can write, test and run a plug-in ──────────────────────────
+#
+# Each of these failed on a clean checkout once; none could fail on a machine
+# whose private strategies/conftest.py papered over them.
+
+def _top_level_functions(path: Path) -> set[str]:
+    import ast
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    return {n.name for n in tree.body if isinstance(n, ast.FunctionDef)}
+
+
+def test_the_safety_guards_cover_plugin_tests():
+    # A conftest governs only its own directory. Under tests/ the guards would
+    # leave strategies/tests/ free to reach a live broker with real credentials.
+    guards = {"no_network", "no_real_credentials"}
+    assert guards <= _top_level_functions(REPO / "conftest.py")
+    assert not guards & _top_level_functions(REPO / "tests" / "conftest.py"), \
+        "defined twice: the copies would drift"
+
+
+def test_plugin_tests_can_import_the_engine_and_their_strategy():
+    import tomllib
+    ini = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
+    pythonpath = ini["tool"]["pytest"]["ini_options"]["pythonpath"]
+    assert "src" in pythonpath, "`import shortcircuit` fails in strategies/tests/"
+    assert "." in pythonpath, "`from strategies.my_fade import MyFade` fails"
+
+
+def test_the_runtime_image_can_import_the_package():
+    dockerfile = (REPO / "deploy" / "Dockerfile").read_text(encoding="utf-8")
+    shared, _, runtime = dockerfile.partition("FROM base AS runtime")
+    assert '"-m", "shortcircuit"' in runtime
+    assert "PYTHONPATH=/app/src" in shared, \
+        "nothing installs the package, so ENTRYPOINT and HEALTHCHECK cannot import it"
