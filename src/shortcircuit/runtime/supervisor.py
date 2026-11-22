@@ -33,6 +33,7 @@ from shortcircuit.marketdata.scanner import FyersScanner
 from shortcircuit.runtime.startup_recovery import StartupRecovery
 from shortcircuit.observability.telegram_bot import ShortCircuitBot
 from shortcircuit.execution.trade_manager import TradeManager
+from shortcircuit.strategy import registry as strategy_registry
 
 IST = pytz.timezone("Asia/Kolkata")
 logger = logging.getLogger("shortcircuit.supervisor")
@@ -64,6 +65,14 @@ def _configure_logging() -> None:
     )
     file_handler.setFormatter(log_formatter)
     file_handler.addFilter(_RedactTelegramToken())
+
+    # Windows consoles default to a legacy code page and the log is full of
+    # emoji; without this every such line raises a logging error on Windows.
+    if hasattr(sys.stdout, "reconfigure"):
+        try:
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            pass
 
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setFormatter(log_formatter)
@@ -191,6 +200,9 @@ class RuntimeContext:
 
 
 async def _initialize_runtime() -> RuntimeContext:
+    # Strategies first: a misconfigured plug-in is a configuration error, and it
+    # should stop the process before it logs in, opens sockets or syncs capital.
+    strategies = strategy_registry.load()
     logger.info("[INIT] Authenticating with Fyers...")
     fyers_conn = FyersConnect(config)
     fyers_client = fyers_conn.fyers
@@ -245,7 +257,10 @@ async def _initialize_runtime() -> RuntimeContext:
     # Perform initial sync to capture morning ledger balance
     await capital_manager.sync(broker)
     
-    analyzer = FyersAnalyzer(fyers_client, broker=broker, morning_high=mh, morning_low=ml)
+    analyzer = FyersAnalyzer(
+        fyers_client, broker=broker, morning_high=mh, morning_low=ml,
+        strategies=strategies,
+    )
     
     # Calculate 5% mission target automatically
     if getattr(config, 'DAILY_TARGET_INR', 0) == -1:

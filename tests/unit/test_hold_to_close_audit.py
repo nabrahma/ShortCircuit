@@ -1,5 +1,7 @@
 """
-Top-coil setups are recorded once, and graded the way the engine trades them.
+Hold-to-close (EOD_HOLD) setups are recorded once, and graded the way the engine
+trades them. Found on the top_coil strategy; enforced for every strategy that
+asks for EOD_HOLD or a re-arm window.
 
 Two faults, both visible in the 22-24 Sep reports:
 
@@ -21,6 +23,9 @@ from shortcircuit.eod.eod_analyzer import EODAnalyzer, IST
 from shortcircuit.execution import analyzer as an_mod
 from shortcircuit.execution.analyzer import FyersAnalyzer
 from shortcircuit.strategy import features as F
+from shortcircuit.strategy.sdk import (
+    Direction, ExitPlan, ExitProfile, RsiCover, SetupContext, Signal, Strategy,
+)
 
 
 # ── grading ──────────────────────────────────────────────────────────────────
@@ -129,9 +134,39 @@ def _frame():
     return df
 
 
-def _meta(trigger):
-    return {"exit_profile": "EOD_HOLD", "signal_low_override": trigger,
-            "coil_high": 218.0, "snapshot_high": 218.0, "pattern_bonus": "TOP_COIL_BREAKDOWN"}
+class _Coil(Strategy):
+    name = "coil_like"
+    direction = Direction.SHORT
+
+    def evaluate(self, ctx):          # not called: these tests finalize directly
+        return None
+
+
+class _Fade(Strategy):
+    name = "fade_like"
+    direction = Direction.SHORT
+
+    def evaluate(self, ctx):
+        return None
+
+
+def _ctx(symbol, ltp, df):
+    return SetupContext(
+        symbol=symbol, ltp=ltp, now=dt.datetime(2026, 9, 23, 11, 49), df=df, df_15m=None,
+        gain_pct=12.0, day_high=float(df["high"].max()), open_price=float(df.iloc[0]["open"]),
+        atr=F.compute_atr(df), vwap_sd=F.compute_vwap_sd(df.iloc[:-1]), slope_fast=0.0,
+        slope_slow=0.0, is_decaying=False, vol_z=0.0, profile=None, profile_rejection=False,
+        upper_circuit=0.0, lower_circuit=0.0, spread_pct=0.0, is_circuit_hitter=False,
+    )
+
+
+def _hold_signal(trigger):
+    return Signal(
+        pattern="TOP_COIL_BREAKDOWN", stop_reference=218.0, trigger_price=trigger,
+        exit=ExitPlan(profile=ExitProfile.EOD_HOLD, rsi_cover=RsiCover()),
+        rearm_window=dt.timedelta(minutes=15),
+        extra={"coil_high": 218.0}, ml_features={"coil_high": 218.0},
+    )
 
 
 @pytest.fixture
@@ -142,15 +177,15 @@ def analyzer(monkeypatch):
     monkeypatch.setattr(an_mod, "log_signal", lambda *a, **k: signals.append(a[0]))
     a = FyersAnalyzer.__new__(FyersAnalyzer)
     a.market_context = _Ctx()
-    a._topcoil_episodes = {}
+    a._episodes = {}
     a.ml, a.signals = ml, signals
     return a
 
 
 def test_a_re_arm_reuses_the_setups_observation(analyzer):
     df = _frame()
-    first = analyzer._finalize_signal("NSE:JAYKAY-EQ", 214.0, df, "TOP_COIL_BREAKDOWN", 0.0, "", _meta(213.59))
-    again = analyzer._finalize_signal("NSE:JAYKAY-EQ", 216.0, df, "TOP_COIL_BREAKDOWN", 0.0, "", _meta(216.06))
+    first = analyzer._finalize_signal(_Coil(), _hold_signal(213.59), _ctx("NSE:JAYKAY-EQ", 214.0, df))
+    again = analyzer._finalize_signal(_Coil(), _hold_signal(216.06), _ctx("NSE:JAYKAY-EQ", 216.0, df))
     assert len(analyzer.ml.logged) == 1 and len(analyzer.signals) == 1
     assert again["obs_id"] == first["obs_id"], "the trade must label the setup's one row"
     # ...and the row carries the trigger the engine is actually watching now
@@ -159,26 +194,45 @@ def test_a_re_arm_reuses_the_setups_observation(analyzer):
 
 def test_a_setup_after_the_gates_window_is_a_new_observation(analyzer):
     df = _frame()
-    analyzer._finalize_signal("NSE:JAYKAY-EQ", 214.0, df, "TOP_COIL_BREAKDOWN", 0.0, "", _meta(213.59))
-    obs, seen = analyzer._topcoil_episodes["NSE:JAYKAY-EQ"]
-    analyzer._topcoil_episodes["NSE:JAYKAY-EQ"] = (obs, seen - dt.timedelta(minutes=16))
-    analyzer._finalize_signal("NSE:JAYKAY-EQ", 214.7, df, "TOP_COIL_BREAKDOWN", 0.0, "", _meta(214.68))
+    analyzer._finalize_signal(_Coil(), _hold_signal(213.59), _ctx("NSE:JAYKAY-EQ", 214.0, df))
+    key = ("coil_like", "NSE:JAYKAY-EQ")
+    obs, seen = analyzer._episodes[key]
+    analyzer._episodes[key] = (obs, seen - dt.timedelta(minutes=16))
+    analyzer._finalize_signal(_Coil(), _hold_signal(214.68), _ctx("NSE:JAYKAY-EQ", 214.7, df))
+    assert len(analyzer.ml.logged) == 2
+
+
+def test_episodes_are_tracked_per_strategy(analyzer):
+    """Two strategies arming on one symbol are two setups, not a re-arm."""
+
+    class _Other(_Coil):
+        name = "other_coil"
+
+    df = _frame()
+    analyzer._finalize_signal(_Coil(), _hold_signal(213.59), _ctx("NSE:X-EQ", 214.0, df))
+    analyzer._finalize_signal(_Other(), _hold_signal(213.59), _ctx("NSE:X-EQ", 214.0, df))
     assert len(analyzer.ml.logged) == 2
 
 
 def test_top_coil_rows_carry_their_levels_and_no_vwap_target(analyzer):
-    analyzer._finalize_signal("NSE:KSCL-EQ", 806.0, _frame(), "TOP_COIL_BREAKDOWN", 0.0, "", _meta(803.2))
+    analyzer._finalize_signal(_Coil(), _hold_signal(203.2), _ctx("NSE:KSCL-EQ", 206.0, _frame()))
     f = analyzer.ml.logged[0]
-    assert f["exit_profile"] == "EOD_HOLD" and f["trigger_price"] == 803.2
+    assert f["exit_profile"] == "EOD_HOLD" and f["trigger_price"] == 203.2
     assert f["coil_high"] == 218.0 and f["armed_at"]
     assert f["tp_price"] is None
+    assert f["exit_params"]["rsi_cover"]["threshold"] == 40.0, (
+        "the ghost audit grades the RSI cover from this, not from global config"
+    )
+    assert f["strategy"] == "coil_like"
 
 
 def test_other_signals_are_untouched(analyzer):
-    """BackToVWAPShort signals are logged every time and keep their VWAP target."""
+    """DEFAULT-exit signals without a re-arm window are logged every time and
+    keep their VWAP target."""
     df = _frame()
+    fade = Signal(pattern="SHOOTING_STAR", stop_reference=float(df["high"].max()))
     for _ in range(2):
-        analyzer._finalize_signal("NSE:X-EQ", 214.0, df, "SHOOTING_STAR", 0.0, "", {})
+        analyzer._finalize_signal(_Fade(), fade, _ctx("NSE:X-EQ", 214.0, df))
     assert len(analyzer.ml.logged) == 2
     assert analyzer.ml.logged[0]["tp_price"] is not None
     assert "exit_profile" not in analyzer.ml.logged[0]

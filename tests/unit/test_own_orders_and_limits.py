@@ -8,14 +8,10 @@ All three showed up in the 7-10 Sep 2026 sessions:
     against the stop's id alone. Its own exit order was indistinguishable from
     the operator's.
   * 54 leverage lookups failed, all HTTP 429, on a `requests.post` that never
-    took a rate-limit token.
-  * The depth call runs once per candidate, concurrently across a scan, and was
-    likewise unmetered — so the limiter's HIGH-priority reserve was protecting a
-    budget that had already been spent behind its back.
+    took a rate-limit token. (Budget metering is now covered by test_transport.)
 """
 from __future__ import annotations
 
-import ast
 import pathlib
 
 SRC = pathlib.Path(__file__).resolve().parents[2] / "src" / "shortcircuit"
@@ -29,7 +25,7 @@ def test_every_placed_order_id_is_remembered():
     It has to be written on the success path of place_order, which every order
     in the process goes through.
     """
-    src = (SRC / "broker" / "fyers_broker_interface.py").read_text()
+    src = (SRC / "broker" / "fyers_broker_interface.py").read_text(encoding="utf-8")
     assert "self.bot_order_ids: set[str] = set()" in src, "the set must exist"
 
     ok_branch = src.index("if isinstance(response, dict) and response.get('s') == 'ok':")
@@ -42,7 +38,7 @@ def test_every_placed_order_id_is_remembered():
 
 
 def test_override_detection_consults_the_bot_order_set():
-    src = (SRC / "execution" / "order_manager.py").read_text()
+    src = (SRC / "execution" / "order_manager.py").read_text(encoding="utf-8")
     start = src.index("# Manual-override detection")
     end = src.index("manual_override_detected and not pos.get('manual_override')")
     block = src[start:end]
@@ -55,7 +51,7 @@ def test_override_detection_consults_the_bot_order_set():
 
 def test_an_operator_stop_drag_is_still_an_override():
     """The fix must not disarm the detector — rule 2 has to survive."""
-    src = (SRC / "execution" / "order_manager.py").read_text()
+    src = (SRC / "execution" / "order_manager.py").read_text(encoding="utf-8")
     start = src.index("# Manual-override detection")
     end = src.index("manual_override_detected and not pos.get('manual_override')")
     block = src[start:end]
@@ -66,70 +62,7 @@ def test_an_operator_stop_drag_is_still_an_override():
 
 
 # ── nothing may spend the broker's budget without telling the limiter ────────
-
-def _calls_in(path: pathlib.Path, attr: str) -> list[int]:
-    """Line numbers of every `<something>.<attr>(...)` call in the file."""
-    tree = ast.parse(path.read_text())
-    return [
-        node.lineno
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and node.func.attr == attr
-    ]
-
-
-def _acquires_within(path: pathlib.Path, lineno: int, window: int = 12) -> bool:
-    lines = path.read_text().splitlines()
-    before = lines[max(0, lineno - window - 1):lineno]
-    return any("rest_limiter.acquire" in ln for ln in before)
-
-
-def test_the_5hz_position_check_is_metered():
-    """
-    Runs from the focus loop on every websocket cache miss. Unmetered, one open
-    position could outspend the entire per-second budget on its own.
-    """
-    path = SRC / "execution" / "focus_engine.py"
-    for lineno in _calls_in(path, "positions"):
-        assert _acquires_within(path, lineno), (
-            f"focus_engine.py:{lineno} calls positions() without a token"
-        )
-
-
-def test_the_per_candidate_depth_call_is_metered():
-    path = SRC / "execution" / "analyzer.py"
-    for lineno in _calls_in(path, "depth"):
-        assert _acquires_within(path, lineno), (
-            f"analyzer.py:{lineno} calls depth() without a token; a scan fires "
-            f"one of these per candidate, concurrently"
-        )
-
-
-def test_the_trade_manager_position_reads_are_metered():
-    path = SRC / "execution" / "trade_manager.py"
-    for lineno in _calls_in(path, "positions"):
-        assert _acquires_within(path, lineno), (
-            f"trade_manager.py:{lineno} calls positions() without a token"
-        )
-
-
-def test_the_leverage_lookup_is_metered():
-    """
-    A bare requests.post, so it bypasses the SDK entirely — but it spends the
-    same account-wide budget. All 54 of its failures over 7-10 Sep were 429s.
-    """
-    path = SRC / "broker" / "fyers_broker_interface.py"
-    src = path.read_text()
-    post = src.index('requests.post(f"{base}/multiorder/margin"')
-    preceding = src[max(0, post - 500):post]
-    assert "rest_limiter.acquire" in preceding
-
-
-def test_the_adoption_orderbook_read_is_metered():
-    """Runs while placing an emergency stop — the worst moment to be throttled."""
-    path = SRC / "state" / "reconciliation.py"
-    src = path.read_text()
-    call = src.index("asyncio.to_thread(client.orderbook)")
-    preceding = src[max(0, call - 300):call]
-    assert "rest_limiter.acquire" in preceding
+#
+# These used to check, call site by call site, that a `rest_limiter.acquire`
+# preceded each SDK call. About twenty sites never had one. Metering now lives in
+# the transport, so the guarantee is structural; see tests/unit/test_transport.py.

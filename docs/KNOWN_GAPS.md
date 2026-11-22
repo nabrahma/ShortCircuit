@@ -10,7 +10,6 @@ Measured 2026-08-08, see [`evidence/coverage-by-package.txt`](evidence/coverage-
 | Module | Coverage | Status |
 |---|---|---|
 | `market_utils.py` | 100% | Complete |
-| `strategy/back_to_vwap.py` | 100% | Complete, statements and branches |
 | `strategy/htf_confluence.py` | 100% | Complete, statements and branches |
 | `strategy/market_context.py` | 97% | Complete |
 | `rest_limiter.py` | 91% | Complete |
@@ -21,10 +20,10 @@ Measured 2026-08-08, see [`evidence/coverage-by-package.txt`](evidence/coverage-
 
 **`strategy/` package total: 86%**, which meets the PRD floor.
 
-The three previously untested strategy modules are now covered. `back_to_vwap.py`
-is tested as a rejection table: one golden input passes all six gates, and every
-other case perturbs a single variable and asserts rejection, so a gate that stops
-rejecting fails exactly one named row.
+The three previously untested strategy modules are now covered. Strategies
+themselves have since moved out of the engine into private plug-ins
+(`strategies/`, git-ignored), which carry their own tests; the figures above
+predate that move.
 
 Two findings came out of writing them, both recorded rather than changed, because
 fixing either means editing `strategy/`:

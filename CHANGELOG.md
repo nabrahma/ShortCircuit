@@ -7,6 +7,14 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Strategy plug-ins** (`ADR-012`). `strategy/sdk.py` defines the contract,
+  `strategy/registry.py` discovers and loads plug-ins from the git-ignored
+  `strategies/` directory, and `strategy/examples/` ships a working example.
+  Guide: `docs/STRATEGIES.md`.
+- **Metered transport** (`ADR-013`). Every Fyers SDK request is charged to the
+  rate limiter inside the HTTP layer, at a priority derived from its endpoint,
+  and a broker 429 pauses background traffic for a cooldown.
+- `strategy` and `exit_params` columns on ML observations.
 - Scanner-level MIS leverage screen. Fyers grants either 4-5x or exactly 1.0x
   (which means intraday margin is refused), so symbols below the floor are
   dropped before any history is fetched. The screen fails open: an unknown
@@ -14,6 +22,29 @@ this project follows [Semantic Versioning](https://semver.org/).
 - `ADR-011`, restoring the take-profit as a scale-out and superseding `ADR-009`.
 
 ### Changed
+
+- **The analyzer is strategy-agnostic.** The hard-wired `BackToVWAPShort` /
+  `TopCoilShort` detectors, their `BACKTOVWAP_ENABLED` / `TOPCOIL_ENABLED`
+  switches and their `STRATEGY_*` / `TOPCOIL_*` thresholds left the engine for
+  private plug-ins. Verified behaviour-preserving against a golden master.
+- The RSI relief-rally cover reads its parameters from the position's exit plan
+  rather than global config, in the live loop and in the ghost audit.
+- The test suite runs on Windows: asyncio's loopback socketpair is allowed past
+  the no-network guard, and source-reading tests decode UTF-8 explicitly.
+
+### Fixed
+
+- **Broker lockouts from the hard-stop monitor.** It fetched the full orderbook
+  on every 5 Hz focus tick, unmetered — ~280 requests/min against a 200/min
+  limit — which throttled the account after entries and abandoned exits on
+  5, 7 and 13 Oct. Now single-flight at a 2s minimum interval.
+- About twenty REST call sites that bypassed the rate limiter, including the
+  EOD square-off loop, which sent cancels and exits back-to-back.
+- A short setup could be executed as a buy after `/mode buy`: the analyzer never
+  checked direction. Strategies of the other direction are now skipped.
+- `test_brain_isolation` passed vacuously under the src/ layout (every internal
+  import's top-level package is `shortcircuit`); it now checks each component.
+- Windows console logging failed on emoji under a legacy code page.
 
 - **Exit policy.** `TP_MODE` now selects between `'SCALE'` (default: half at the
   midpoint, remainder to the VWAP target, stop to breakeven once the partial

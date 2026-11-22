@@ -9,7 +9,6 @@ import time
 from shortcircuit.broker.fyers_connect import ASYNC_RETRIED_TIMEOUT
 from shortcircuit.state.database import DatabaseManager
 from shortcircuit.broker.fyers_broker_interface import FyersBrokerInterface
-from shortcircuit.broker.rest_limiter import rest_limiter, Priority
 
 logger = logging.getLogger(__name__)
 FORCE_REST_SYNC_INTERVAL = 300  # 5 minutes
@@ -512,7 +511,6 @@ class ReconciliationEngine:
             client = getattr(self.broker, 'rest_client', None) or getattr(self.broker, 'fyers', None)
             if client is None:
                 return None
-            await rest_limiter.acquire_async(priority=Priority.HIGH)
             book = await asyncio.to_thread(client.orderbook)
             orders = (book or {}).get('orderBook') or []
         except Exception as exc:

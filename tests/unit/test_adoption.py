@@ -188,10 +188,10 @@ def test_broker_tick_lookup_caches_and_falls_back():
             calls.append(data["symbol"])
             return {"d": {data["symbol"]: {"tick_Size": 0.1, "ltp": 2840}}}
 
-    stub = types.SimpleNamespace(
-        rest_client=Client(),
-        _rate_limit_wait=lambda *a, **k: asyncio.sleep(0),
-    )
+    async def _prepay(fn, priority):
+        return fn
+
+    stub = types.SimpleNamespace(rest_client=Client(), _prepay=_prepay)
     get_tick = FyersBrokerInterface.get_tick_size.__get__(stub, FyersBrokerInterface)
 
     assert asyncio.run(get_tick("NSE:TIINDIA-EQ")) == 0.1
@@ -213,10 +213,10 @@ def test_tick_lookup_returns_none_rather_than_a_wrong_guess():
         def depth(self, data=None):
             raise ConnectionError("depth unavailable")
 
-    stub = types.SimpleNamespace(
-        rest_client=Broken(),
-        _rate_limit_wait=lambda *a, **k: asyncio.sleep(0),
-    )
+    async def _prepay(fn, priority):
+        return fn
+
+    stub = types.SimpleNamespace(rest_client=Broken(), _prepay=_prepay)
     get_tick = FyersBrokerInterface.get_tick_size.__get__(stub, FyersBrokerInterface)
     assert asyncio.run(get_tick("NSE:X-EQ")) is None
 
@@ -231,9 +231,9 @@ def test_a_missing_tick_field_is_not_treated_as_a_value():
         def depth(self, data=None):
             return {"d": {data["symbol"]: {"ltp": 100}}}
 
-    stub = types.SimpleNamespace(
-        rest_client=NoTick(),
-        _rate_limit_wait=lambda *a, **k: asyncio.sleep(0),
-    )
+    async def _prepay(fn, priority):
+        return fn
+
+    stub = types.SimpleNamespace(rest_client=NoTick(), _prepay=_prepay)
     get_tick = FyersBrokerInterface.get_tick_size.__get__(stub, FyersBrokerInterface)
     assert asyncio.run(get_tick("NSE:X-EQ")) is None

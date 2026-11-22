@@ -4,17 +4,34 @@ import threading
 import datetime
 import asyncio
 import pytz
+from typing import Optional
 
 from shortcircuit.broker.fyers_connect import FyersConnect
 from shortcircuit import config
 from shortcircuit.strategy import features as F
+from shortcircuit.strategy.sdk import RsiCover
 from shortcircuit.execution.order_manager import OrderManager
 
-from shortcircuit.broker.rest_limiter import rest_limiter, Priority
 from shortcircuit.observability.gate_result_logger import get_gate_result_logger
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("FocusEngine")
+
+# Minimum spacing between hard-stop orderbook checks from the focus loop.
+# See FocusEngine._hard_stop_poll_due for why this is not every tick.
+HARD_STOP_POLL_INTERVAL_S = 2.0
+
+
+def rsi_cover_of(trade: dict) -> Optional[RsiCover]:
+    """The RSI relief-rally cover a position's strategy asked for, if any."""
+    params = (trade.get('exit_params') or {}).get('rsi_cover')
+    if not params:
+        return None
+    try:
+        return RsiCover(**params)
+    except TypeError:
+        logger.error("[RSI-TP] malformed rsi_cover %r — rule disabled for this trade", params)
+        return None
 
 
 def target_reached(ltp: float, level, direction: str = 'SHORT') -> bool:
@@ -647,7 +664,6 @@ class FocusEngine:
         """
         try:
             logger.info("[RECOVERY] Scanning for orphaned trades...")
-            rest_limiter.acquire(priority=Priority.HIGH)
             positions = self.fyers.positions()
 
             if not isinstance(positions, dict) or 'netPositions' not in positions:
@@ -683,7 +699,6 @@ class FocusEngine:
                 is_short = qty < 0
                 sl_price = entry_price * (1.01 if is_short else 0.99)  # conservative default
                 try:
-                    rest_limiter.acquire(priority=Priority.HIGH)
                     orders = self.fyers.orderbook()
                     for o in (orders or {}).get('orderBook', []):
                         if o.get('symbol') != symbol:
@@ -729,8 +744,10 @@ class FocusEngine:
 
     def _rsi_take_profit_due(self, symbol: str, t: dict):
         """
-        The operator's relief-rally exit for EOD_HOLD shorts: once the trade is in
-        profit, cover when the 1-minute RSI(14) closes below the threshold.
+        The relief-rally exit for EOD_HOLD shorts: once the trade is in profit,
+        cover when the 1-minute RSI closes below the threshold. Its parameters are
+        the strategy's (ExitPlan.rsi_cover), carried on the position; a position
+        without them never takes this exit.
 
         Returns the RSI reading when the exit should fire, else None. Evaluated once
         per COMPLETED 1-minute bar — a forming bar's RSI swings on every tick and
@@ -739,7 +756,8 @@ class FocusEngine:
         too few candles for the RSI to have warmed up) leaves the position on its
         stop and the 15:10 square-off, exactly as before the rule existed.
         """
-        if not getattr(config, 'TOPCOIL_RSI_TP_ENABLED', False):
+        rsi_cover = rsi_cover_of(t)
+        if rsi_cover is None:
             return None
         if t.get('exit_profile') != 'EOD_HOLD' or t.get('direction', 'SHORT') != 'SHORT':
             return None
@@ -761,7 +779,7 @@ class FocusEngine:
 
         now_minute = int(time.time() // 60 * 60)
         done = [c for c in candles if int(c.epoch) < now_minute]    # drop the forming bar
-        if len(done) < int(getattr(config, 'TOPCOIL_RSI_TP_MIN_CANDLES', 30)):
+        if len(done) < rsi_cover.min_candles:
             return None
         last_epoch = int(done[-1].epoch)
         if t.get('_rsi_checked_epoch') == last_epoch:
@@ -770,16 +788,13 @@ class FocusEngine:
 
         entry_minute = int(t.get('entry_minute') or 0)
         bars_after_entry = sum(1 for c in done if int(c.epoch) >= entry_minute) - 1
-        if bars_after_entry < int(getattr(config, 'TOPCOIL_RSI_TP_SKIP_MINUTES', 5)):
+        if bars_after_entry < rsi_cover.skip_minutes:
             return None
         if not float(done[-1].close) < float(t.get('entry') or 0):
             return None                           # not in profit: not a take-profit
 
-        rsi = F.compute_rsi_wilder(
-            [c.close for c in done], int(getattr(config, 'TOPCOIL_RSI_TP_PERIOD', 14))
-        )
-        threshold = float(getattr(config, 'TOPCOIL_RSI_TP_THRESHOLD', 40.0))
-        if rsi == rsi and rsi < threshold:        # rsi == rsi rejects NaN
+        rsi = F.compute_rsi_wilder([c.close for c in done], rsi_cover.period)
+        if rsi == rsi and rsi < rsi_cover.threshold:   # rsi == rsi rejects NaN
             return rsi
         return None
 
@@ -1048,6 +1063,7 @@ class FocusEngine:
             # Read by the RSI take-profit: which exit rules apply, and from which
             # 1-minute bar the position has existed.
             'exit_profile':    exit_profile,
+            'exit_params':     position_data.get('exit_params'),
             'entry_minute':    int(time.time() // 60 * 60),
         }
         
@@ -1121,13 +1137,10 @@ class FocusEngine:
             except Exception as e:
                 logger.debug(f"[SAFETY] WS position cache read failed: {e}")
 
-        # Authoritative path: REST.
-        # Through the limiter: this runs from the 5Hz focus loop on every cache
-        # miss, and going around it spent budget the limiter could not see — so
-        # the HIGH-priority reserve was guarding a number that was already wrong
-        # by the time a stop-loss placement needed it.
+        # Authoritative path: REST, metered at HIGH by the transport. This runs
+        # from the 5Hz focus loop on every cache miss; the loop's own back-off
+        # keeps it to one read every 5-30s.
         try:
-            rest_limiter.acquire(priority=Priority.HIGH)
             positions = self.fyers.positions()
             if not isinstance(positions, dict) or positions.get('s') != 'ok' \
                     or 'netPositions' not in positions:
@@ -1144,6 +1157,28 @@ class FocusEngine:
             logger.error(f"[SAFETY] Broker position check failed: {e}")
             return {'_api_failed': True}
 
+    def _hard_stop_poll_due(self) -> bool:
+        """
+        Whether the focus loop may dispatch another hard-stop check now.
+
+        Each check reads the full orderbook over REST. Dispatched on every 5 Hz
+        tick, fire-and-forget, it was ~280 requests a minute against Fyers'
+        200/min limit: on 2026-09-23 and 2026-10-13 the account was throttled
+        within a minute of every entry, and the throttle also failed the reads
+        that verify exits. One check in flight, at most every
+        HARD_STOP_POLL_INTERVAL_S, is ~30 a minute. The stop itself rests at the
+        exchange, so this paces only how soon the bot notices a fill — and every
+        bot exit re-verifies the position at the broker before acting.
+        """
+        pending = getattr(self, '_hard_stop_future', None)
+        if pending is not None and not pending.done():
+            return False
+        now = time.monotonic()
+        if now - getattr(self, '_last_hard_stop_poll', float('-inf')) < HARD_STOP_POLL_INTERVAL_S:
+            return False
+        self._last_hard_stop_poll = now
+        return True
+
     def focus_loop(self):
         while self.is_running and self.active_trade:
             try:
@@ -1157,9 +1192,10 @@ class FocusEngine:
                          self.stop_focus("CLOSED_EXTERNALLY")
                          return
                     
-                    # monitor_hard_stop_status is async — dispatch correctly from sync thread
-                    if self._event_loop:
-                        asyncio.run_coroutine_threadsafe(
+                    # monitor_hard_stop_status is async — dispatch from this thread,
+                    # but at most one in flight and no more often than the interval.
+                    if self._event_loop and self._hard_stop_poll_due():
+                        self._hard_stop_future = asyncio.run_coroutine_threadsafe(
                             self.order_manager.monitor_hard_stop_status(symbol),
                             self._event_loop
                         )
@@ -1392,7 +1428,7 @@ class FocusEngine:
                         "🎯 [RSI-TP] %s 1-min RSI %.1f < %.0f while in profit "
                         "(entry ₹%.2f, ltp ₹%.2f) — covering %s shares",
                         symbol, _rsi_hit,
-                        float(getattr(config, 'TOPCOIL_RSI_TP_THRESHOLD', 40.0)),
+                        rsi_cover_of(t).threshold,
                         t['entry'], ltp, t['remaining_qty'],
                     )
                     if self.order_manager and self._event_loop:
@@ -1551,7 +1587,6 @@ class FocusEngine:
         Used to remove Stop Loss orders after exit.
         """
         try:
-            rest_limiter.acquire(priority=Priority.HIGH)
             orderbook = self.fyers.orderbook()
             if 'orderBook' in orderbook:
                 count = 0

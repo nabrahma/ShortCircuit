@@ -180,3 +180,61 @@ a reader more about the real behaviour of the pipeline anyway.
 
 **Cost.** A reader cannot tell whether the strategy works. That is intentional.
 See [`DISCLOSURE.md`](DISCLOSURE.md).
+
+---
+
+## ADR-012 — Strategies are plug-ins, and live outside the repository
+
+**Decision.** The engine contains no strategy. A strategy implements the
+contract in `strategy/sdk.py` (`Strategy.evaluate(SetupContext) -> Signal | None`)
+and is discovered by `strategy/registry.py` from the git-ignored `strategies/`
+directory, or from `SHORTCIRCUIT_STRATEGY_PATH`. The active set is chosen by
+`SHORTCIRCUIT_STRATEGIES` or `ACTIVE` in `strategies/__init__.py`, loaded at
+startup, and asked in priority order; the first `Signal` wins.
+
+**Why.** Before this, the analyzer constructed two detectors by name and carried
+their special cases inline — `if is_top_coil:` decided the stop reference, the
+take-profit multiple, the ML fields and the re-arm handling — and their
+thresholds lived in the public `config.py`. Adding or testing a strategy meant
+editing the engine, and publishing the engine meant publishing the strategy.
+Now a strategy declares its stop reference, trigger, exit plan and re-arm window
+on the `Signal`, and the engine executes whatever it is given.
+
+The move was verified as behaviour-preserving with a golden master: the
+pre-refactor analyzer's outputs (signal dicts, gate verdicts, ML rows, re-arm
+updates, signal-log calls) across seven scenarios were captured and reproduced
+exactly through the plug-in pipeline, differing only in the two fields added on
+purpose (`strategy`, `exit_params`).
+
+**Consequences.** Exit parameters ride on the position and the ML row
+(`exit_params`), so the live loop and the ghost audit apply each strategy's own
+rule. A strategy whose direction differs from the engine's runtime
+`TRADE_DIRECTION` is skipped rather than inverted. A strategy that raises, or
+returns unusable levels, counts as no setup.
+
+**Cost.** LONG strategies are refused until the validation gate supports them,
+and the scan universe is still one engine-wide filter rather than per strategy.
+Strategies removed from the tree remain in the repository's history.
+
+---
+
+## ADR-013 — Every broker request is metered at the transport
+
+**Decision.** The rate limiter is charged inside the HTTP layer the Fyers SDK
+uses (`broker/transport.py`), with priority derived from the endpoint — orders,
+positions and the orderbook are HIGH; data, funds and profile NORMAL. Call sites
+never take tokens; `transport.prepay` moves the wait out of a deadline where one
+applies. A 429 from the broker opens a cooldown that pauses NORMAL traffic.
+
+**Why.** Metering used to be each caller's job, and about twenty call sites did
+not do it. The worst was the hard-stop monitor, dispatched on every 5 Hz focus
+tick and fetching the full orderbook each time: ~280 requests a minute against a
+200/min limit. On 2026-09-23 and 2026-10-13 the account was throttled within a
+minute of an entry, and the throttle also failed the position reads that verify
+an exit, so exits were abandoned. That monitor is now single-flight at a 2s
+minimum interval; the transport makes "every request is counted" structural.
+
+**Cost.** A request waits for a token on the thread that sends it unless it is
+prepaid. Two tests in `tests/unit/test_transport.py` pin the invariant: no module
+outside the transport takes tokens, and none reaches the API through bare
+`requests`.

@@ -1,12 +1,12 @@
 # ShortCircuit — Architecture Reference
 
-**Version:** BackToVWAPShort Doctrine | **Last Updated:** 2026-06-03
+**Version:** Plug-in engine | **Last Updated:** 2026-11-22
 
 ---
 
 ## SECTION 1 — System Overview
 
-ShortCircuit is a fully automated, event-driven algorithmic trading bot for NSE (Indian National Stock Exchange) equities, operating intraday-only (all positions closed by 15:10 IST). It implements a single production strategy — **BackToVWAPShort** — a failed-auction mean-reversion system that shorts overextended stocks when the upside auction fails and structure breaks for reversion toward VWAP.
+ShortCircuit is a fully automated, event-driven algorithmic trading bot for NSE (Indian National Stock Exchange) equities, operating intraday-only (all positions closed by 15:10 IST). Strategies are plug-ins (Section 3): the engine supplies data, risk gates, execution, exits and audit, and asks the active strategies whether a candidate is a setup.
 
 The product thesis:
 
@@ -22,13 +22,16 @@ The concurrency model is a **single asyncio event loop** with a `TaskGroup` laun
 
 ShortCircuit is split into two physically isolated layers:
 
-### The Brain (`strategy/`)
+### The Brain (`strategy/` and the strategy plug-ins)
 
-All trading intelligence is sealed inside the `strategy/` directory. The Brain knows nothing about brokers, websockets, or Telegram. It only knows math, risk, and logic.
+All trading intelligence is sealed away from the runtime: the toolkit in
+`strategy/`, and the strategies themselves in plug-ins. The Brain knows nothing about brokers, websockets, or Telegram. It only knows math, risk, and logic.
 
 | File | Responsibility |
 |---|---|
-| `strategy/back_to_vwap.py` | Single unified strategy: 6 hard gates, confidence tagging |
+| `strategy/sdk.py` | The plug-in contract: `Strategy`, `SetupContext`, `Signal`, `ExitPlan` |
+| `strategy/registry.py` | Plug-in discovery, selection and fail-fast loading |
+| `strategy/examples/` | A complete example strategy |
 | `strategy/features.py` | Stateless math library: VWAP SD, swing-based RSI divergence, volume fade, ATR, pattern detection |
 | `strategy/market_profile.py` | Dalton Value Area algorithm: VAH, VAL, POC computation |
 | `strategy/market_context.py` | Nifty regime detection, morning range, circuit blacklist, volume z-score |
@@ -65,40 +68,32 @@ The rest of the repository fetches data, asks the Brain for decisions, and pulls
 
 ---
 
-## SECTION 3 — Strategy: BackToVWAPShort
+## SECTION 3 — Strategies (plug-ins)
 
-### Doctrine
+The engine contains no strategy. A strategy is a plug-in implementing the
+contract in `strategy/sdk.py`:
 
-Every live short must satisfy one sentence:
+```python
+class Strategy(ABC):
+    name: ClassVar[str]                          # unique, stable
+    direction: ClassVar[Direction]               # SHORT (LONG refused for now)
+    requires_htf_confirmation: ClassVar[bool]    # run G9 on its signals
 
-> "Shorted because the stock was materially stretched above VWAP and value, the upside auction failed, exhaustion was confirmed, and the trigger low broke for reversion toward VWAP."
+    def evaluate(self, ctx: SetupContext) -> Signal | None: ...
+```
 
-### 6 Hard Gates (ALL must pass)
+`SetupContext` is everything the engine computed for the candidate (enriched
+1-minute frame, gain, ATR, VWAP stretch and slopes, profile, spread, circuit
+state). `Signal` is the answer: a stop reference, an optional entry trigger, an
+`ExitPlan` (DEFAULT ladder or EOD_HOLD, with its parameters), an optional re-arm
+window, quality scores, and strategy-specific levels.
 
-| Gate | Name | Implementation | Threshold |
-|---|---|---|---|
-| C1 | VWAP Stretch | `vwap_sd >= STRATEGY_VWAP_SD_FLOOR` | see `config.py` |
-| C2 | Value Location | Price above VAH, or profile rejection confirmed | VAH from Dalton algorithm |
-| C3 | Failed Auction | Profile rejection OR VAH Look-Above-And-Fail | No narrowing-highs proxy |
-| C4 | Divergence | Swing-based RSI divergence OR price lower-high | Real swing comparison |
-| C5 | Volume Fade | `vol_fade_ratio <= STRATEGY_VOL_FADE_MAX_RATIO` | Absolute, no relaxation |
-| C6 | Momentum Decay | `slope_fast < slope_slow * DECAY_RATIO` | Genuine velocity decay |
-
-### Forbidden Behaviors
-
-- No gate can be bypassed because another feature looks strong.
-- No volume climax ("Spear of Exhaustion") can override the volume-fade gate.
-- No adaptive relaxation of thresholds based on decay state.
-- No trivial flat-slope OR clause in momentum decay.
-- Confidence scoring is informational only — never influences gate decisions.
-
-### Confidence Tiers (Post-Gate, Informational Only)
-
-| Tier | Criteria |
-|---|---|
-| EXTREME | Highest stretch band, multiple confluences |
-| HIGH | Elevated stretch band, or several confluences |
-| MEDIUM | All 6 gates passed (default) |
+`strategy/registry.py` discovers plug-ins from `strategy/examples/` and from the
+git-ignored `strategies/` directory at the repository root (or
+`SHORTCIRCUIT_STRATEGY_PATH`), and loads the active set — `SHORTCIRCUIT_STRATEGIES`
+or `ACTIVE` in `strategies/__init__.py` — at startup, failing fast on any name it
+cannot honour. Active strategies are asked in priority order; the first Signal
+wins. The full guide is [STRATEGIES.md](STRATEGIES.md).
 
 ---
 
@@ -133,8 +128,8 @@ The local candle engine (`P82_LOCAL_CANDLES_ENABLED`) builds 1-minute bars from 
 ```text
 Scanner (finds gainers)
   → Analyzer (data fetch, enrichment, pre-filters)
-    → BackToVWAPShort.evaluate() (6 hard gates)
-      → G9: HTF Confluence (fail-closed)
+    → Active strategies, in priority order (first Signal wins)
+      → G9: HTF Confluence (fail-closed; if the strategy requires it)
         → G8: Signal Manager (cooldown, daily cap)
           → Signal finalized (SL calc, CSV/ML log)
             → Focus Engine: Pending validation
@@ -171,7 +166,7 @@ All context and data-availability checks are **fail-closed**. If the system cann
 | `market_context.py` | No Nifty index data → `BLOCK: No index data available` |
 | `market_context.py` | Morning range unavailable → `BLOCK: Morning range unavailable` |
 | `analyzer.py` | HTF timeout → `BLOCK: Timeout` |
-| `back_to_vwap.py` | Profile unavailable → `REJECT: Market profile unavailable` |
+| `analyzer.py` | A strategy raises or returns unusable levels → treated as no setup |
 
 ---
 
@@ -383,7 +378,9 @@ ShortCircuit/
 ├── symbols.py                   Symbol constants and validation
 │
 ├── strategy/                    THE BRAIN: All logic and math
-│   ├── back_to_vwap.py          Single unified strategy (6 gates)
+│   ├── sdk.py                   Strategy plug-in contract
+│   ├── registry.py              Plug-in discovery and loading
+│   ├── examples/                Example strategy
 │   ├── features.py              VWAP, RSI, volume, ATR, patterns
 │   ├── market_profile.py        Dalton value areas (VAH/VAL/POC)
 │   ├── market_context.py        Nifty regime, morning range
@@ -400,4 +397,4 @@ ShortCircuit/
 
 ## SECTION 14 — One-Line Positioning
 
-ShortCircuit is a real-time, gate-driven, WebSocket-first NSE execution engine that converts intraday momentum exhaustion into auditable, capital-aware, broker-verified trades — using exactly one production strategy: BackToVWAPShort.
+ShortCircuit is a real-time, gate-driven, WebSocket-first NSE execution engine for Fyers that turns a strategy plug-in's setups into auditable, capital-aware, broker-verified trades.

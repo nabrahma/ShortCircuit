@@ -18,15 +18,18 @@ Two further properties matter for a live trading system:
     HIGH-priority callers draw on a reserved slice of each window that NORMAL callers
     cannot touch, and NORMAL callers stand down while a HIGH caller is waiting.
 
-  * Observability. Waits and rejections are counted, so /health can distinguish
-    "the broker is throttling us" from "our own limiter is shaping us".
+  * Back-pressure. When the broker answers 429 anyway, `note_throttled` opens a
+    cooldown during which NORMAL traffic stands down entirely. Fyers answers a
+    breach with "retry after few mins"; a scanner that keeps asking only extends
+    the lockout, and the lockout also starves the safety reads that verify exits.
+    HIGH traffic is never paused by a cooldown — a stop must still be placeable.
 
-Usage:
-    from shortcircuit.broker.rest_limiter import rest_limiter, Priority
+  * Observability. Waits, rejections and throttles are counted, so /health can
+    distinguish "the broker is throttling us" from "our own limiter is shaping us".
 
-    rest_limiter.acquire()                                   # scanner / background
-    rest_limiter.acquire(priority=Priority.HIGH)             # orders, SL, exits
-    await rest_limiter.acquire_async(priority=Priority.HIGH)  # from async code
+Call sites do not acquire tokens themselves. Every Fyers SDK request is metered
+by the transport (see `shortcircuit.broker.transport`), which classifies its
+priority from the endpoint. Acquiring here as well would charge a request twice.
 """
 
 from __future__ import annotations
@@ -84,11 +87,15 @@ class RateLimiter:
         self._cv = threading.Condition(self._lock)
         self._waiting_high = 0
 
+        # Wall-clock instant before which NORMAL traffic may not be granted.
+        self._cooldown_until = 0.0
+
         # Telemetry
         self.total_granted = 0
         self.total_wait_seconds = 0.0
         self.total_day_rejections = 0
         self.max_wait_seconds = 0.0
+        self.total_throttled = 0
 
     # internals (lock must be held)
 
@@ -170,8 +177,9 @@ class RateLimiter:
                     # NORMAL stands down while HIGH is queued, so an order never sits
                     # behind scanner traffic that happened to arrive microseconds earlier.
                     blocked_by_priority = (not is_high) and self._waiting_high > 0
+                    cooling_down = (not is_high) and now < self._cooldown_until
 
-                    if has_room and not blocked_by_priority:
+                    if has_room and not blocked_by_priority and not cooling_down:
                         self._sec_log.append(now)
                         self._min_log.append(now)
                         self._day_count += 1
@@ -184,6 +192,8 @@ class RateLimiter:
                         return True
 
                     wait_for = self._retry_after(now, priority)
+                    if cooling_down:
+                        wait_for = max(wait_for, self._cooldown_until - now)
                     if blocked_by_priority:
                         wait_for = min(wait_for if wait_for > 0 else 0.05, 0.05)
 
@@ -208,6 +218,32 @@ class RateLimiter:
         """Async wrapper — offloads the blocking wait so the event loop keeps running."""
         return await asyncio.to_thread(self.acquire, priority, timeout)
 
+    def note_throttled(self, cooldown_s: float = 30.0) -> None:
+        """
+        Record that the broker rejected a request for exceeding its rate limit.
+
+        Opens (or extends) a cooldown during which NORMAL callers are not granted.
+        Our own windows sit under the published limits, so a 429 means the broker
+        counts differently than we do — the only safe response is to back off.
+        """
+        with self._cv:
+            now = time.time()
+            entering = now >= self._cooldown_until
+            self._cooldown_until = max(self._cooldown_until, now + cooldown_s)
+            self.total_throttled += 1
+            self._cv.notify_all()
+        if entering:
+            logger.warning(
+                "[RATE] Broker returned 429 — background REST traffic paused for "
+                "%.0fs; order and safety calls continue.",
+                cooldown_s,
+            )
+
+    def cooldown_remaining(self) -> float:
+        """Seconds until NORMAL traffic resumes; 0.0 when not cooling down."""
+        with self._lock:
+            return max(0.0, self._cooldown_until - time.time())
+
     def snapshot(self) -> dict:
         """Current utilisation, for /health and diagnostics."""
         with self._lock:
@@ -224,6 +260,8 @@ class RateLimiter:
                 "wait_total_s": round(self.total_wait_seconds, 2),
                 "wait_max_s": round(self.max_wait_seconds, 3),
                 "day_rejections": self.total_day_rejections,
+                "throttled_total": self.total_throttled,
+                "cooldown_s": round(max(0.0, self._cooldown_until - now), 1),
             }
 
 

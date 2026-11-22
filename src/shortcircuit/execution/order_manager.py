@@ -26,7 +26,6 @@ from shortcircuit.broker.fyers_broker_interface import (
     OrderPlacementTimeout,
     PositionFetchError,
 )
-from shortcircuit.broker.rest_limiter import rest_limiter, Priority
 from shortcircuit.observability.ml_logger import get_ml_logger
 
 
@@ -713,7 +712,6 @@ class OrderManager:
                         await self.telegram.send_alert(f"⚠️ **ORPHAN**: {symbol} ({qty})")
 
             loop = asyncio.get_event_loop()
-            await rest_limiter.acquire_async(priority=Priority.HIGH)
             orderbook = await loop.run_in_executor(None, self.broker.rest_client.orderbook)
             if orderbook and isinstance(orderbook, dict) and orderbook.get('s') == 'ok':
                 pending = [
@@ -1060,7 +1058,7 @@ class OrderManager:
                 self.hard_stops[symbol] = sl_id
 
                 # Step 4: Register Position
-                # 'EOD_HOLD' (TopCoilShort) runs without a take-profit ladder and
+                # 'EOD_HOLD' (e.g. top_coil) runs without a take-profit ladder and
                 # without the 45-minute time stop, to the 15:10 square-off. Every
                 # exit variant that cut the trade shorter scored worse across the
                 # sweep: TP1/breakeven/TP2 at a 90-minute cap took the same entries
@@ -1079,6 +1077,10 @@ class OrderManager:
                     'stop_loss':  stop_price,
                     'obs_id':     signal.get('obs_id'),  # ML Link
                     'exit_profile': _exit_profile,
+                    # The strategy's parameters for that exit (e.g. its RSI cover),
+                    # read by the focus engine instead of global config.
+                    'exit_params': signal.get('exit_params'),
+                    'strategy':   signal.get('strategy'),
                     # G13 Targets for trade_manager monitoring
                     'tp_targets': (
                         None if _eod_hold else self.compute_take_profits(ltp, signal)
@@ -1255,7 +1257,6 @@ class OrderManager:
                     loop = asyncio.get_event_loop()
                     rest = getattr(self.broker, 'rest_client', None)
                     if rest:
-                        await rest_limiter.acquire_async(priority=Priority.HIGH)
                         ob = await loop.run_in_executor(None, rest.orderbook)
                         if isinstance(ob, dict) and ob.get('s') == 'ok':
                             for o in ob.get('orderBook', []):
@@ -1582,10 +1583,10 @@ class OrderManager:
                 return False
 
             # Get current SL order details to preserve qty if new_qty is not provided.
-            # Throttled: this used to race the partial exit it follows, and both calls
-            # landed on Fyers inside the same millisecond. The orderbook lost, came
-            # back 429, and the stop was never resized — see the 1 Sep ENGINERSIN flip.
-            await rest_limiter.acquire_async(priority=Priority.HIGH)
+            # Metered at HIGH by the transport: this used to race the partial exit
+            # it follows, and both calls landed on Fyers inside the same millisecond.
+            # The orderbook lost, came back 429, and the stop was never resized —
+            # see the 1 Sep ENGINERSIN flip.
             orderbook = await loop.run_in_executor(None, rest.orderbook)
             if not isinstance(orderbook, dict) or orderbook.get('s') != 'ok':
                 logger.error(
@@ -1639,9 +1640,9 @@ class OrderManager:
                 "stopPrice":  stop_rounded,
             }
 
-            await rest_limiter.acquire_async(priority=Priority.HIGH)
+            # Order mutation: the broker's dedicated pool, never the shared one.
             resp = await loop.run_in_executor(
-                None,
+                getattr(self.broker, '_order_executor', None),
                 lambda: rest.modify_order(data=modify_data)
             )
 
@@ -1675,7 +1676,6 @@ class OrderManager:
             rest = getattr(self.broker, 'rest_client', None)
             if not sl_id or not rest:
                 return None
-            await rest_limiter.acquire_async(priority=Priority.HIGH)
             loop = asyncio.get_event_loop()
             book = await loop.run_in_executor(None, rest.orderbook)
             if not isinstance(book, dict) or book.get('s') != 'ok':

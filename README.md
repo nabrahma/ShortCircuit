@@ -1,8 +1,9 @@
 # ShortCircuit
 
-> Live intraday NSE execution engine: WebSocket-first market data with freshness
-> tracking, sequential gate validation, broker-verified fills, capital-aware
-> sizing, and automated state reconciliation.
+> Live intraday NSE execution engine for Fyers, with plug-in strategies:
+> WebSocket-first market data with freshness tracking, sequential gate
+> validation, broker-verified fills, capital-aware sizing, and automated state
+> reconciliation. Bring a strategy; the engine does the rest.
 
 [![CI](https://github.com/nabrahma/ShortCircuit/actions/workflows/ci.yaml/badge.svg)](https://github.com/nabrahma/ShortCircuit/actions/workflows/ci.yaml)
 [![Security](https://github.com/nabrahma/ShortCircuit/actions/workflows/security.yaml/badge.svg)](https://github.com/nabrahma/ShortCircuit/actions/workflows/security.yaml)
@@ -16,14 +17,19 @@
 
 ## What this is
 
-**ShortCircuit is a live intraday NSE execution engine for detecting and trading
-momentum exhaustion.**
+**ShortCircuit is a live intraday NSE execution engine for Fyers. Strategies
+plug into it.**
 
 It is not a chart pattern script. It is not a notification bot with a broker
 wrapper bolted on. ShortCircuit is a trading system covering market data
 ingestion, microstructure filtering, sequential gate evaluation, capital-aware
 sizing, broker-side risk placement, reconciliation, audit logging, Telegram
 command and control, and parquet-based ML feedback loops.
+
+A strategy is a small class that looks at one candidate and answers one
+question: *is there a setup here, and how should it be traded?* Everything else
+— the universe, data, risk gates, orders, stops, exits, square-off, reconciliation
+and logging — is the engine's. See [Writing a strategy](#writing-a-strategy).
 
 The design premise:
 
@@ -39,27 +45,26 @@ It is built around one operating principle:
 
 ## Executive summary
 
-ShortCircuit scans thousands of NSE equity symbols during the live session and
-hunts for a specific event:
+ShortCircuit scans thousands of NSE equity symbols during the live session. Each
+candidate that clears the scanner is enriched once — session VWAP and its
+standard-deviation stretch, ATR, VWAP slopes, volume z-score, market profile,
+order-book spread and circuit state — and handed to the active strategy
+plug-ins, in priority order.
 
-**an overextended intraday mover failing at or above value while momentum buyers
-are trapped and upward auction quality is degrading.**
-
-When the setup appears, the system does not immediately trade. It promotes the
-symbol into a staged gate pipeline. The analyzer passes the data to the "Brain"
-(the `BackToVWAPShort` strategy) to approve structure, momentum, volume, profile,
-confluence, and higher-timeframe context. The focus engine then waits for a real
-structural trigger: a break of the entry level, with invalidation above the setup
-high.
+When a strategy reports a setup, the system does not immediately trade. The
+signal passes the engine's own gates (trade window, higher-timeframe
+confirmation where the strategy asks for it, cooldown and daily target), and the
+focus engine then waits for a real structural trigger: a break of the entry
+level, with invalidation above the setup high.
 
 Only after that does the order layer engage.
 
-At runtime the bot coordinates Fyers REST and WebSocket connectivity, the NSE-EQ
-scanner universe, a WebSocket-first quote cache with freshness tracking, a single
-exhaustion strategy, signal validation, a single-position capital slot,
-broker-side stop placement, an active trade monitor, Telegram control, a
-PostgreSQL audit trail, ML parquet logging, EOD reporting, and broker/DB
-reconciliation.
+At runtime the bot coordinates Fyers REST and WebSocket connectivity, a metered
+REST transport that keeps every call inside the broker's rate limits, the NSE-EQ
+scanner universe, a WebSocket-first quote cache with freshness tracking, signal
+validation, a single-position capital slot, broker-side stop placement, an
+active trade monitor, Telegram control, a PostgreSQL audit trail, ML parquet
+logging, EOD reporting, and broker/DB reconciliation.
 
 ---
 
@@ -69,17 +74,19 @@ ShortCircuit is split into two components with an **enforced dependency
 boundary**: `strategy/` imports nothing from the runtime layer, and a test
 asserts it.
 
-### The Brain (`src/shortcircuit/strategy/`)
+### The Brain (`src/shortcircuit/strategy/`, plus your plug-ins)
 
-All trading intelligence is physically sealed inside `strategy/`. It knows
-nothing about brokers, websockets, or Telegram. It only knows math, risk, and
-logic.
+All trading intelligence is sealed away from the runtime. It knows nothing about
+brokers, websockets, or Telegram. It only knows math, risk, and logic.
 
-- `strategy/back_to_vwap.py`: the single unified execution logic
+- `strategy/sdk.py`: the plug-in contract — `Strategy`, `SetupContext`, `Signal`, `ExitPlan`
+- `strategy/registry.py`: discovery and loading of plug-ins
+- `strategy/examples/`: a complete example strategy
 - `strategy/features.py`: stateless math (VWAP, RSI, volume fade, ATR)
 - `strategy/market_profile.py`: Dalton value areas (VAH/VAL/POC)
 - `strategy/market_context.py`: Nifty regime and broader trend
 - `strategy/htf_confluence.py`: higher-timeframe risk gates
+- `strategies/` at the repository root: **your** strategies, git-ignored
 
 That boundary is verified, not asserted:
 [`tests/unit/test_brain_isolation.py`](tests/unit/test_brain_isolation.py) parses
@@ -91,43 +98,42 @@ I/O library, or opens a file.
 The rest of the repository is the muscle, nervous system, and immune system. It
 fetches data, asks the Brain for decisions, and pulls the physical triggers.
 
-- `execution/analyzer.py`: the orchestrator that asks the Brain what to do
+- `execution/analyzer.py`: the orchestrator that asks the active strategies what to do
 - `execution/order_manager.py` / `broker/fyers_broker_interface.py`: the hands that execute
 - `state/reconciliation.py`: the immune system verifying local state against the broker
 
 ---
 
-## Strategy model: BackToVWAPShort
+## Writing a strategy
 
-A single strategy: **BackToVWAPShort**.
+```python
+from shortcircuit.strategy.sdk import Direction, SetupContext, Signal, Strategy
 
-It is primarily a short-side mean-reversion and exhaustion engine (it natively
-supports `/mode buy` via Telegram for inverse logic), built around three
-observations:
+class MyFade(Strategy):
+    name = "my_fade"
+    direction = Direction.SHORT
 
-1. Strong intraday gain creates unstable positioning.
-2. Momentum becomes tradable only when extension meets rejection.
-3. A signal is not an entry until price confirms structural failure.
+    def evaluate(self, ctx: SetupContext) -> Signal | None:
+        if ctx.gain_pct < 10 or ctx.vwap_sd < 3 or not ctx.is_decaying:
+            return None
+        return Signal(pattern="MY_FADE", stop_reference=ctx.day_high)
+```
 
-The bot is interested in stocks that have already moved aggressively, usually
-above VWAP and value, where late momentum participants are vulnerable. It then
-looks for evidence that the move is no longer being accepted:
+Save it as `strategies/my_fade.py`, then run it:
 
-- Intraday gain expansion
-- VWAP standard-deviation stretch
-- Value Area High or profile rejection
-- VWAP flattening or momentum decay
-- Volume fade after surge
-- Failed continuation structure
-- Higher-timeframe stall or fail-open guard
-- Candle trigger through the signal low
+```bash
+SHORTCIRCUIT_STRATEGIES=my_fade python -m shortcircuit
+```
 
-It is not "short everything that is up." It is "short only when an up-move has
-become statistically stretched, structurally rejected, and execution-confirmed."
+`strategies/` is git-ignored apart from its README, so a private strategy never
+reaches a public fork. The full guide — the context a strategy receives, exit
+plans, re-arm windows, testing, and the rules a strategy must keep — is
+[docs/STRATEGIES.md](docs/STRATEGIES.md).
 
-The mechanism behind each filter is described in
-[docs/STRATEGY.md](docs/STRATEGY.md). Tuned thresholds live in `config.py` and
-are not published, and nor is any statistic describing how the filter behaves.
+The engine currently executes SHORT strategies only; its validation gate enters
+on a break below the trigger. The contract already carries `Direction.LONG`, and
+the registry refuses a LONG plug-in rather than let it trade through short-side
+mechanics.
 
 ---
 
@@ -248,10 +254,14 @@ session, days later, in a way that looks like bad luck.
 
 ### Testing
 
-344 unit, property-based and strategy tests. Coverage is concentrated where an
-error is hardest to notice: the `strategy/` package sits at 86% overall, with
-`back_to_vwap.py` and `htf_confluence.py` at 100% on statements and branches and
-`market_context.py` at 97%. `market_profile.py` (40%) and the capital layer (75%)
+Unit, property-based and pipeline tests, all deterministic and offline: a
+fixture blocks every outbound socket, so a test that reaches for a live broker
+fails rather than placing an order. The strategy plug-in system is tested
+against throwaway strategies written in the tests, so the public suite needs
+nothing from any deployment's private strategies; those carry their own tests in
+`strategies/tests/`, which pytest collects when present. Coverage is
+concentrated where an error is hardest to notice: `htf_confluence.py` is at 100%
+on statements and branches and `market_context.py` at 97%. `market_profile.py` (40%) and the capital layer (75%)
 are both below their floors, and that is stated in
 [docs/KNOWN_GAPS.md](docs/KNOWN_GAPS.md) rather than hidden behind a global
 average.
@@ -378,25 +388,28 @@ without credentials is the build and the full test suite.
 ```text
 main.py                       Entry-point shim, so `python main.py` still works
 src/shortcircuit/
-├── config.py                 Strategy, risk, mode and infrastructure parameters
+├── config.py                 Risk, mode and infrastructure parameters
 ├── paths.py                  Repository-anchored runtime paths
 ├── runtime/                  Supervisor, market session, startup recovery
 ├── marketdata/               Scanner, symbols, session helpers
-├── broker/                   Fyers REST + WebSocket, auth, rate limiter
+├── broker/                   Fyers REST + WebSocket, auth, metered transport, rate limiter
 ├── execution/                Analyzer, focus engine, order/signal/trade managers
 ├── capital/                  Funds sync, sizing, capital slot
 ├── state/                    PostgreSQL access, reconciliation
 ├── observability/            Telegram, gate audit, ML logger
 ├── eod/                      EOD analyzer, scheduler, watchdog
 └── strategy/                 The Brain: logic and math only
-    ├── back_to_vwap.py       Single unified strategy
+    ├── sdk.py                The strategy plug-in contract
+    ├── registry.py           Plug-in discovery and loading
+    ├── examples/             A complete example strategy
     ├── features.py           VWAP, RSI, volume, ATR, patterns
     ├── market_profile.py     Dalton value areas
     ├── market_context.py     Nifty regime
     └── htf_confluence.py     Higher-timeframe gates
 
-tests/                        344 unit, property and strategy tests
-docs/                         Architecture, strategy, operations, decisions, evidence
+strategies/                   Your strategy plug-ins (git-ignored, except README)
+tests/                        Unit, property and pipeline tests
+docs/                         Architecture, strategies, operations, decisions, evidence
 deploy/                       Dockerfile and compose stacks
 scripts/                      Operational scripts
 migrations/                   PostgreSQL schema migrations
@@ -413,7 +426,11 @@ Worth stating plainly. A repo with no limitations section usually just has undoc
 - **One broker.** Fyers-specific. The broker interface is not abstracted behind a
   generic protocol.
 - **No backtester in this repository.** Historical evaluation is done separately;
-  nothing here validates the strategy against past data.
+  nothing here validates a strategy against past data.
+- **Short side only.** The validation gate and stop mechanics are short-only;
+  LONG strategies are refused at load time until they are supported.
+- **One scan universe.** The scanner's gain, volume and price filters are engine
+  config shared by every strategy, not chosen per strategy.
 - **Coverage is uneven.** Concentrated in strategy math and the capital layer;
   three strategy modules are untested, and the order and focus engines are
   covered only indirectly ([KNOWN_GAPS.md](docs/KNOWN_GAPS.md)).
@@ -427,7 +444,7 @@ Worth stating plainly. A repo with no limitations section usually just has undoc
 | Document | Contents |
 |---|---|
 | [ARCHITECTURE.md](docs/ARCHITECTURE.md) | System design and runtime model |
-| [STRATEGY.md](docs/STRATEGY.md) | Gate methodology and the quantitative work behind it |
+| [STRATEGIES.md](docs/STRATEGIES.md) | Writing, testing and running a strategy plug-in |
 | [OPERATIONS.md](docs/OPERATIONS.md) | Runbook: what to do when things fail |
 | [TESTING.md](docs/TESTING.md) | Test levels, divergence table, invariants, non-goals |
 | [DATA_MODEL.md](docs/DATA_MODEL.md) | PostgreSQL schema and parquet observation schema |

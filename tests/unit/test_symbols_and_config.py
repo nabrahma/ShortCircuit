@@ -152,10 +152,12 @@ def test_scanner_gain_band_is_ordered():
     assert config.SCANNER_GAIN_MIN_PCT < config.SCANNER_GAIN_MAX_PCT
 
 
-def test_confidence_tiers_are_ordered():
-    assert (config.STRATEGY_VWAP_SD_FLOOR
-            <= config.STRATEGY_VWAP_SD_HIGH
-            <= config.STRATEGY_VWAP_SD_EXTREME)
+def test_no_strategy_parameter_lives_in_engine_config():
+    """Strategy thresholds belong to their plug-in (private), not to the public
+    engine config. A STRATEGY_* or TOPCOIL_* name here means a strategy's numbers
+    are leaking back into the repository."""
+    leaked = [n for n in vars(config) if n.startswith(("STRATEGY_", "TOPCOIL_", "BACKTOVWAP_"))]
+    assert leaked == [], leaked
 
 
 def test_leverage_is_positive():
@@ -165,10 +167,6 @@ def test_leverage_is_positive():
 def test_max_session_loss_is_a_positive_magnitude():
     """Stored as a positive number and compared against a negative PnL."""
     assert config.MAX_SESSION_LOSS_INR > 0
-
-
-def test_volume_fade_threshold_is_a_ratio_below_one():
-    assert 0 < config.STRATEGY_VOL_FADE_MAX_RATIO < 1
 
 
 def test_trade_direction_is_a_recognised_value():

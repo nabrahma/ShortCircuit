@@ -83,8 +83,6 @@ class MarketContext:
         }
 
         try:
-            from shortcircuit.broker.rest_limiter import rest_limiter
-            rest_limiter.acquire()
             response = self.fyers.history(data=data)
         except Exception as e:
             logger.critical(f"[MarketContext] Morning range REST fetch exception: {e}")
@@ -233,8 +231,6 @@ class MarketContext:
         }
 
         try:
-            from shortcircuit.broker.rest_limiter import rest_limiter
-            rest_limiter.acquire()
             response = self.fyers.history(data=data)
             status = response.get('s') if isinstance(response, dict) else 'INVALID'
             candles = response.get('candles') if isinstance(response, dict) else None

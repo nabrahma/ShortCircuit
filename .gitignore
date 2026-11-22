@@ -70,6 +70,13 @@ build/
 # ── Legacy / Unused Code (moved from root) ───────────────────
 legacy/
 
+# ── Strategy plug-ins (private) ───────────────────────────────
+# The engine is public; each deployment's strategies are not. Everything under
+# strategies/ stays local apart from the README that documents the folder.
+# Pinned by tests/unit/test_strategy_plugins.py.
+/strategies/*
+!/strategies/README.md
+
 # ── Local Reports (machine-specific) ──────────────────────────
 reports/
 

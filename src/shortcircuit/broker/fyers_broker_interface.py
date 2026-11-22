@@ -18,10 +18,6 @@ import os
 import asyncio
 import logging
 from shortcircuit import config
-import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
-import json
 from pathlib import Path
 from collections import deque, defaultdict
 from dataclasses import dataclass
@@ -32,7 +28,9 @@ import time
 import threading
 from shortcircuit.marketdata.market_utils import is_market_hours as is_market_hours_ist
 from shortcircuit.broker.fyers_connect import ASYNC_CALL_TIMEOUT, ASYNC_RETRIED_TIMEOUT
-from shortcircuit.broker.rest_limiter import rest_limiter, Priority
+from shortcircuit.broker import transport
+from shortcircuit.broker.rest_limiter import Priority, rest_limiter
+from concurrent.futures import ThreadPoolExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -431,6 +429,13 @@ class FyersBrokerInterface:
         # REST call ran untimed. harden_fyers_session resolves the real session.
         from shortcircuit.broker.fyers_connect import harden_fyers_session
         harden_fyers_session(self.rest_client, label="broker rest_client")
+
+        # Order mutations (place / cancel) run on their own small pool. On the
+        # shared default executor they could queue behind data calls waiting out
+        # the limiter, so a stop placement would wait for a thread, not a token.
+        self._order_executor = ThreadPoolExecutor(
+            max_workers=4, thread_name_prefix="fyers-order"
+        )
         
         # WebSocket clients
         self.data_ws = None  # Market data WebSocket
@@ -1321,8 +1326,7 @@ class FyersBrokerInterface:
         for i in range(0, len(symbols), batch_size):
             batch = symbols[i:i + batch_size]
             try:
-                # Acquire global rate limiter token before each REST call
-                rest_limiter.acquire()
+                # Metered by the transport.
                 response = self.rest_client.quotes(data={"symbols": ",".join(batch)})
             except Exception as e:
                 logger.warning("[WS Cache] REST seed batch %s failed: %s", i // batch_size, e)
@@ -1835,22 +1839,15 @@ class FyersBrokerInterface:
 
     # REST API Wrappers with Rate Limit
     
-    ORDER_PRIORITY_ENDPOINTS = frozenset({
-        'place_order', 'cancel_order', 'modify_order', 'get_order_status',
-    })
-
-    async def _rate_limit_wait(self, endpoint: str):
+    async def _prepay(self, fn: Callable, priority: Priority) -> Callable:
         """
-        Enforce global rate limits.
+        Take the rate-limit token now, before any deadline starts.
 
-        Order-path endpoints acquire at HIGH priority so a stop-loss placement is
-        never queued behind hundreds of scanner quote calls.
+        Every SDK request is metered by the transport regardless; prepaying only
+        moves the wait out of the asyncio.wait_for that bounds the request, so a
+        busy limiter reads as a short delay rather than a spurious timeout.
         """
-        priority = (
-            Priority.HIGH if endpoint in self.ORDER_PRIORITY_ENDPOINTS
-            else Priority.NORMAL
-        )
-        await rest_limiter.acquire_async(priority=priority)
+        return await transport.prepay_async(fn, priority)
 
     async def place_order(
         self,
@@ -1870,9 +1867,9 @@ class FyersBrokerInterface:
         receipt and then replay any order update that already landed in the cache
         during that window — otherwise a fast fill can be missed entirely.
         """
-        await self._rate_limit_wait('place_order')
-
         try:
+            send = await self._prepay(self.rest_client.place_order, Priority.HIGH)
+
             # Subscription is for tick data, NOT for order placement — it has no
             # bearing on whether the order succeeds. It used to be awaited here,
             # putting a websocket round-trip (565ms on 2026-08-07, including the
@@ -1908,7 +1905,7 @@ class FyersBrokerInterface:
             loop = asyncio.get_event_loop()
 
             async def _place():
-                return await loop.run_in_executor(None, self.rest_client.place_order, data)
+                return await loop.run_in_executor(self._order_executor, send, data)
 
             try:
                 # MUST exceed the HTTP read timeout — otherwise this fires first and
@@ -1948,13 +1945,13 @@ class FyersBrokerInterface:
             raise
 
     async def cancel_order(self, order_id: str) -> bool:
-        await self._rate_limit_wait('cancel_order')
         try:
+            send = await self._prepay(self.rest_client.cancel_order, Priority.HIGH)
             loop = asyncio.get_event_loop()
             data = {"id": order_id}
-            
+
             async def _cancel():
-                return await loop.run_in_executor(None, self.rest_client.cancel_order, data)
+                return await loop.run_in_executor(self._order_executor, send, data)
                 
             try:
                 response = await asyncio.wait_for(_cancel(), timeout=ASYNC_CALL_TIMEOUT)
@@ -2086,10 +2083,10 @@ class FyersBrokerInterface:
             return self._tick_cache[symbol]
 
         try:
-            await self._rate_limit_wait("depth")
+            fetch_depth = await self._prepay(self.rest_client.depth, Priority.NORMAL)
             resp = await asyncio.wait_for(
                 asyncio.to_thread(
-                    self.rest_client.depth,
+                    fetch_depth,
                     data={"symbol": symbol, "ohlcv_flag": "1"},
                 ),
                 timeout=ASYNC_CALL_TIMEOUT,
@@ -2122,11 +2119,11 @@ class FyersBrokerInterface:
         if cached is not None and cached.avg_price:
             return float(cached.avg_price)
 
-        await self._rate_limit_wait('get_order_status')
         try:
+            fetch_book = await self._prepay(self.rest_client.orderbook, Priority.HIGH)
             loop = asyncio.get_event_loop()
             response = await asyncio.wait_for(
-                loop.run_in_executor(None, self.rest_client.orderbook),
+                loop.run_in_executor(None, fetch_book),
                 timeout=ASYNC_RETRIED_TIMEOUT
             )
             if isinstance(response, dict) and response.get('s') == 'ok':
@@ -2153,10 +2150,10 @@ class FyersBrokerInterface:
                 return latest_tick.ltp
         
         # Fallback to REST API
-        await self._rate_limit_wait('get_quotes')
         try:
+            fetch_quotes = await self._prepay(self.rest_client.quotes, Priority.NORMAL)
             loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(None, self.rest_client.quotes, {"symbols": symbol})
+            response = await loop.run_in_executor(None, fetch_quotes, {"symbols": symbol})
             if response['s'] == 'ok' and 'd' in response:
                 return response['d'][0]['v']['lp']
             return None
@@ -2175,11 +2172,11 @@ class FyersBrokerInterface:
         visible to wait_for_fill and get_order_avg_price without a second call.
         """
         order_id = str(order_id)
-        await self._rate_limit_wait('get_order_status')
         try:
+            fetch_book = await self._prepay(self.rest_client.orderbook, Priority.HIGH)
             loop = asyncio.get_event_loop()
             response = await asyncio.wait_for(
-                loop.run_in_executor(None, self.rest_client.orderbook),
+                loop.run_in_executor(None, fetch_book),
                 timeout=ASYNC_RETRIED_TIMEOUT
             )
             if not isinstance(response, dict) or response.get('s') != 'ok':
@@ -2229,9 +2226,20 @@ class FyersBrokerInterface:
                     return {**self._last_cached_funds, 'cached': True}
                 raise ValueError(f"Fyers funds API rate-limited, retry in {remaining:.0f}s")
 
+        # During an account-wide throttle cooldown a funds read would only wait
+        # out the cooldown and then time out. The cached figure is the answer.
+        cooldown = rest_limiter.cooldown_remaining()
+        if cooldown > 0 and self._last_cached_funds:
+            logger.info(
+                "[RATE-LIMIT] Broker throttle cooldown (%.0fs left). Using cached funds.",
+                cooldown,
+            )
+            return {**self._last_cached_funds, 'cached': True}
+
         async def _fetch():
+            fetch_funds = await self._prepay(self.rest_client.funds, Priority.NORMAL)
             loop = asyncio.get_event_loop()
-            return await loop.run_in_executor(None, self.rest_client.funds)
+            return await loop.run_in_executor(None, fetch_funds)
 
         try:
             response = await asyncio.wait_for(_fetch(), timeout=15.0)
@@ -2326,11 +2334,11 @@ class FyersBrokerInterface:
                 "Content-Type": "application/json",
             }
             # Counts against the same account-wide budget as every SDK call, so it
-            # goes through the same limiter. Every one of the 54 failures over
-            # 7-10 Sep was an HTTP 429 from skipping it.
-            rest_limiter.acquire()
-            resp = requests.post(f"{base}/multiorder/margin", headers=headers,
-                                 json=payload, timeout=8)
+            # goes through the same metered transport. Every one of the 54
+            # failures over 7-10 Sep was an HTTP 429 from skipping the limiter.
+            resp = transport.metered_requests.post(
+                f"{base}/multiorder/margin", headers=headers, json=payload, timeout=8
+            )
             response = resp.json() if resp.status_code == 200 else {}
 
             data = response.get('data') if isinstance(response, dict) else None
@@ -2443,11 +2451,12 @@ class FyersBrokerInterface:
         # Cache empty or stale. Note: empty cache legitimately means "flat", so we
         # still verify via REST rather than assuming — being wrong about flat is
         # how a naked position goes unnoticed.
-        await self._rate_limit_wait('get_positions')
         try:
+            fetch_positions = await self._prepay(self.rest_client.positions, Priority.HIGH)
+
             async def _fetch_positions():
                 loop = asyncio.get_event_loop()
-                return await loop.run_in_executor(None, self.rest_client.positions)
+                return await loop.run_in_executor(None, fetch_positions)
 
             response = await asyncio.wait_for(_fetch_positions(), timeout=ASYNC_RETRIED_TIMEOUT)
             if isinstance(response, dict) and response.get('s') == 'ok':

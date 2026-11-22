@@ -5,7 +5,6 @@ from datetime import datetime
 
 from shortcircuit import config
 from shortcircuit.capital.capital_manager import CapitalManager
-from shortcircuit.broker.rest_limiter import rest_limiter, Priority
 
 
 logger = logging.getLogger(__name__)
@@ -47,7 +46,6 @@ class TradeManager:
             dict with 'net_qty', 'symbol', 'raw' or None on error
         """
         try:
-            rest_limiter.acquire(priority=Priority.HIGH)
             positions = self.fyers.positions()
 
             if positions.get('s') != 'ok' and 'netPositions' not in positions:
@@ -77,7 +75,6 @@ class TradeManager:
         """
         logger.info(f"🧹 [SAFETY] Cleaning up orphaned orders for {symbol}")
         try:
-            rest_limiter.acquire(priority=Priority.HIGH)
             orders = self.fyers.orderbook()
             if "orderBook" not in orders:
                 return
@@ -97,14 +94,12 @@ class TradeManager:
         """
         logger.warning("[ALERT] INITIATING AUTO-SQUARE OFF...")
         try:
-            rest_limiter.acquire(priority=Priority.HIGH)
             positions_response = self.fyers.positions()
             if 'netPositions' not in positions_response:
                 logger.info("No positions to close.")
 
             # Cancel all pending orders first
             try:
-                rest_limiter.acquire(priority=Priority.HIGH)
                 orders = self.fyers.orderbook()
                 if 'orderBook' in orders:
                     cleaned = 0

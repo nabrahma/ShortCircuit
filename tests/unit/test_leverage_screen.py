@@ -38,7 +38,7 @@ def broker(response=None, status=200, raises=None):
 
 @pytest.fixture
 def patched(monkeypatch):
-    """Swap requests.post inside the broker module; records every call."""
+    """Swap the metered transport's post inside the broker module; records every call."""
     import shortcircuit.broker.fyers_broker_interface as mod
 
     def install(stub):
@@ -49,7 +49,7 @@ def patched(monkeypatch):
             return types.SimpleNamespace(
                 status_code=stub._status, json=lambda: stub._resp,
             )
-        monkeypatch.setattr(mod.requests, "post", fake_post)
+        monkeypatch.setattr(mod.transport, "metered_requests", types.SimpleNamespace(post=fake_post))
         return FyersBrokerInterface.get_symbol_leverage_sync.__get__(
             stub, FyersBrokerInterface
         )

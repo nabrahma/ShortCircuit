@@ -1,5 +1,10 @@
 """
-The operator's RSI take-profit on top-coil shorts.
+The engine's RSI relief-rally cover for EOD_HOLD shorts (ExitPlan.rsi_cover).
+
+A strategy opts in by putting an RsiCover on its exit plan; the parameters ride
+on the position (`exit_params`) and on its ML row, so the live loop and the
+ghost audit run the strategy's own rule rather than a global config switch.
+The rule and its defaults come from top_coil's operator rule:
 
 Rule (30 Sep 2026): once an EOD_HOLD short is in profit, cover when the 1-minute
 RSI(14) closes below 40, because a relief rally follows. It does follow — in 82% of
@@ -20,10 +25,15 @@ from dataclasses import dataclass
 import pandas as pd
 import pytest
 
-import shortcircuit.config as cfg
+import json
+from dataclasses import asdict
+
 from shortcircuit.eod.eod_analyzer import EODAnalyzer, IST
 from shortcircuit.execution import focus_engine as fe
 from shortcircuit.strategy.features import compute_rsi_wilder
+from shortcircuit.strategy.sdk import RsiCover
+
+COVER = {"rsi_cover": asdict(RsiCover())}     # threshold 40, period 14, skip 5, warm-up 30
 
 NOW = 1_790_000_000 // 60 * 60 + 30          # 30s into a minute
 
@@ -88,19 +98,14 @@ def _candles(n_warm=40, after=None, forming=None):
 
 
 def _trade(entry_epoch, entry=102.0, **over):
-    t = {'exit_profile': 'EOD_HOLD', 'direction': 'SHORT', 'entry': entry,
-         'entry_minute': entry_epoch, 'remaining_qty': 3}
+    t = {'exit_profile': 'EOD_HOLD', 'exit_params': COVER, 'direction': 'SHORT',
+         'entry': entry, 'entry_minute': entry_epoch, 'remaining_qty': 3}
     t.update(over)
     return t
 
 
 @pytest.fixture(autouse=True)
-def _cfg(monkeypatch):
-    monkeypatch.setattr(cfg, "TOPCOIL_RSI_TP_ENABLED", True, raising=False)
-    monkeypatch.setattr(cfg, "TOPCOIL_RSI_TP_THRESHOLD", 40.0, raising=False)
-    monkeypatch.setattr(cfg, "TOPCOIL_RSI_TP_PERIOD", 14, raising=False)
-    monkeypatch.setattr(cfg, "TOPCOIL_RSI_TP_SKIP_MINUTES", 5, raising=False)
-    monkeypatch.setattr(cfg, "TOPCOIL_RSI_TP_MIN_CANDLES", 30, raising=False)
+def _clock(monkeypatch):
     monkeypatch.setattr(fe.time, "time", lambda: NOW)
 
 
@@ -144,15 +149,28 @@ def test_too_few_candles_leaves_the_position_alone():
 
 
 @pytest.mark.parametrize("over", [{'exit_profile': 'DEFAULT'}, {'direction': 'LONG'}])
-def test_only_top_coil_shorts(over):
+def test_only_eod_hold_shorts(over):
     c, e = _candles(after=FALLING)
     assert _Engine(c)._rsi_take_profit_due("NSE:X-EQ", _trade(e, **over)) is None
 
 
-def test_switch_off(monkeypatch):
-    monkeypatch.setattr(cfg, "TOPCOIL_RSI_TP_ENABLED", False, raising=False)
+@pytest.mark.parametrize("params", [None, {}, {"rsi_cover": None}])
+def test_a_position_without_an_rsi_cover_never_takes_it(params):
+    """Opt-in per strategy: no cover on the exit plan, no RSI exit."""
     c, e = _candles(after=FALLING)
-    assert _Engine(c)._rsi_take_profit_due("NSE:X-EQ", _trade(e)) is None
+    assert _Engine(c)._rsi_take_profit_due("NSE:X-EQ", _trade(e, exit_params=params)) is None
+
+
+def test_the_strategys_own_threshold_is_used():
+    c, e = _candles(after=FALLING)
+    strict = {"rsi_cover": asdict(RsiCover(threshold=5.0))}
+    assert _Engine(c)._rsi_take_profit_due("NSE:X-EQ", _trade(e, exit_params=strict)) is None
+
+
+def test_a_malformed_cover_disables_the_rule_rather_than_raising():
+    c, e = _candles(after=FALLING)
+    bad = {"rsi_cover": {"threshold": 40.0, "unknown_field": 1}}
+    assert _Engine(c)._rsi_take_profit_due("NSE:X-EQ", _trade(e, exit_params=bad)) is None
 
 
 def test_a_decided_exit_is_retried_every_ten_seconds_not_redecided(monkeypatch):
@@ -166,7 +184,7 @@ def test_a_decided_exit_is_retried_every_ten_seconds_not_redecided(monkeypatch):
 
 def test_the_loop_hook_respects_manual_override_and_comes_before_the_tp_engine():
     src = fe.__file__
-    body = open(src).read()
+    body = open(src, encoding="utf-8").read()
     hook = body.index("_rsi_hit = None if manual_override else self._rsi_take_profit_due(symbol, t)")
     assert hook < body.index("# Take-profit engine — see config.TP_MODE")
     assert 'safe_exit(symbol, "RSI_TP")' in body
@@ -188,9 +206,10 @@ def _session(after):
     })
 
 
-def _obs():
-    return {"exit_profile": "EOD_HOLD", "trigger_price": 101.8, "coil_high": 102.1,
-            "sl_price": 103.5, "armed_at": ARMED.isoformat()}
+def _obs(exit_params=json.dumps(COVER)):
+    """As the ML logger stores it: exit_params is JSON text."""
+    return {"exit_profile": "EOD_HOLD", "exit_params": exit_params, "trigger_price": 101.8,
+            "coil_high": 102.1, "sl_price": 103.5, "armed_at": ARMED.isoformat()}
 
 
 def test_ghost_audit_applies_the_rsi_exit():
@@ -200,9 +219,16 @@ def test_ghost_audit_applies_the_rsi_exit():
     assert r["exit_reason"] == "RSI_TP" and r["outcome"] == "WIN"
 
 
-def test_ghost_audit_without_the_switch_holds_to_the_close(monkeypatch):
-    monkeypatch.setattr(cfg, "TOPCOIL_RSI_TP_ENABLED", False, raising=False)
+def test_ghost_audit_reads_an_in_memory_dict_too():
     sess = _session([101.9, 101.5] + FALLING + [99.0] * 20)
     after = sess[sess["dt"] > ARMED]
-    r = EODAnalyzer()._simulate_eod_hold(_obs(), after, session=sess)
+    r = EODAnalyzer()._simulate_eod_hold(_obs(exit_params=COVER), after, session=sess)
+    assert r["exit_reason"] == "RSI_TP"
+
+
+@pytest.mark.parametrize("params", [None, float("nan"), "not json", json.dumps({})])
+def test_ghost_audit_without_a_cover_holds_to_the_close(params):
+    sess = _session([101.9, 101.5] + FALLING + [99.0] * 20)
+    after = sess[sess["dt"] > ARMED]
+    r = EODAnalyzer()._simulate_eod_hold(_obs(exit_params=params), after, session=sess)
     assert r["exit_reason"] == "EOD_SQUAREOFF"

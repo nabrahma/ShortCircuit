@@ -1,8 +1,9 @@
-"""Relationships between the gate thresholds that must hold for the funnel to work.
+"""Relationships between the engine's gate thresholds that must hold for the funnel
+to work. Each value is individually plausible and silently wrong in combination.
 
-Each of these values is individually plausible and silently wrong in combination.
-The G9 one is the dangerous case: set the bypass below the C1 floor and every signal
-that reaches G9 bypasses it, disabling a gate without changing a line of its code.
+Invariants that relate an engine threshold to a strategy's own parameter (the G9
+bypass against a strategy's stretch floor, say) belong to that strategy's tests,
+in the private strategies/ plug-in, since the strategy's numbers live there.
 
 Measured on the 2-4 Sep 2026 sessions, which is where these values came from.
 """
@@ -38,38 +39,6 @@ def test_gain_ceiling_stays_clear_of_the_common_circuit_band():
     assert config.SCANNER_GAIN_MAX_PCT > config.SCANNER_GAIN_MIN_PCT
 
 
-def test_confidence_tiers_are_ordered():
-    assert (config.STRATEGY_VWAP_SD_FLOOR
-            < config.STRATEGY_VWAP_SD_HIGH
-            < config.STRATEGY_VWAP_SD_EXTREME), (
-        "a tier boundary below the entry floor is unreachable"
-    )
-
-
-def test_g9_bypass_sits_above_the_entry_floor():
-    """Otherwise G9 never runs.
-
-    A signal only reaches G9 after clearing C1, so it always has stretch >= the C1
-    floor. If the bypass threshold were <= that floor, every surviving signal would
-    take the Alpha Strike path and the higher-timeframe gate would be dead code while
-    still appearing in the config, the logs and the docs.
-    """
-    assert config.P61_G9_BYPASS_SD_THRESHOLD > config.STRATEGY_VWAP_SD_FLOOR, (
-        f"bypass {config.P61_G9_BYPASS_SD_THRESHOLD} <= C1 floor "
-        f"{config.STRATEGY_VWAP_SD_FLOOR} would disable G9 entirely"
-    )
-
-
-def test_g9_bypass_still_leaves_g9_something_to_do():
-    """The inverse failure: a bypass so high that G9 blocks every real signal.
-
-    Over 2-4 Sep the ten signals that passed all six conditions had stretch between
-    3.67 and 8.57. A bypass at or above the EXTREME tier would mean G9 adjudicates
-    almost everything, which is how a +17.6% setup got vetoed on 4 Sep.
-    """
-    assert config.P61_G9_BYPASS_SD_THRESHOLD < config.STRATEGY_VWAP_SD_EXTREME
-
-
 def test_body_ratio_is_a_fraction_of_the_candle_range():
     assert 0.0 < config.CANDLE_BODY_RATIO_MIN < 1.0
 
@@ -90,15 +59,13 @@ def test_body_ratio_does_not_sit_on_top_of_the_population():
 @pytest.mark.parametrize("name,expected", [
     ("SCANNER_GAIN_MAX_PCT", 18.0),
     ("CANDLE_BODY_RATIO_MIN", 0.34),
-    ("STRATEGY_VWAP_SD_FLOOR", 3.2),
     ("P61_G9_BYPASS_SD_THRESHOLD", 4.0),
 ])
 def test_the_2026_09_04_values_are_deliberate(name, expected):
-    """Pins the four values changed together on 2026-09-04.
+    """Pins the engine values changed together on 2026-09-04 (the strategy's
+    stretch floor, changed with them, is pinned in its own plug-in's tests).
 
     They are recorded here so a later edit is a decision rather than a drift. If you
-    are changing one, change this test in the same commit and say why. Reverting
-    STRATEGY_VWAP_SD_FLOOR to 3.3 is the first thing to try if results degrade —
-    June's +38.9% was earned at 3.3.
+    are changing one, change this test in the same commit and say why.
     """
     assert getattr(config, name) == expected

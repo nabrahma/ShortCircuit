@@ -30,7 +30,7 @@ typecheck:  ## Run mypy (advisory — never blocks)
 # ── tests ────────────────────────────────────────────────────────────────
 .PHONY: test
 test:  ## Unit + property + strategy tests (no network, no credentials)
-	$(PY) -m pytest tests/unit tests/property tests/strategy -v
+	$(PY) -m pytest tests/unit tests/property tests/strategy $(wildcard strategies/tests) -v
 
 .PHONY: test-integration
 test-integration:  ## Integration tests (needs PostgreSQL)
@@ -41,7 +41,7 @@ test-all: test test-integration  ## Every test level
 
 .PHONY: coverage
 coverage:  ## Tests with per-package coverage
-	$(PY) -m pytest tests/unit tests/property tests/strategy $(COV_PKGS) --cov-report=term
+	$(PY) -m pytest tests/unit tests/property tests/strategy $(wildcard strategies/tests) $(COV_PKGS) --cov-report=term
 
 # ── security ─────────────────────────────────────────────────────────────
 .PHONY: security

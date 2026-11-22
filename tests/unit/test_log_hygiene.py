@@ -44,14 +44,14 @@ def test_ordinary_lines_pass_through_unchanged():
 
 
 def test_httpx_is_silenced_below_warning():
-    src = (SRC / "runtime" / "supervisor.py").read_text()
+    src = (SRC / "runtime" / "supervisor.py").read_text(encoding="utf-8")
     assert 'logging.getLogger("httpx").setLevel(logging.WARNING)' in src
     assert src.count("addFilter(_RedactTelegramToken())") == 2, "file and console handlers"
 
 
 def test_every_fill_is_logged_against_its_trigger():
-    om = (SRC / "execution" / "order_manager.py").read_text()
-    fe = (SRC / "execution" / "focus_engine.py").read_text()
+    om = (SRC / "execution" / "order_manager.py").read_text(encoding="utf-8")
+    fe = (SRC / "execution" / "focus_engine.py").read_text(encoding="utf-8")
     assert "pending['data']['gate_trigger'] = trigger_price" in fe
     assert "vs trigger" in om
     assert "if abs(actual_fill - ltp) / max(ltp, 0.01) > 0.001:" not in om, (

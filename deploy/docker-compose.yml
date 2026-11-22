@@ -30,6 +30,10 @@ services:
     environment:
       DB_HOST: postgres
     volumes:
+      # Private strategy plug-ins: mounted rather than baked in, so an image
+      # pushed anywhere never carries them. Read-only — the bot runs them, it
+      # does not write them.
+      - ../strategies:/app/strategies:ro
       - ../logs:/app/logs
       - ../data:/app/data
       - ../reports:/app/reports

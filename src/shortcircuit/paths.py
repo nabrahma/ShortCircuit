@@ -49,6 +49,10 @@ DATA_DIR:      Path = PROJECT_ROOT / "data"
 REPORTS_DIR:   Path = PROJECT_ROOT / "reports"
 MIGRATIONS_DIR: Path = PROJECT_ROOT / "migrations"
 
+# Default home of strategy plug-ins. Git-ignored apart from its README and the
+# shipped example, so private strategies never reach the public repository.
+STRATEGIES_DIR: Path = PROJECT_ROOT / "strategies"
+
 ML_DIR:        Path = DATA_DIR / "ml"
 TOKEN_FILE:    Path = DATA_DIR / "access_token.txt"
 

@@ -1,17 +1,16 @@
 """
-The wiring that keeps an EOD_HOLD trade intact from detector to exit.
+The wiring that keeps an EOD_HOLD trade intact from signal to exit.
 
-TopCoilShort's measured result depends entirely on the trade being left alone
-until the 15:10 square-off. Three separate mechanisms in the engine will each cut
-it short on their own — the take-profit ladder, the 45-minute time stop, and the
-1.5% soft stop, which sits INSIDE the 1.63% median hard stop and would silently
-govern about half of these exits. Each is pinned below, because any one of them
-reverts the strategy to the -0.21% version without failing anything else.
+ExitProfile.EOD_HOLD means "run on the hard stop to the 15:10 square-off". Three
+separate mechanisms in the engine will each cut such a trade short on their own —
+the take-profit ladder, the 45-minute time stop, and the 1.5% soft stop, which
+sits INSIDE a typical hard stop (1.63% median on the top_coil setups this profile
+was built for) and would silently govern about half of those exits. Each is
+pinned below, because any one of them turns a hold-to-close strategy into a
+different strategy without failing anything else.
 
-Also pinned: the detector cannot run unless TOPCOIL_ENABLED is set, and it only
-ever sees symbols the primary strategy has already rejected. A second detector
-that could weaken an existing gate would be a much worse thing than a flat
-strategy.
+Which strategy asks for EOD_HOLD, and with what parameters, is the strategy's
+business (see strategy/sdk.py); these tests pin only the engine's side.
 """
 from __future__ import annotations
 
@@ -123,7 +122,7 @@ def test_time_stop_skips_eod_hold_positions():
     """The edge is in the trades that take longer than 45 minutes to work: the
     thesis is distribution into the close, not a fading 45-minute impulse."""
     src = fe.__file__
-    with open(src) as fh:
+    with open(src, encoding="utf-8") as fh:
         body = fh.read()
     assert "not _eod_hold and _max_hold > 0" in body, (
         "the time stop no longer checks the exit profile — EOD_HOLD positions "
@@ -131,79 +130,24 @@ def test_time_stop_skips_eod_hold_positions():
     )
 
 
-# The detector is off unless it is switched on
-
-def test_live_experiment_flags_are_coherent():
-    """2026-09-21: the operator enabled TopCoilShort and switched the primary
-    strategy off for a week, to isolate it. That is a deliberate live experiment
-    with a measured expectancy of about -0.17%/trade, not a proven edge.
-
-    This test does not police the choice — it pins the two flags together, because
-    the dangerous state is TOPCOIL off AND BACKTOVWAP off, which leaves the bot
-    scanning all day and unable to signal at all."""
-    assert cfg.TOPCOIL_ENABLED or cfg.BACKTOVWAP_ENABLED, (
-        "both detectors are disabled — the bot cannot produce a signal"
-    )
-
-
-def test_topcoil_floor_is_guarded_while_it_is_live():
-    """The floor is the one parameter that separates flat from clearly losing."""
-    if cfg.TOPCOIL_ENABLED:
-        assert cfg.TOPCOIL_GAIN_MIN_PCT >= 12.0
-
-
-def test_primary_strategy_is_skippable():
-    from shortcircuit.execution import analyzer as an
-
-    with open(an.__file__) as fh:
-        body = fh.read()
-    assert "if getattr(config, 'BACKTOVWAP_ENABLED', True):" in body, (
-        "the primary detector must be switchable, and must default to ON when the "
-        "flag is absent"
-    )
-
-
-def test_gain_floor_is_not_the_scanner_floor():
-    """7.5% admits the bucket where this pattern is inverted — a pumped stock
-    coiling at its high below ~10% goes UP more often and further."""
-    assert cfg.TOPCOIL_GAIN_MIN_PCT >= 12.0, (
-        "below ~12% the up/down excursion ratio is 1.25 — a bull flag — and this "
-        "detector would be shorting into the drift"
-    )
-    assert cfg.TOPCOIL_GAIN_MIN_PCT > cfg.SCANNER_GAIN_MIN_PCT
-
-
-def test_analyzer_does_not_consult_the_detector_when_disabled(monkeypatch):
-    from shortcircuit.execution import analyzer as an
-
-    monkeypatch.setattr(cfg, "TOPCOIL_ENABLED", False, raising=False)
-    src = an.__file__
-    with open(src) as fh:
-        body = fh.read()
-    assert "if result is None and getattr(config, 'TOPCOIL_ENABLED', False):" in body, (
-        "the second detector must run only after the primary has rejected, and "
-        "only behind its flag"
-    )
-
-
-def test_analyzer_overrides_signal_low_with_the_coil_trigger():
-    """The validation gate enters on signal_low. Left at its default (the previous
-    bar's low) the trade would trigger somewhere unrelated to the coil, and the
-    whole entry geometry the measurement rests on would be gone."""
-    from shortcircuit.execution import analyzer as an
-
-    with open(an.__file__) as fh:
-        body = fh.read()
-    assert "if signal_meta.get('signal_low_override'):" in body
-    assert "signal_data['signal_low'] = float(signal_meta['signal_low_override'])" in body
-
-
 def test_position_state_carries_the_exit_profile():
     """focus_engine's time stop reads the profile off active_positions, not off
     the signal — the signal is long gone by the time the time stop runs."""
     from shortcircuit.execution import order_manager as om
 
-    with open(om.__file__) as fh:
+    with open(om.__file__, encoding="utf-8") as fh:
         body = fh.read()
     assert "'exit_profile': _exit_profile," in body
+    assert "'exit_params': signal.get('exit_params')," in body, (
+        "the strategy's exit parameters (its RSI cover) must ride on the position; "
+        "focus_engine reads them from there, not from global config"
+    )
     assert "None if _eod_hold else self.compute_take_profits(ltp, signal)" in body
+
+
+def test_start_focus_carries_the_exit_params_into_the_trade():
+    params = {'rsi_cover': {'threshold': 40.0, 'period': 14, 'skip_minutes': 5, 'min_candles': 30}}
+    eng = _Engine()
+    eng.start_focus('NSE:T-EQ', _pos(exit_profile='EOD_HOLD', exit_params=params))
+    assert eng.active_trade['exit_params'] == params
+    assert fe.rsi_cover_of(eng.active_trade).threshold == 40.0

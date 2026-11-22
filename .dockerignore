@@ -34,3 +34,7 @@ coverage.xml
 docs/
 *.md
 !README.md
+
+# Private strategy plug-ins: mounted at run time (deploy/docker-compose.yml),
+# never baked into an image that might be pushed somewhere.
+strategies/

@@ -28,6 +28,30 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 IST = timezone(timedelta(hours=5, minutes=30))
 
 
+# Windows: socket.socketpair() is implemented in Python on top of
+# socket.socket.connect to 127.0.0.1, and every asyncio event loop creates one.
+# The no_network guard below patches connect, so without this every async test
+# fails on Windows while passing on Linux. Rebuilt here with the connect captured
+# before the guard exists — loopback self-pairs only; all other connects stay
+# blocked.
+if sys.platform == "win32":
+    _unguarded_connect = socket.socket.connect
+
+    def _loopback_socketpair(family=socket.AF_INET, type=socket.SOCK_STREAM, proto=0):
+        listener = socket.socket(family, type, proto)
+        try:
+            listener.bind(("127.0.0.1", 0))
+            listener.listen()
+            client = socket.socket(family, type, proto)
+            _unguarded_connect(client, listener.getsockname())
+            server, _ = listener.accept()
+        finally:
+            listener.close()
+        return server, client
+
+    socket.socketpair = _loopback_socketpair
+
+
 # Safety guards
 
 @pytest.fixture(autouse=True)

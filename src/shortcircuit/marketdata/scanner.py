@@ -8,7 +8,7 @@ from concurrent.futures import (
 from shortcircuit.broker.fyers_connect import FyersConnect
 import time
 from shortcircuit import config
-from shortcircuit.broker.rest_limiter import rest_limiter
+from shortcircuit.broker import transport
 
 logger = logging.getLogger(__name__)
 
@@ -141,7 +141,6 @@ class FyersScanner:
                     "range_to":   today.strftime("%Y-%m-%d"),
                     "cont_flag": "1"
                 }
-                rest_limiter.acquire()  # Global rate limiter — respect 10 req/sec Fyers limit
                 response = self.fyers.history(data=data)
                 candles = response.get('candles', [])
 
@@ -245,8 +244,11 @@ class FyersScanner:
                     # whose __exit__ calls shutdown(wait=True) and so waits out the
                     # very call the 8s cap just abandoned. On 2026-07-29 that turned
                     # 41 slow /history calls into 41 scans over the 90s ceiling.
-                    rest_limiter.acquire()
-                    _f = _HISTORY_EXECUTOR.submit(self.fyers.history, data_15m)
+                    # Prepaid: the token wait happens here, not inside the 8s
+                    # budget below, so a busy limiter is not mistaken for a
+                    # slow broker (which would fail G9 closed).
+                    _fetch_15m = transport.prepay(self.fyers.history)
+                    _f = _HISTORY_EXECUTOR.submit(_fetch_15m, data_15m)
                     try:
                         resp_15m = _f.result(timeout=8)
                         if resp_15m and resp_15m.get('s') == 'ok' and resp_15m.get('candles'):

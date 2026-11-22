@@ -15,21 +15,16 @@ logger = logging.getLogger(__name__)
 # interactive re-auth on every start. Pinned by tests/unit/test_paths.py.
 from shortcircuit.paths import TOKEN_FILE  # noqa: E402
 
-# (connect, read) seconds. The Fyers SDK issues requests with NO timeout, so a
-# stalled socket blocks its caller forever — on 2026-07-29 that cost 41 scans.
-# Kept tight because these budgets stack: with 2 retries a 12s read is a 37s
-# worst case on a path reconciliation polls every 6 seconds.
-DEFAULT_HTTP_TIMEOUT = (3.05, 8.0)
-
-# Every asyncio wait_for around a REST call MUST outlast the HTTP read timeout,
-# or it abandons a request still in flight and the caller cannot tell whether it
-# succeeded. On 2026-08-07 a 5s wait_for over a 12s socket read lost the day's
-# only entry. Derived from the transport so raising one raises the others.
-HTTP_MAX_RETRIES = 1                                 # GET/HEAD only; POSTs never retry
-HTTP_READ_TIMEOUT = DEFAULT_HTTP_TIMEOUT[1]          # 8.0s
-ASYNC_CALL_TIMEOUT = HTTP_READ_TIMEOUT + 4.0         # 12.0s — single attempt (POST)
-ASYNC_RETRIED_TIMEOUT = (                            # 20.0s — GET may retry once
-    HTTP_READ_TIMEOUT * (HTTP_MAX_RETRIES + 1) + 4.0
+# Timeouts and the metered transport live in shortcircuit.broker.transport, the
+# one module allowed to talk to the rate limiter. Re-exported here because the
+# rest of the codebase has always imported the timeout budgets from this module.
+from shortcircuit.broker import transport  # noqa: E402
+from shortcircuit.broker.transport import (  # noqa: E402,F401
+    ASYNC_CALL_TIMEOUT,
+    ASYNC_RETRIED_TIMEOUT,
+    DEFAULT_HTTP_TIMEOUT,
+    HTTP_MAX_RETRIES,
+    HTTP_READ_TIMEOUT,
 )
 
 
@@ -52,85 +47,12 @@ class TimeoutHTTPAdapter(HTTPAdapter):
         return super().send(request, **kwargs)
 
 
-# Set once enforce_rest_timeouts() succeeds, so the 'no Session' path can tell
-# an expected 3.1.7 layout from a genuinely unprotected client.
+# Set once transport.install() succeeds, so the 'no Session' path can tell an
+# expected 3.1.7 layout from a genuinely unprotected client.
 _REST_BOUNDED = False
 
-
-class _TimeoutInjectingRequests:
-    """
-    Proxy around the `requests` module that forces a default timeout.
-
-    BUG-2026-08-30: fyers-apiv3 3.1.7 — the version our dependency pins resolve
-    to — does not use a `requests.Session` at all. `fyersModel` calls the module
-    functions directly:
-
-        response = requests.post(URL, data=json.dumps(data), headers={...})
-
-    with no `timeout=` anywhere in the file. `harden_fyers_session` searches for
-    a Session on the client and finds none, logs "calls will be UNBOUNDED", and
-    every REST call is then free to hang forever. That fix was written against
-    3.1.13's internals and has been inert since the version pin.
-
-    Logs for 17–25 Aug show the consequence: 383 `[SAFETY] Could not fetch
-    positions` on 20 Aug alone, escalating through the session (13 → 120 → 119),
-    with reconciliation discrepancies tracking them about 2:1.
-
-    Since the library exposes no seam, the module object it imported is replaced
-    with this proxy. Only fyersModel's view of `requests` changes; the global
-    module is untouched, so nothing else in the process is affected. An explicit
-    `timeout=` passed by a caller always wins.
-    """
-
-    _WRAPPED = ("get", "post", "put", "delete", "patch", "head", "request")
-
-    def __init__(self, inner, timeout):
-        self._inner = inner
-        self._timeout = timeout
-
-    def __getattr__(self, name):
-        attr = getattr(self._inner, name)
-        if name not in self._WRAPPED or not callable(attr):
-            return attr
-
-        def _with_timeout(*args, **kwargs):
-            kwargs.setdefault("timeout", self._timeout)
-            return attr(*args, **kwargs)
-
-        _with_timeout.__name__ = name
-        return _with_timeout
-
-
-def enforce_rest_timeouts(timeout=None) -> bool:
-    """
-    Bound every REST call fyers-apiv3 makes. Idempotent.
-
-    Returns True if the module is now bounded. This is a hard requirement, not a
-    nicety: an unbounded call inside the 5 Hz position monitor or the EOD
-    square-off blocks a path that must not block.
-    """
-    if timeout is None:
-        timeout = DEFAULT_HTTP_TIMEOUT
-    try:
-        from fyers_apiv3 import fyersModel
-
-        current = getattr(fyersModel, "requests", None)
-        if isinstance(current, _TimeoutInjectingRequests):
-            return True
-        if current is None:
-            logger.error("[HTTP] fyersModel has no `requests` attribute — cannot bound calls.")
-            return False
-
-        fyersModel.requests = _TimeoutInjectingRequests(current, timeout)
-        logger.info(
-            "[HTTP] fyers REST calls bounded at connect=%.2fs read=%.1fs "
-            "(3.1.7 uses bare requests.*, so there is no Session to mount on).",
-            float(timeout[0]), float(timeout[1]),
-        )
-        return True
-    except Exception as exc:
-        logger.error("[HTTP] could not bound fyers REST calls: %s", exc)
-        return False
+# Backward-compatible name for transport.install.
+enforce_rest_timeouts = transport.install
 
 
 def harden_fyers_session(client, label: str = "fyers") -> bool:
@@ -147,7 +69,7 @@ def harden_fyers_session(client, label: str = "fyers") -> bool:
     # directly, so the module-level calls are bounded instead. Checking
     # hasattr(client, 'session') silently did nothing on either.
     global _REST_BOUNDED
-    _REST_BOUNDED = enforce_rest_timeouts()
+    _REST_BOUNDED = transport.install()
 
     session = None
     for path in ("session", "service.session", "_service.session"):
@@ -281,6 +203,10 @@ class FyersConnect:
         Loads saved token if valid, otherwise runs auth flow.
         """
         from fyers_apiv3 import fyersModel
+
+        # Before the first request of the process — token validation and the
+        # login exchange included — so nothing reaches the broker unmetered.
+        transport.install()
 
         # Step 1: try every token source, validating each before use.
         #

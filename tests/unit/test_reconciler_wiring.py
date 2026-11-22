@@ -97,7 +97,7 @@ def test_no_trade_manager_at_all_is_survivable():
 # ── the wiring that has to exist for any of the above to run in production ───
 
 def _assigns_reconciliation_engine(path: pathlib.Path) -> bool:
-    tree = ast.parse(path.read_text())
+    tree = ast.parse(path.read_text(encoding="utf-8"))
     for node in ast.walk(tree):
         if not isinstance(node, ast.Assign):
             continue
@@ -128,7 +128,7 @@ def test_entry_claims_the_symbol_before_placing_the_order():
     broker milliseconds after placement and a reconcile cycle can see it before
     enter_position has registered anything.
     """
-    src = (SRC / "execution" / "order_manager.py").read_text()
+    src = (SRC / "execution" / "order_manager.py").read_text(encoding="utf-8")
     pre_exec = src.index("[PRE-EXEC]")
     notify = src.index("_notify_reconciler", pre_exec)
     place = src.index("await self.broker.place_order", pre_exec)

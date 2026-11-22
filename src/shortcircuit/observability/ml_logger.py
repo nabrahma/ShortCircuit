@@ -43,6 +43,7 @@ FEATURE_COLUMNS = [
     "time",             # HH:MM:SS
     "timestamp_ist",    # ISO-8601 signal timestamp with Asia/Kolkata offset
     "symbol",           # NSE:SYMBOL-EQ
+    "strategy",         # Strategy plug-in that produced the setup
     
     # Price Context
     "ltp",              # Last traded price at signal
@@ -83,6 +84,7 @@ FEATURE_COLUMNS = [
     "sector",           # Extracted from symbol if possible
     "time_bucket",      # OPEN/MID/CLOSE (market phase)
     "direction",        # SHORT or LONG (Phase 96.5)
+    "exit_params",      # JSON: the strategy's exit-plan parameters (e.g. rsi_cover)
     
     # Risk Parameters (for EOD Simulation)
     "atr",
@@ -173,6 +175,8 @@ class MLDataLogger:
         record.setdefault("timestamp_ist", None)
         record.setdefault("label_source", None)
         record.setdefault("exit_reason", None)
+        record.setdefault("strategy", None)
+        record.setdefault("exit_params", None)
         return record
 
     def _dataframe_from_buffer(self) -> pd.DataFrame:
@@ -292,8 +296,10 @@ class MLDataLogger:
 
             # How the trade is meant to be exited, and the levels a ghost audit
             # needs to grade it the way the engine would actually have traded it.
-            # Absent (None) for BackToVWAPShort rows.
+            # Absent (None) for signals on the DEFAULT exit profile.
             "exit_profile": features.get("exit_profile"),
+            "exit_params": _encode_json(features.get("exit_params")),
+            "strategy": features.get("strategy"),
             "trigger_price": features.get("trigger_price"),
             "coil_high": features.get("coil_high"),
             "armed_at": features.get("armed_at"),
@@ -363,6 +369,8 @@ class MLDataLogger:
     
     def update_fields(self, obs_id: str, **fields: Any) -> bool:
         """Overwrite feature fields on an existing observation (not its label)."""
+        if "exit_params" in fields:
+            fields = {**fields, "exit_params": _encode_json(fields["exit_params"])}
         with self._lock:
             for obs in self._buffer:
                 if obs["obs_id"] == obs_id:
@@ -415,3 +423,10 @@ def get_ml_logger() -> MLDataLogger:
     if _ml_logger is None:
         _ml_logger = MLDataLogger()
     return _ml_logger
+
+
+def _encode_json(value: Any) -> Optional[str]:
+    """Structured fields are stored as JSON text so every row has one type."""
+    if value is None or isinstance(value, str):
+        return value
+    return json.dumps(value, sort_keys=True)

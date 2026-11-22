@@ -18,7 +18,6 @@ import pathlib
 
 import pytest
 
-from shortcircuit.execution import trade_manager as tm_mod
 from shortcircuit.execution.trade_manager import TradeManager
 
 SRC = pathlib.Path(__file__).resolve().parents[2] / "src" / "shortcircuit"
@@ -52,7 +51,6 @@ class _OrderManager:
 
 @pytest.fixture
 def tm(monkeypatch):
-    monkeypatch.setattr(tm_mod.rest_limiter, "acquire", lambda *a, **k: None)
     t = TradeManager(_Fyers(), capital_manager=None)
     t.booked = []
     monkeypatch.setattr(t, "record_trade_outcome", lambda sym, pnl: t.booked.append((sym, pnl)))
@@ -85,7 +83,7 @@ def test_without_an_order_manager_the_old_behaviour_holds(tm):
 def test_the_supervisor_wires_the_order_manager_into_the_trade_manager():
     """The last missing wire of this kind (reconciliation_engine) stayed None for
     weeks because every call site tolerated it. This one is checked."""
-    tree = ast.parse((SRC / "runtime" / "supervisor.py").read_text())
+    tree = ast.parse((SRC / "runtime" / "supervisor.py").read_text(encoding="utf-8"))
     wired = any(
         isinstance(n, ast.Assign)
         and any(isinstance(t, ast.Attribute) and t.attr == "order_manager"
@@ -99,6 +97,6 @@ def test_the_supervisor_wires_the_order_manager_into_the_trade_manager():
 def test_a_close_after_the_square_off_is_not_labelled_manual():
     """Flat-at-broker after 15:10 is the scheduler's own doing: it must not raise a
     CRITICAL or be written to the DB as MANUAL_CLOSE_DETECTED."""
-    src = (SRC / "state" / "reconciliation.py").read_text()
+    src = (SRC / "state" / "reconciliation.py").read_text(encoding="utf-8")
     assert "reason='EOD_SQUAREOFF' if _eod_close else 'MANUAL_CLOSE_DETECTED'" in src
     assert "if _eod_close:" in src

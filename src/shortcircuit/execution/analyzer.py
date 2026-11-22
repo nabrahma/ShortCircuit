@@ -1,15 +1,16 @@
 """
-analyzer.py — Thin orchestrator for the ShortCircuit strategy.
+analyzer.py — the engine's setup pipeline, independent of any strategy.
 
 Responsibilities:
 1. Data fetching (REST / local candle cache)
-2. Enrichment (VWAP, ATR, slopes)
-3. Pre-filters (candle count, circuit guard, gain floor, momentum blocker)
-4. Delegation to BackToVWAPShort strategy for signal evaluation
-5. Signal finalization (SL calc, signal dict, CSV/ML logging)
+2. Enrichment (VWAP, ATR, slopes) into a SetupContext
+3. Engine gates (candle count, trade window, depth / circuit state)
+4. Delegation to the active strategy plug-ins (strategy/registry.py)
+5. Engine gates on the winning Signal (HTF confirmation, signal manager)
+6. Finalization (stop, signal dict for execution, CSV/ML logging)
 
-All feature computation lives in features.py.
-All strategy logic lives in strategy/back_to_vwap.py.
+All feature computation lives in strategy/features.py. Strategy logic lives in
+plug-ins that implement strategy/sdk.py; nothing here names one.
 """
 
 import concurrent.futures
@@ -17,13 +18,13 @@ import csv
 import datetime
 from datetime import time as dtime
 import logging
+import math
 import os
-from typing import Optional, Dict, Any, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 
 from shortcircuit import config
-from shortcircuit.broker.rest_limiter import rest_limiter
 from shortcircuit.strategy import features as F
 from shortcircuit.observability.gate_result_logger import GateResult, get_gate_result_logger
 from shortcircuit.strategy.htf_confluence import HTFConfluence
@@ -31,8 +32,8 @@ from shortcircuit.strategy.market_context import MarketContext
 from shortcircuit.strategy.market_profile import ProfileAnalyzer
 from shortcircuit.observability.ml_logger import get_ml_logger
 from shortcircuit.execution.signal_manager import get_signal_manager
-from shortcircuit.strategy.back_to_vwap import BackToVWAPShort
-from shortcircuit.strategy.top_coil import TopCoilShort
+from shortcircuit.strategy import registry
+from shortcircuit.strategy.sdk import ExitProfile, SetupContext, Signal, Strategy
 
 logger = logging.getLogger(__name__)
 
@@ -75,9 +76,6 @@ def log_signal(symbol: str, ltp: float, pattern: str, stop_loss: float,
 # than to wherever a truncated frame happens to begin.
 SESSION_OPEN_IST = dtime(9, 15)
 SESSION_BARS_1M = 400          # 375 + slack; the aggregator's deque holds 500
-# Matches the validation gate's fixed 15-minute expiry, which every re-arm refreshes:
-# inside it a re-qualifying coil is one continuing setup, not a new one.
-TOPCOIL_EPISODE_GAP = datetime.timedelta(minutes=15)
 
 
 def keep_session_only(df: pd.DataFrame, session: datetime.date) -> pd.DataFrame:
@@ -158,22 +156,41 @@ def frame_reaches_session_open(df: pd.DataFrame) -> bool:
 
 class FyersAnalyzer:
     """
-    Thin orchestrator: data fetch → enrich → pre-filter → strategy.evaluate() → finalize.
+    Strategy-agnostic orchestrator:
+
+        data -> G2 candle count -> enrich -> G7 trade window -> depth
+             -> strategies, in priority order (first Signal wins)     [G5/G6]
+             -> G9 HTF confirmation, if the winning strategy asks for it
+             -> G8 signal manager (cooldown, daily target)
+             -> finalize: stop, ML observation, signal dict for execution
+
+    Everything a strategy decides arrives as a `Signal`; nothing below the
+    strategy stage knows which strategy produced it.
     """
 
-    def __init__(self, fyers, broker=None, morning_high=None, morning_low=None):
+    def __init__(
+        self,
+        fyers,
+        broker=None,
+        morning_high=None,
+        morning_low=None,
+        strategies: Optional[List[Strategy]] = None,
+    ):
         self.fyers = fyers
         self.broker = broker
         self.market_context = MarketContext(fyers, morning_high, morning_low, broker=broker)
         self.signal_manager = get_signal_manager()
         self.htf_confluence = HTFConfluence(fyers)
         self.profile_analyzer = ProfileAnalyzer()
-        self.strategy = BackToVWAPShort()
-        self.top_coil = TopCoilShort()
-        # symbol -> (obs_id, last re-arm). A coil re-qualifies on every bar it
-        # stays tight, so without this one JAYKAY setup on 23 Sep wrote 43 ML rows
-        # and 43 signal-log lines, each graded as a separate 'missed trade'.
-        self._topcoil_episodes: Dict[str, Tuple[str, datetime.datetime]] = {}
+        # Loaded once, at construction - i.e. at startup - so a misconfigured
+        # strategy fails before the first scan rather than during one.
+        self.strategies: List[Strategy] = (
+            list(strategies) if strategies is not None else registry.load()
+        )
+        # (strategy, symbol) -> (obs_id, last re-arm). A setup re-qualifies on every
+        # bar it persists, so without this one JAYKAY coil on 23 Sep wrote 43 ML
+        # rows and 43 signal-log lines, each graded as a separate 'missed trade'.
+        self._episodes: Dict[Tuple[str, str], Tuple[str, datetime.datetime]] = {}
 
     # Data fetching
 
@@ -288,7 +305,6 @@ class FyersAnalyzer:
         """
         grl = get_gate_result_logger()
         gr = GateResult(symbol=symbol, scan_id=scan_id, data_tier=data_tier)
-        signal_meta = {}
 
         # Data fetch
         if pre_fetched_df is not None:
@@ -387,10 +403,8 @@ class FyersAnalyzer:
         is_circuit_hitter = False
         try:
             # One call per candidate, run concurrently across a scan — easily a
-            # dozen in the same second. Unmetered, that alone could exceed the
-            # whole per-second budget and starve the order path of the headroom
-            # the limiter believed it was reserving.
-            rest_limiter.acquire()
+            # dozen in the same second. Metered by the transport, so it cannot
+            # starve the order path of the headroom the limiter reserves for it.
             full_depth = self.fyers.depth(data={"symbol": symbol, "ohlcv_flag": "1"})
             if 'd' in full_depth and symbol in full_depth['d']:
                 depth_data = full_depth['d'][symbol]
@@ -423,91 +437,67 @@ class FyersAnalyzer:
 
         is_circuit_hitter = self.market_context.is_circuit_hitter(symbol)
 
-        # Strategy evaluation, replacing gates G1-G6.
-        # BACKTOVWAP_ENABLED is the master switch for the primary detector. When it
-        # is False the bot runs on TopCoilShort alone — note that back_to_vwap's own
-        # C0 pre-filters (gain floor, circuit proximity, spread) go quiet with it,
-        # which is why TopCoilShort carries its own TC0 equivalents.
-        result = None
-        if getattr(config, 'BACKTOVWAP_ENABLED', True):
-            result = self.strategy.evaluate(
-                symbol=symbol,
-                ltp=ltp,
-                df=df,
-                profile=profile,
-                profile_rejection=profile_rejection,
-                vwap_sd=vwap_sd,
-                atr=atr,
-                gain_pct=gain_pct,
-                slope_fast=slope_5m,
-                slope_slow=slope_30m,
-                is_decaying=is_decaying,
-                upper_circuit=upper_circuit,
-                lower_circuit=lower_circuit,
-                spread_pct=spread_pct,
-                is_circuit_hitter=is_circuit_hitter,
-            )
+        ctx = SetupContext(
+            symbol=symbol,
+            ltp=ltp,
+            now=datetime.datetime.now(),
+            df=df,
+            df_15m=df_15m,
+            gain_pct=gain_pct,
+            day_high=float(day_high),
+            open_price=float(open_price),
+            atr=atr,
+            vwap_sd=vwap_sd,
+            slope_fast=slope_5m,
+            slope_slow=slope_30m,
+            is_decaying=is_decaying,
+            vol_z=vol_z,
+            profile=profile,
+            profile_rejection=profile_rejection,
+            upper_circuit=upper_circuit,
+            lower_circuit=lower_circuit,
+            spread_pct=spread_pct,
+            is_circuit_hitter=is_circuit_hitter,
+        )
 
-        # Second detector. It runs ONLY on symbols the primary strategy has already
-        # turned down, so it can never loosen an existing gate — it can only add
-        # setups C1 is structurally incapable of seeing (a coil at the high clears
-        # the 3.2 SD floor 0.31% of the time). Everything downstream of here — G9
-        # HTF confluence, G8 cooldown and daily target, depth and circuit checks —
-        # applies to it unchanged.
-        is_top_coil = False
-        if result is None and getattr(config, 'TOPCOIL_ENABLED', False):
-            try:
-                result = self.top_coil.evaluate(
-                    symbol=symbol,
-                    ltp=ltp,
-                    df=df,
-                    gain_pct=gain_pct,
-                    spread_pct=spread_pct,
-                    upper_circuit=upper_circuit,
-                    lower_circuit=lower_circuit,
-                    is_circuit_hitter=is_circuit_hitter,
-                )
-            except Exception as tc_err:
-                # Fail closed and keep the primary verdict. A detector that is not
-                # yet trusted must never be able to take the process down with it.
-                logger.error("[TOPCOIL] %s evaluate raised: %s", symbol, tc_err)
-                result = None
-            is_top_coil = result is not None
-
-        if result is None:
+        # G5/G6: strategies, in priority order. The first Signal wins; a later
+        # strategy only ever sees candidates every earlier one turned down, so
+        # adding one can never loosen another's gates. Everything downstream -
+        # G9, G8, the stop, the order path - applies to every strategy alike.
+        strategy, signal = self._first_signal(ctx)
+        if signal is None:
             gr.g5_pass = False
             gr.verdict = "REJECTED"
             gr.first_fail_gate = "G5_STRATEGY"
             gr.rejection_reason = (
-                "No detector matched"
-                if getattr(config, 'TOPCOIL_ENABLED', False)
-                else "BackToVWAPShort conditions not met"
+                f"No strategy matched ({', '.join(s.name for s in self.strategies)})"
+                if self.strategies else "No strategy active"
             )
             grl.record(gr)
             return None
 
         gr.g5_pass = True
-        gr.g5_value = round(result.get('stretch_score', 0), 3)
+        gr.g5_value = round(signal.stretch_score, 3)
         gr.g6_pass = True
-        gr.g6_value = f"+{result['confidence']}"
-
-        signal_meta.update(result)
-        pattern_desc = result.get('pattern_bonus', 'EXHAUSTION_FADE')
+        gr.g6_value = f"+{signal.confidence}"
 
         # G9: HTF confluence, on a shared long-lived pool. A per-symbol
         # ThreadPoolExecutor used as a context manager would block here on
         # shutdown(wait=True), defeating the very timeout below.
-        try:
-            _htf_future = _HTF_EXECUTOR.submit(
-                self.htf_confluence.check_trend_exhaustion,
-                symbol, df_15m=df_15m, vwap_sd=vwap_sd,
-            )
-            htf_ok, htf_msg = _htf_future.result(timeout=1.5)
-        except concurrent.futures.TimeoutError:
-            # Abandon the worker rather than waiting on it; G9 is fail-closed.
-            htf_ok, htf_msg = False, "G9 BLOCK: HTF check timed out (1.5s)"
-        except Exception as e:
-            htf_ok, htf_msg = False, f"G9 BLOCK: {e}"
+        if strategy.requires_htf_confirmation:
+            try:
+                _htf_future = _HTF_EXECUTOR.submit(
+                    self.htf_confluence.check_trend_exhaustion,
+                    symbol, df_15m=df_15m, vwap_sd=vwap_sd,
+                )
+                htf_ok, htf_msg = _htf_future.result(timeout=1.5)
+            except concurrent.futures.TimeoutError:
+                # Abandon the worker rather than waiting on it; G9 is fail-closed.
+                htf_ok, htf_msg = False, "G9 BLOCK: HTF check timed out (1.5s)"
+            except Exception as e:
+                htf_ok, htf_msg = False, f"G9 BLOCK: {e}"
+        else:
+            htf_ok, htf_msg = True, f"G9 not required by {strategy.name}"
 
         gr.g9_pass = htf_ok
         gr.g9_value = htf_msg
@@ -521,9 +511,8 @@ class FyersAnalyzer:
 
         # G8: Signal Manager (cooldown + daily target)
         sm = self.signal_manager
-        confidence = signal_meta.get('confidence', '')
         can_signal, sm_reason = (
-            sm.can_signal(symbol, confidence=confidence)
+            sm.can_signal(symbol, confidence=signal.confidence)
             if hasattr(sm, 'can_signal') else (True, "")
         )
 
@@ -536,25 +525,9 @@ class FyersAnalyzer:
             grl.record(gr)
             return None
 
-        # Reward/risk: a smaller target multiple on weaker moves.
-        if is_top_coil:
-            pass          # EOD_HOLD carries no take-profit for a multiple to scale
-        elif gain_pct < 9.0:
-            signal_meta['tp_atr_mult_override'] = 0.5
-        else:
-            signal_meta['tp_atr_mult_override'] = 1.0
-
-        # TopCoilShort sets snapshot_high to the COIL high, which is what the stop
-        # was measured against. It sits at or below the day high by construction,
-        # so overwriting it here would silently widen every top-coil stop.
-        if not is_top_coil:
-            signal_meta['snapshot_high'] = day_high
-
         # Finalize
         gr.verdict = "ANALYZER_PASS"
-        finalized = self._finalize_signal(
-            symbol, ltp, df, pattern_desc, slope_5m, "", signal_meta
-        )
+        finalized = self._finalize_signal(strategy, signal, ctx)
         if finalized:
             finalized['_gate_result'] = gr
         else:
@@ -563,39 +536,73 @@ class FyersAnalyzer:
         grl.record(gr)
         return finalized
 
+    # Strategy stage
+
+    def _first_signal(
+        self, ctx: SetupContext
+    ) -> Tuple[Optional[Strategy], Optional[Signal]]:
+        """
+        Ask each active strategy in turn; return the first valid Signal.
+
+        A strategy whose direction is not the engine's current TRADE_DIRECTION is
+        skipped: the direction can be switched at runtime from Telegram, and a
+        short setup must never be executed as a buy. An exception, or a Signal
+        with unusable levels, counts as "no setup" - fail closed, keep going.
+        """
+        direction = str(getattr(config, 'TRADE_DIRECTION', 'SHORT')).upper()
+        for strategy in self.strategies:
+            if strategy.direction.value != direction:
+                continue
+            try:
+                signal = strategy.evaluate(ctx)
+            except Exception as exc:
+                logger.error(
+                    "[STRATEGY] %s raised on %s - treated as no setup: %s",
+                    strategy.name, ctx.symbol, exc,
+                )
+                continue
+            if signal is None:
+                continue
+            problem = signal_problem(signal)
+            if problem:
+                logger.error(
+                    "[STRATEGY] %s returned an unusable signal for %s (%s) - ignored",
+                    strategy.name, ctx.symbol, problem,
+                )
+                continue
+            return strategy, signal
+        return None, None
+
     # Private helpers
 
+    def _finalize_signal(self, strategy: Strategy, signal: Signal, ctx: SetupContext):
+        """Stop, signal log, ML observation and the execution signal dict. No gates."""
+        symbol, ltp, df = ctx.symbol, ctx.ltp, ctx.df
+        plan = signal.exit
+        holds_to_close = plan.profile is ExitProfile.EOD_HOLD
 
-    def _finalize_signal(
-        self, symbol, ltp, df, pattern_desc, slope, wall_msg, signal_meta: dict = None,
-    ):
-        """Calculates SL, builds signal dict, logs to CSV and ML. Pure — no gate checks."""
-        if signal_meta is None:
-            signal_meta = {}
-
-        # Calculate Stop Loss (ATR-based)
-        atr = F.compute_atr(df)
+        # Stop: the strategy's reference level plus the engine's ATR buffer.
+        atr = ctx.atr
         buffer = max(atr * 0.5, 0.25)
-
-        # Use absolute high snapshot for SL
-        peak_high = signal_meta.get('snapshot_high', df.iloc[-2]['high'])
-        setup_high = peak_high
+        setup_high = signal.stop_reference
         sl_price = setup_high + buffer
+        pattern_desc = signal.pattern
+        slope = ctx.slope_fast
 
-        # A top-coil re-arm inside the validation gate's 15-minute window is the
-        # SAME setup with a refreshed trigger, not a new signal. It keeps its first
-        # observation and only moves the levels on it.
-        is_top_coil = signal_meta.get('exit_profile') == 'EOD_HOLD'
+        # A re-arm inside the strategy's window is the SAME setup with a refreshed
+        # trigger, not a new signal. It keeps its first observation and only moves
+        # the levels on it.
         now_ist = datetime.datetime.now()
+        episode_key = (strategy.name, symbol)
         rearm_obs = None
-        if is_top_coil:
-            prev = self._topcoil_episodes.get(symbol)
-            if prev and now_ist - prev[1] <= TOPCOIL_EPISODE_GAP:
+        if signal.rearm_window is not None:
+            prev = self._episodes.get(episode_key)
+            if prev and now_ist - prev[1] <= signal.rearm_window:
                 rearm_obs = prev[0]
-                self._topcoil_episodes[symbol] = (rearm_obs, now_ist)
+                self._episodes[episode_key] = (rearm_obs, now_ist)
 
         # Logging
-        logger.info(f"[OK] SIGNAL: {symbol} | {pattern_desc}"
+        logger.info(f"[OK] SIGNAL: {symbol} | {pattern_desc} [{strategy.name}]"
                     + (" (re-arm)" if rearm_obs else ""))
 
         meta_str = f"Slope:{slope:.1f}, ATR:{atr:.2f}"
@@ -603,34 +610,35 @@ class FyersAnalyzer:
             log_signal(
                 symbol, ltp, pattern_desc, sl_price, meta_str,
                 setup_high=setup_high,
-                tick_size=signal_meta.get('tick_size', 0.05),
+                tick_size=0.05,
                 atr=atr,
-                stretch_score=signal_meta.get('stretch_score', 0.0),
-                vol_fade_ratio=signal_meta.get('vol_fade_ratio', 0.0),
-                confidence=signal_meta.get('confidence', ''),
-                pattern_bonus=signal_meta.get('pattern_bonus', 'None'),
-                oi_direction=signal_meta.get('oi_direction', 'unknown'),
+                stretch_score=signal.stretch_score,
+                vol_fade_ratio=signal.vol_fade_ratio,
+                confidence=signal.confidence,
+                pattern_bonus=signal.pattern,
+                oi_direction=signal.oi_direction,
             )
 
         # Calculate VWAP for both ML logging and TP targeting
         vwap = df['vwap'].iloc[-1] if 'vwap' in df.columns else ltp
 
-        # Levels a ghost audit needs to grade a top-coil setup the way the engine
-        # trades it: enter only if the trigger breaks, then stop or 15:10.
-        topcoil_fields = {
-            'exit_profile': 'EOD_HOLD',
-            'trigger_price': signal_meta.get('signal_low_override'),
-            'coil_high': signal_meta.get('coil_high'),
+        # Levels a ghost audit needs to grade a non-default exit the way the
+        # engine trades it: enter only if the trigger breaks, then stop or 15:10.
+        setup_fields = {
+            'exit_profile': plan.profile.value,
+            'exit_params': plan.params(),
+            'trigger_price': signal.trigger_price,
             'sl_price': sl_price,
             'armed_at': now_ist.isoformat(timespec='seconds'),
-        } if is_top_coil else {}
+        } if plan.profile is not ExitProfile.DEFAULT else {}
+        setup_fields.update(signal.ml_features)
 
         # ML Data Logging
         obs_id = None
         if rearm_obs is not None:
             obs_id = rearm_obs
             try:
-                get_ml_logger().update_fields(rearm_obs, **topcoil_fields)
+                get_ml_logger().update_fields(rearm_obs, **setup_fields)
             except Exception as e:
                 logger.warning(f"   [ML] Re-arm update error: {e}")
         else:
@@ -649,6 +657,7 @@ class FyersAnalyzer:
                 rvol = prev_candle['volume'] / vol_avg if vol_avg > 0 else 1
 
                 features = {
+                    "strategy": strategy.name,
                     "prev_close": df.iloc[0]['open'],
                     "day_high": df['high'].max(),
                     "day_low": df['low'].min(),
@@ -664,10 +673,10 @@ class FyersAnalyzer:
                     "candle_body_pct": (body / total_range * 100) if total_range > 0 else 0,
                     "upper_wick_pct": (upper_wick / total_range * 100) if total_range > 0 else 0,
                     "lower_wick_pct": (lower_wick / total_range * 100) if total_range > 0 else 0,
-                    "stretch_score": signal_meta.get('stretch_score', 0.0),
-                    "vol_fade_ratio": signal_meta.get('vol_fade_ratio', 0.0),
-                    "confidence": signal_meta.get('confidence', 'MEDIUM'),
-                    "pattern_bonus": signal_meta.get('pattern_bonus', 'None'),
+                    "stretch_score": signal.stretch_score,
+                    "vol_fade_ratio": signal.vol_fade_ratio,
+                    "confidence": signal.confidence or 'MEDIUM',
+                    "pattern_bonus": signal.pattern,
                     "num_confirmations": pattern_desc.count(",") + 1 if "+" in pattern_desc else 0,
                     "confirmations": pattern_desc.split(" + ")[1:] if " + " in pattern_desc else [],
                     "nifty_trend": (
@@ -676,24 +685,26 @@ class FyersAnalyzer:
                     ),
                     "atr": atr,
                     "sl_price": sl_price,
-                    # EOD_HOLD has no target; a VWAP figure here made the ghost audit
-                    # grade top-coil setups against an exit they never use.
-                    "tp_price": None if is_top_coil else vwap,
-                    "direction": getattr(config, "TRADE_DIRECTION", "SHORT"),
+                    # A hold-to-close exit has no target; a VWAP figure here made
+                    # the ghost audit grade those setups against an exit they
+                    # never use.
+                    "tp_price": None if holds_to_close else vwap,
+                    "direction": strategy.direction.value,
                     "leverage": getattr(config, 'INTRADAY_LEVERAGE', 5.0),
-                    **topcoil_fields,
+                    **setup_fields,
                 }
 
                 obs_id = ml_logger.log_observation(symbol, ltp, features)
                 logger.info(f"   [ML] Logged observation: {obs_id}")
-                if is_top_coil and obs_id:
-                    self._topcoil_episodes[symbol] = (obs_id, now_ist)
+                if signal.rearm_window is not None and obs_id:
+                    self._episodes[episode_key] = (obs_id, now_ist)
             except Exception as e:
                 logger.warning(f"   [ML] Logging error: {e}")
 
         # Build signal dict
         signal_data = {
             'symbol': symbol,
+            'strategy': strategy.name,
             'ltp': ltp,
             'pattern': pattern_desc,
             'stop_loss': sl_price,
@@ -701,7 +712,7 @@ class FyersAnalyzer:
             'signal_low': df.iloc[-2]['low'],
             'setup_high': setup_high,
             'signal_high': setup_high,
-            'tick_size': signal_meta.get('tick_size', 0.05),
+            'tick_size': 0.05,
             'atr': atr,
             'vwap': vwap,
             'meta': meta_str,
@@ -710,31 +721,45 @@ class FyersAnalyzer:
         }
 
         # Quality fields
-        signal_data["stretch_score"] = signal_meta.get("stretch_score", 0.0)
-        signal_data["vol_fade_ratio"] = signal_meta.get("vol_fade_ratio", 0.0)
-        signal_data["confidence"] = signal_meta.get("confidence", "")
-        signal_data["pattern_bonus"] = signal_meta.get("pattern_bonus", "None")
-        signal_data["oi_direction"] = signal_meta.get("oi_direction", "unknown")
+        signal_data["stretch_score"] = signal.stretch_score
+        signal_data["vol_fade_ratio"] = signal.vol_fade_ratio
+        signal_data["confidence"] = signal.confidence
+        signal_data["pattern_bonus"] = signal.pattern
+        signal_data["oi_direction"] = signal.oi_direction
 
-        # TP scaling override
-        if 'tp_atr_mult_override' in signal_meta:
-            signal_data['tp_atr_mult_override'] = signal_meta['tp_atr_mult_override']
-
-        # Exit profile. Absent means the engine default (SCALE TP + time stop);
-        # 'EOD_HOLD' means no ladder and no time stop, run to the 15:10 square-off.
-        if signal_meta.get('exit_profile'):
-            signal_data['exit_profile'] = signal_meta['exit_profile']
-        for _k in ('coil_high', 'coil_low', 'trigger_price'):
-            if _k in signal_meta:
-                signal_data[_k] = signal_meta[_k]
+        # Exit plan. Absent means the engine default (TP ladder + time stop).
+        if plan.tp_atr_mult is not None:
+            signal_data['tp_atr_mult_override'] = plan.tp_atr_mult
+        if plan.profile is not ExitProfile.DEFAULT:
+            signal_data['exit_profile'] = plan.profile.value
+            signal_data['exit_params'] = plan.params()
+        for key, value in signal.extra.items():
+            signal_data.setdefault(key, value)
 
         # The validation gate watches signal_low at 5Hz and enters the moment price
-        # crosses it. TopCoilShort wants that level to be the coil low, not the
-        # previous bar's low: entering AT the level instead of after a confirming
-        # 1-minute close is worth 0.23pp per trade (-0.070% vs -0.302% over 211
-        # and 165 trades respectively), because by the close price is already
-        # through it and the stop is correspondingly wider.
-        if signal_meta.get('signal_low_override'):
-            signal_data['signal_low'] = float(signal_meta['signal_low_override'])
+        # crosses it. A strategy that names its own trigger replaces the default
+        # (the previous bar's low): entering AT a level rather than after a
+        # confirming close was worth 0.23pp per trade on the coil setup.
+        if signal.trigger_price is not None:
+            signal_data['signal_low'] = float(signal.trigger_price)
+            signal_data['trigger_price'] = float(signal.trigger_price)
 
         return signal_data
+
+
+def signal_problem(signal: Signal) -> Optional[str]:
+    """Why a Signal cannot be executed, or None if it can."""
+
+    def bad(x) -> bool:
+        return (isinstance(x, bool) or not isinstance(x, (int, float))
+                or not math.isfinite(x) or x <= 0)
+
+    if not isinstance(signal, Signal):
+        return f"expected Signal, got {type(signal).__name__}"
+    if bad(signal.stop_reference):
+        return f"stop_reference={signal.stop_reference!r}"
+    if signal.trigger_price is not None and bad(signal.trigger_price):
+        return f"trigger_price={signal.trigger_price!r}"
+    if signal.trigger_price is not None and signal.trigger_price >= signal.stop_reference:
+        return "trigger_price must sit below stop_reference for a short"
+    return None
