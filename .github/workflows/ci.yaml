@@ -113,5 +113,21 @@ jobs:
             echo "::error::.env found inside the image"; exit 1
           fi
           echo "no .env in image"
+      # The image built for months without being able to import its own
+      # package: nothing here ever started it. This exercises the real
+      # healthcheck command and resolves the strategies directory, without
+      # credentials and without reaching the broker.
+      - name: Runtime image can import the engine
+        run: |
+          docker run --rm --entrypoint python shortcircuit:ci -c '
+          import shortcircuit.config, shortcircuit.strategy.features
+          from shortcircuit import paths
+          from shortcircuit.strategy import registry
+          assert str(paths.STRATEGIES_DIR) == "/app/strategies", paths.STRATEGIES_DIR
+          assert "example_vwap_stretch_fade" in registry.discover().strategies
+          print("runtime image ok:", paths.PROJECT_ROOT)
+          '
+          status=$(docker inspect --format '{{json .Config.Healthcheck.Test}}' shortcircuit:ci)
+          echo "healthcheck: $status"
       - name: Containerised test run (no credentials)
         run: docker compose -f deploy/docker-compose.test.yml up --exit-code-from tests
