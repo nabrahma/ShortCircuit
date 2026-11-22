@@ -21,6 +21,33 @@ jobs:
         with:
           python-version: "3.12"
 
+      # A tag that disagrees with the package version publishes an image and a
+      # release that report two different versions. Refuse it.
+      - name: Tag matches the package version
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          grep -qx "version = \"${version}\"" pyproject.toml \
+            || { echo "::error::tag ${GITHUB_REF_NAME} does not match pyproject.toml"; exit 1; }
+          grep -qx "__version__ = \"${version}\"" src/shortcircuit/__init__.py \
+            || { echo "::error::tag ${GITHUB_REF_NAME} does not match shortcircuit.__version__"; exit 1; }
+
+      # The body of the release is the version's CHANGELOG section, so the notes
+      # are written once, reviewed in the diff, and cannot drift from the file.
+      - name: Release notes from CHANGELOG
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v v="$version" '
+            index($0, "## [" v "]") == 1 { found = 1; next }
+            found && /^## \[/            { exit }
+            found                        { print }
+          ' CHANGELOG.md > release-notes.md
+          test -s release-notes.md \
+            || { echo "::error::CHANGELOG.md has no section for ${version}"; exit 1; }
+
+      # Image references must be lower case; the repository name is not.
+      - name: Image name
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+
       - name: Dependency audit report
         run: |
           pip install pip-audit
@@ -40,11 +67,12 @@ jobs:
           file: deploy/Dockerfile
           push: true
           tags: |
-            ghcr.io/${{ github.repository }}:${{ github.ref_name }}
-            ghcr.io/${{ github.repository }}:latest
+            ${{ env.IMAGE }}:${{ github.ref_name }}
+            ${{ env.IMAGE }}:latest
 
       - name: Create release
         uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228  # v3.0.2
         with:
+          body_path: release-notes.md
           generate_release_notes: true
           files: pip-audit-report.txt
