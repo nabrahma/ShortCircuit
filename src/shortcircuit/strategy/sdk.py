@@ -53,6 +53,7 @@ __all__ = [
     "ExitProfile",
     "RsiCover",
     "SetupContext",
+    "StagedRsiExit",
     "Signal",
     "Strategy",
 ]
@@ -83,10 +84,16 @@ class ExitProfile(str, Enum):
     EOD_HOLD  No take-profit ladder and no time stop: the position runs on its
               hard stop to the 15:10 square-off, optionally covered early by an
               RSI relief-rally rule (`ExitPlan.rsi_cover`).
+    STAGED_RSI
+              No take-profit ladder and no time stop. RSI decides the exits
+              (`ExitPlan.staged_rsi`): a partial when it cools to one level, with
+              the stop moved to cost, then a trailing stop on the remainder once
+              it reaches a second. The hard stop and the square-off still apply.
     """
 
     DEFAULT = "DEFAULT"
     EOD_HOLD = "EOD_HOLD"
+    STAGED_RSI = "STAGED_RSI"
 
 
 @dataclass(frozen=True)
@@ -105,6 +112,47 @@ class RsiCover:
 
 
 @dataclass(frozen=True)
+class StagedRsiExit:
+    """
+    The exits of an ExitProfile.STAGED_RSI short, all read on COMPLETED bars of
+    `bar_minutes` (aligned to the 09:15 open), RSI Wilder-smoothed over `period`.
+
+    1. Scale-out: once the trade is in profit and RSI has cooled to
+       `scale_out_rsi`, book `scale_out_fraction` of the position. With
+       `stop_to_cost` the stop on the rest moves to the entry price.
+    2. Trail: once RSI reaches `trail_rsi`, the stop on what is left follows the
+       high of the previous completed `trail_bar_minutes` bar, plus
+       `trail_buffer_pct`. It only ever tightens.
+
+    No RSI is read from fewer than `min_bars` completed bars; until then the
+    position runs on its hard stop and the square-off.
+    """
+
+    period: int = 14
+    bar_minutes: int = 5
+    min_bars: int = 15
+    scale_out_rsi: float = 50.0
+    scale_out_fraction: float = 0.5
+    stop_to_cost: bool = True
+    trail_rsi: float = 20.0
+    trail_bar_minutes: int = 5
+    trail_buffer_pct: float = 0.1
+
+    def __post_init__(self) -> None:
+        if self.period < 2 or self.min_bars < self.period + 1:
+            raise ValueError("min_bars must be at least period + 1, and period at least 2")
+        for name in ("bar_minutes", "trail_bar_minutes"):
+            if getattr(self, name) not in (1, 2, 3, 5, 10, 15, 30):
+                raise ValueError(f"{name} must divide the session into whole bars")
+        if not 0.0 < self.scale_out_fraction < 1.0:
+            raise ValueError("scale_out_fraction must be between 0 and 1")
+        if not 0.0 < self.trail_rsi < self.scale_out_rsi < 100.0:
+            raise ValueError("RSI levels must satisfy 0 < trail_rsi < scale_out_rsi < 100")
+        if not 0.0 <= self.trail_buffer_pct < 5.0:
+            raise ValueError("trail_buffer_pct must be in [0, 5)")
+
+
+@dataclass(frozen=True)
 class ExitPlan:
     """The exit a strategy asks the engine to run for its signal."""
 
@@ -113,16 +161,34 @@ class ExitPlan:
     tp_atr_mult: Optional[float] = None
     # EOD_HOLD only: early relief-rally cover. None disables it.
     rsi_cover: Optional[RsiCover] = None
+    # STAGED_RSI only, and required there.
+    staged_rsi: Optional[StagedRsiExit] = None
+    # Hard stop this far from the actual fill, in percent. None places it at the
+    # signal's stop_reference plus the engine's ATR buffer.
+    stop_pct: Optional[float] = None
 
     def __post_init__(self) -> None:
-        if self.profile is ExitProfile.DEFAULT and self.rsi_cover is not None:
+        if self.profile is not ExitProfile.EOD_HOLD and self.rsi_cover is not None:
             raise ValueError("rsi_cover applies to ExitProfile.EOD_HOLD only")
-        if self.profile is ExitProfile.EOD_HOLD and self.tp_atr_mult is not None:
-            raise ValueError("EOD_HOLD has no take-profit for tp_atr_mult to scale")
+        if self.profile is not ExitProfile.DEFAULT and self.tp_atr_mult is not None:
+            raise ValueError(f"{self.profile.value} has no take-profit for tp_atr_mult to scale")
+        if (self.profile is ExitProfile.STAGED_RSI) != (self.staged_rsi is not None):
+            raise ValueError("staged_rsi is required by, and only valid for, ExitProfile.STAGED_RSI")
+        # The order path refuses a stop more than 10% from the fill as implausible.
+        if self.stop_pct is not None and not (
+            isinstance(self.stop_pct, (int, float)) and not isinstance(self.stop_pct, bool)
+            and 0.0 < self.stop_pct <= 10.0
+        ):
+            raise ValueError("stop_pct must be in (0, 10]")
 
     def params(self) -> dict[str, Any]:
         """Serialisable parameters carried with the position and the ML row."""
-        return {"rsi_cover": asdict(self.rsi_cover) if self.rsi_cover else None}
+        out: dict[str, Any] = {"rsi_cover": asdict(self.rsi_cover) if self.rsi_cover else None}
+        if self.staged_rsi is not None:
+            out["staged_rsi"] = asdict(self.staged_rsi)
+        if self.stop_pct is not None:
+            out["stop_pct"] = float(self.stop_pct)
+        return out
 
 
 @dataclass(frozen=True)
@@ -190,7 +256,7 @@ class Signal:
     vol_fade_ratio: float = 0.0
     oi_direction: str = "unknown"
     # Strategy-specific levels carried on the signal dict handed to execution
-    # (e.g. coil_high / coil_low). Keys must not collide with engine fields.
+    # (e.g. a range's high and low). Keys must not collide with engine fields.
     extra: dict[str, Any] = field(default_factory=dict)
     # Strategy-specific features written to the signal's ML observation.
     ml_features: dict[str, Any] = field(default_factory=dict)

@@ -303,11 +303,14 @@ _LIMITER_OWNERS = {
     SRC / "broker" / "transport.py",
 }
 
-# Modules allowed to call `requests` directly. The scanner downloads the public
-# symbol master from public.fyers.in, which is not the rate-limited API.
+# Modules allowed to call `requests` directly. The scanner and the square-off
+# schedule download public symbol masters from public.fyers.in, a static CDN
+# that is not the rate-limited API.
 _BARE_REQUESTS_ALLOWED = {
     SRC / "broker" / "transport.py",
     SRC / "marketdata" / "scanner.py",
+    SRC / "eod" / "squareoff.py",
+    SRC / "backtest" / "history.py",
 }
 
 _HTTP_VERBS = {"get", "post", "put", "delete", "patch", "head", "request"}

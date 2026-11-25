@@ -155,10 +155,13 @@ class EODAnalyzer:
                     continue
 
                 # 2. Simulate Path — with the exit the signal was actually going
-                # to use. A top-coil setup has no take-profit and only exists if
-                # its trigger breaks, so grading it on the VWAP-target path counted
+                # to use. A hold-to-close setup has no take-profit and only exists
+                # if its trigger breaks, so grading it on the VWAP-target path counted
                 # setups that never triggered as trades and exited real ones early.
-                if str(obs.get("exit_profile") or "").upper() == "EOD_HOLD":
+                # STAGED_RSI has no target either, and the VWAP path skips a row
+                # without one. Graded as trigger → stop or square-off: an
+                # approximation that does not replay its scale-out or trail.
+                if str(obs.get("exit_profile") or "").upper() in ("EOD_HOLD", "STAGED_RSI"):
                     outcome_data = self._simulate_eod_hold(obs, relevant_candles, session=df)
                 else:
                     outcome_data = self._simulate_path(obs, relevant_candles)
@@ -224,7 +227,7 @@ class EODAnalyzer:
         Grade a hold-to-close (EOD_HOLD) setup the way the engine trades it.
 
         From the last re-arm: the trigger has 15 minutes to break, and a push
-        through coil_high * 1.002 cancels it first. Once in, the only exits are
+        through the setup high * 1.002 cancels it first. Once in, the only exits are
         the stop and the 15:10 square-off. A setup that never triggers is labelled
         NOT_TRIGGERED, not WIN or LOSS — it was never a trade.
 
@@ -240,11 +243,16 @@ class EODAnalyzer:
         """
         try:
             trig = float(obs.get("trigger_price"))
-            coil_high = float(obs.get("coil_high"))
+            # setup_high is the engine's field; coil_high is read for rows
+            # logged before it existed, when a plug-in wrote its own.
+            setup_high = obs.get("setup_high")
+            if setup_high is None or pd.isna(setup_high):
+                setup_high = obs.get("coil_high")
+            setup_high = float(setup_high)
             sl_price = float(obs.get("sl_price"))
         except (TypeError, ValueError):
             return None
-        if not (trig > 0 and coil_high > 0 and sl_price > trig):
+        if not (trig > 0 and setup_high > 0 and sl_price > trig):
             return None
 
         armed_at = obs.get("armed_at")
@@ -261,7 +269,7 @@ class EODAnalyzer:
             "outcome": "NOT_TRIGGERED", "exit_price": 0.0, "max_favorable": 0.0,
             "max_adverse": 0.0, "pnl_pct": 0.0, "hold_time_mins": 0,
         }
-        inval = coil_high * 1.002
+        inval = setup_high * 1.002
         entry_pos = None
         for k, row in enumerate(df.itertuples(index=False)):
             if (row.dt - armed).total_seconds() > self.HOLD_PENDING_MINUTES * 60:

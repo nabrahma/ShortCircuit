@@ -236,3 +236,20 @@ def test_other_signals_are_untouched(analyzer):
     assert len(analyzer.ml.logged) == 2
     assert analyzer.ml.logged[0]["tp_price"] is not None
     assert "exit_profile" not in analyzer.ml.logged[0]
+
+
+# ── the engine's own level, not a plug-in's ──────────────────────────────────
+
+def test_the_audit_reads_the_engines_setup_high(eod):
+    """New rows carry setup_high; coil_high is only a fallback for older rows."""
+    rows = [(217.5, 216.5, 217.0), (218.6, 217.0, 218.4), (218.0, 215.0, 215.5)]
+    obs = _obs(setup_high=218.0)
+    del obs["coil_high"]
+    r = eod._simulate_eod_hold(obs, _bars(rows))
+    assert r["exit_reason"] == "INVALIDATED"
+
+
+def test_every_hold_signal_logs_the_setup_high(analyzer):
+    analyzer._finalize_signal(_Coil(), _hold_signal(203.2), _ctx("NSE:KSCL-EQ", 206.0, _frame()))
+    f = analyzer.ml.logged[0]
+    assert f["setup_high"] == 218.0

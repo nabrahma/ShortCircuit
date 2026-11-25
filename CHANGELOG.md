@@ -5,6 +5,32 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `ExitProfile.STAGED_RSI` with `StagedRsiExit`: an RSI-timed partial exit with
+  the stop moved to cost, then a trailing stop on the remainder above each
+  completed bar's high. The trail only tightens, and a level price has already
+  crossed closes the position instead of placing a stop that is marketable on
+  arrival.
+- `ExitPlan.stop_pct`: a hard stop at a fixed percentage from the actual fill.
+- **Data-only mode** (`SHORTCIRCUIT_MODE=data_only`): the full pipeline on live
+  data with no ability to trade. The transport refuses every order write before
+  it is sent; entry, adoption and square-off log what they would have done.
+- **Backtester** (`python -m shortcircuit.backtest`): finds 10%+ gainer days,
+  caches their 1-minute history and replays them through the live analyzer's
+  feature code (`derive_features`, now shared) and the engine's exit rules.
+
+### Fixed
+
+- **F&O positions were squared off by the broker, not the bot.** Since 3 Aug
+  2026 Fyers closes MIS in closing-auction (F&O) stocks at 15:05, before the
+  engine's 15:10. These now close at 15:02 and take no new entries after it,
+  decided per stock from Fyers' own F&O list; everything else keeps 15:10.
+- The focus loop's 15:10 check read the machine clock, so in a UTC container it
+  never fired. It now reads IST.
+- A failed stop resize after a partial with no TP-1 level would have raised
+  while building its alert, on the path that flattens an oversized stop.
+
 ## [2.0.0] — 2026-11-22
 
 ShortCircuit is now a strategy-agnostic execution engine for Fyers. A strategy

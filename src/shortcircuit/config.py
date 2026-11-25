@@ -30,6 +30,13 @@ TRADE_DIRECTION = 'SHORT'  # 'SHORT' or 'LONG'
 # A 46-trade replay put 45 ahead of no cap in every phase. 0 disables the exit.
 MAX_HOLD_TIME_MINUTES = 45
 
+# Square-off for F&O stocks, (hour, minute) IST. Since 3 Aug 2026 Fyers squares
+# off MIS in closing-auction (F&O) stocks itself at 15:05 and accepts only CNC
+# orders after it; the engine's 15:10 would arrive after the broker's. Every
+# other equity keeps 15:10 against Fyers' 15:20. Fyers has said its timings may
+# change with the closing-auction revision of 7 Dec 2026 — re-check then.
+CAS_SQUAREOFF_HHMM: tuple = (15, 2)
+
 # Scanner universe filters
 SCANNER_GAIN_MIN_PCT: float = 7.5  # Kept in sync with the G1 gate floor
 # Held at 18.0 deliberately. NSE upper circuits are commonly 20%, and a short that

@@ -27,6 +27,8 @@ from shortcircuit.broker.fyers_broker_interface import (
     PositionFetchError,
 )
 from shortcircuit.observability.ml_logger import get_ml_logger
+from shortcircuit.eod import squareoff
+from shortcircuit.runtime import mode as run_mode
 
 
 logger = logging.getLogger(__name__)
@@ -186,6 +188,17 @@ class OrderManager:
         """
         atr    = signal.get('atr', 0)
         tick   = signal.get('tick_size', 0.05)
+
+        # A strategy that names a fixed-percentage stop (ExitPlan.stop_pct) gets it
+        # measured from the FILL, which is the price actually at risk. The setup
+        # level is not consulted, so the wrong-side case above cannot arise.
+        stop_pct = signal.get('stop_pct')
+        if stop_pct and ltp > 0:
+            pct = float(stop_pct) / 100.0
+            if config.TRADE_DIRECTION == 'LONG':
+                return self._round_sl_to_tick(ltp * (1 - pct), 'BUY', tick)
+            return self._round_sl_to_tick(ltp * (1 + pct), 'SELL', tick)
+
         # max(atr * 0.5, 3 * tick_size), both multipliers from config.
         buffer = max(atr * getattr(config, 'SL_ATR_MULTIPLIER', 0.5),
                      tick * getattr(config, 'SL_MIN_TICK_BUFFER', 3))
@@ -763,6 +776,28 @@ class OrderManager:
                     )
                     return None
 
+            # Data-only: say what would have been done, and do nothing. The
+            # transport would refuse the order anyway; this keeps it out of the
+            # failure paths (cooldowns, alerts) and leaves a clean record.
+            if run_mode.is_data_only():
+                logger.warning(
+                    "🧪 [DATA-ONLY] would %s %s @ ₹%.2f [%s] trigger=%s stop=%s — no order sent",
+                    config.TRADE_DIRECTION, symbol, float(signal.get('ltp') or 0),
+                    signal.get('strategy'), signal.get('trigger_price') or signal.get('signal_low'),
+                    (f"{signal['stop_pct']}% from fill" if signal.get('stop_pct')
+                     else signal.get('stop_loss')),
+                )
+                return None
+
+            # Never open what must already be flat. For an F&O stock that is the
+            # closing-auction cutoff, before the broker's own 15:05 square-off.
+            if squareoff.past_squareoff(symbol):
+                logger.warning(
+                    "🚫 [ENTRY] %s refused: past its %s square-off", symbol,
+                    squareoff.squareoff_time(symbol).strftime("%H:%M"),
+                )
+                return None
+
             # Sizing via compute_qty (full Fyers margin utilization)
             ltp = signal.get('ltp', 0)
             if ltp == 0:
@@ -1058,13 +1093,14 @@ class OrderManager:
                 self.hard_stops[symbol] = sl_id
 
                 # Step 4: Register Position
-                # 'EOD_HOLD' (e.g. top_coil) runs without a take-profit ladder and
+                # 'EOD_HOLD' runs without a take-profit ladder and
                 # without the 45-minute time stop, to the 15:10 square-off. Every
                 # exit variant that cut the trade shorter scored worse across the
                 # sweep: TP1/breakeven/TP2 at a 90-minute cap took the same entries
                 # from +0.09% to -0.21% per trade over 206 of them.
                 _exit_profile = str(signal.get('exit_profile') or 'DEFAULT').upper()
-                _eod_hold = _exit_profile == 'EOD_HOLD'
+                # Profiles that never exit at the VWAP target carry none.
+                _eod_hold = _exit_profile in ('EOD_HOLD', 'STAGED_RSI')
                 pos_state = {
                     'symbol':     symbol,
                     'qty':        qty,

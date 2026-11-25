@@ -377,9 +377,30 @@ make demo           # the same suite in a container, no credentials needed
 python main.py      # live — requires credentials and a migrated database
 ```
 
-**Live operation requires broker credentials.** There is no offline or paper
-mode, and one has not been faked for demonstration purposes. What is reproducible
+**Live operation requires broker credentials.** There is no paper-trading mode,
+and one has not been faked for demonstration purposes. What is reproducible
 without credentials is the build and the full test suite.
+
+### Data-only mode and backtesting
+
+```bash
+SHORTCIRCUIT_MODE=data_only python main.py            # live data, scans, signals — no orders
+python -m shortcircuit.backtest --from 2026-10-01 --to 2026-11-20
+```
+
+Data-only logs in and runs the whole pipeline against the live market, logging
+`[DATA-ONLY] would SHORT …` where it would have entered. It cannot place, modify
+or cancel an order: the transport refuses every order write before it is sent.
+Fyers enforces the static-IP rule on orders only, so this works from any
+connection.
+
+The backtest is always data-only. It finds every session in which a stock traded
+10%+ above its previous close, fetches those days' 1-minute candles (cached
+under `data/backtest/`), and replays them minute by minute through the live
+analyzer's feature code and the engine's exit rules. Trades and a summary go to
+`reports/backtest/`. What it models rather than replays (fills, slippage, the
+circuit limits history cannot show) is listed at the top of
+[`backtest/replay.py`](src/shortcircuit/backtest/replay.py).
 
 ---
 

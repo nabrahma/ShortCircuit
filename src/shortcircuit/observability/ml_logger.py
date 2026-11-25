@@ -301,7 +301,7 @@ class MLDataLogger:
             "exit_params": _encode_json(features.get("exit_params")),
             "strategy": features.get("strategy"),
             "trigger_price": features.get("trigger_price"),
-            "coil_high": features.get("coil_high"),
+            "setup_high": features.get("setup_high"),
             "armed_at": features.get("armed_at"),
             
             # Labels (empty, filled at EOD)
@@ -314,7 +314,28 @@ class MLDataLogger:
             "label_source": None,
             "exit_reason": None,
         }
-        
+
+        # A strategy's own features (Signal.ml_features) become columns of their
+        # own. Engine fields always win a name clash, and anything that is not a
+        # scalar is stored as JSON text so the file stays flat.
+        # numpy scalars are unwrapped first: json.dumps rejects them, and a
+        # failure here would drop the whole observation, not just one field.
+        for key, value in features.items():
+            if key in observation:
+                continue
+            if hasattr(value, "item") and callable(value.item):
+                try:
+                    value = value.item()
+                except (TypeError, ValueError):
+                    pass
+            if value is None or isinstance(value, (bool, int, float, str)):
+                observation[key] = value
+            else:
+                try:
+                    observation[key] = _encode_json(value)
+                except (TypeError, ValueError):
+                    observation[key] = str(value)
+
         with self._lock:
             self._buffer.append(observation)
         

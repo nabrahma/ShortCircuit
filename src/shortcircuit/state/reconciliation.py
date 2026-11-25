@@ -7,6 +7,7 @@ import math
 import re
 import time
 from shortcircuit.broker.fyers_connect import ASYNC_RETRIED_TIMEOUT
+from shortcircuit.runtime import mode as run_mode
 from shortcircuit.state.database import DatabaseManager
 from shortcircuit.broker.fyers_broker_interface import FyersBrokerInterface
 
@@ -560,7 +561,17 @@ class ReconciliationEngine:
           6. Set _db_dirty = True — forces fresh DB fetch next cycle
           7. Acquire capital slot (or emit CRITICAL alert if slot occupied)
           8. Send Telegram MANUAL ENTRY ADOPTED alert
+
+        Not in data-only mode: adoption places a stop, which that mode refuses,
+        and the bot must not manage positions it cannot protect.
         """
+        if run_mode.is_data_only():
+            seen = self.__dict__.setdefault('_data_only_seen', set())
+            if broker_pos.get('symbol') not in seen:
+                seen.add(broker_pos.get('symbol'))
+                logger.warning("🧪 [DATA-ONLY] %s is open at the broker — not adopting it",
+                               broker_pos.get('symbol'))
+            return
         symbol    = broker_pos.get('symbol')
         qty       = abs(broker_pos.get('qty', 0))
         net_qty   = broker_pos.get('qty', 0)

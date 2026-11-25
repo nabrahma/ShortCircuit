@@ -4,12 +4,15 @@ import threading
 import datetime
 import asyncio
 import pytz
+from dataclasses import dataclass
 from typing import Optional
 
 from shortcircuit.broker.fyers_connect import FyersConnect
 from shortcircuit import config
+from shortcircuit.eod import squareoff
+from shortcircuit.runtime import mode as run_mode
 from shortcircuit.strategy import features as F
-from shortcircuit.strategy.sdk import RsiCover
+from shortcircuit.strategy.sdk import RsiCover, StagedRsiExit
 from shortcircuit.execution.order_manager import OrderManager
 
 from shortcircuit.observability.gate_result_logger import get_gate_result_logger
@@ -32,6 +35,52 @@ def rsi_cover_of(trade: dict) -> Optional[RsiCover]:
     except TypeError:
         logger.error("[RSI-TP] malformed rsi_cover %r — rule disabled for this trade", params)
         return None
+
+
+def staged_rsi_of(trade: dict) -> Optional[StagedRsiExit]:
+    """The staged RSI exits a position's strategy asked for, if any."""
+    params = (trade.get('exit_params') or {}).get('staged_rsi')
+    if not params:
+        return None
+    try:
+        return StagedRsiExit(**params)
+    except (TypeError, ValueError):
+        logger.error("[STAGED] malformed staged_rsi %r — rules disabled for this trade", params)
+        return None
+
+
+@dataclass(frozen=True)
+class Bar:
+    epoch: int          # bar open, epoch seconds
+    high: float
+    close: float
+
+
+SESSION_OPEN_MINUTE = 9 * 60 + 15
+
+
+def completed_bars(candles, minutes: int, now_epoch: float) -> list:
+    """
+    Aggregate 1-minute candles into `minutes`-wide bars aligned to the 09:15
+    open, keeping only bars that have fully closed by `now_epoch`. Bars missing
+    minutes are kept — a quiet minute with no trade is still part of the bar.
+    """
+    buckets: dict = {}
+    order: list = []
+    for c in candles:
+        epoch = int(c.epoch)
+        ist_minute = ((epoch + 19800) // 60) % 1440          # +05:30
+        offset = (ist_minute - SESSION_OPEN_MINUTE) // minutes * minutes
+        start = epoch - (ist_minute - SESSION_OPEN_MINUTE - offset) * 60
+        b = buckets.get(start)
+        if b is None:
+            buckets[start] = [float(c.high), float(c.close)]
+            order.append(start)
+        else:
+            b[0] = max(b[0], float(c.high))
+            b[1] = float(c.close)
+    return [Bar(s, buckets[s][0], buckets[s][1]) for s in order
+            if s + minutes * 60 <= now_epoch]
 
 
 def target_reached(ltp: float, level, direction: str = 'SHORT') -> bool:
@@ -662,6 +711,9 @@ class FocusEngine:
         `telegram_bot`). Both failures were swallowed by the outer except, so this
         logged "[RECOVERY] Failed" every startup and adopted nothing.
         """
+        if run_mode.is_data_only():
+            logger.info("🧪 [DATA-ONLY] recovery scan skipped — this mode adopts nothing")
+            return
         try:
             logger.info("[RECOVERY] Scanning for orphaned trades...")
             positions = self.fyers.positions()
@@ -798,6 +850,166 @@ class FocusEngine:
             return rsi
         return None
 
+    def _staged_rsi_step(self, symbol: str, t: dict, ltp: float) -> Optional[str]:
+        """
+        One pass of the ExitProfile.STAGED_RSI exits.
+
+        Returns None to carry on with the loop, 'retry' to go straight to the next
+        tick, or 'done' when the trade has ended and the watch must stop.
+
+        RSI is read once per completed bar, from the broker's tick-aggregated
+        candles, so this costs no REST calls. If the RSI cannot be read (too few
+        bars, no candles) nothing happens and the position stays on its hard stop
+        and the square-off. A decision that fails is retried every 10s, never at
+        5Hz: the usual cause of a failed order is a rate limit.
+        """
+        cfg = staged_rsi_of(t)
+        if cfg is None or t.get('exit_profile') != 'STAGED_RSI' \
+                or t.get('direction', 'SHORT') != 'SHORT':
+            return None
+        if not (self.order_manager and self._event_loop):
+            return None
+        broker = getattr(self.order_manager, 'broker', None)
+        if broker is None or not hasattr(broker, 'get_local_candles'):
+            return None
+
+        st = t.setdefault('staged', {'scaled_out': False, 'trailing': False,
+                                     'rsi_epoch': None, 'trail_epoch': None})
+        now = time.time()
+        if now < st.get('retry_at', 0.0):
+            return None
+        try:
+            candles = broker.get_local_candles(symbol, 400)
+        except Exception as e:
+            logger.debug("[STAGED] %s candles unavailable: %s", symbol, e)
+            return None
+
+        bars = completed_bars(candles, cfg.bar_minutes, now)
+        if len(bars) >= cfg.min_bars and bars[-1].epoch != st.get('rsi_epoch'):
+            last = bars[-1]
+            st['rsi_epoch'] = last.epoch
+            rsi = F.compute_rsi_wilder([b.close for b in bars], cfg.period)
+            # A bar that closed before the entry describes the setup, not the trade.
+            closed_after_entry = last.epoch + cfg.bar_minutes * 60 > float(t.get('entry_ts') or 0)
+            if rsi == rsi and closed_after_entry:                # rsi == rsi rejects NaN
+                in_profit = last.close < t['entry'] and 0 < ltp < t['entry']
+                if not st['scaled_out'] and rsi <= cfg.scale_out_rsi and in_profit:
+                    if self._staged_scale_out(symbol, t, cfg, rsi) == 'done':
+                        return 'done'
+                if st['scaled_out'] and not st['trailing'] and rsi <= cfg.trail_rsi:
+                    st['trailing'] = True
+                    logger.info(
+                        "🪢 [STAGED] %s %s-min RSI %.1f ≤ %.0f — trailing the stop on "
+                        "the last %s shares above each completed %s-min high",
+                        symbol, cfg.bar_minutes, rsi, cfg.trail_rsi,
+                        t['remaining_qty'], cfg.trail_bar_minutes,
+                    )
+
+        if st['trailing']:
+            return self._staged_trail(symbol, t, cfg, candles, ltp, now)
+        return None
+
+    def _staged_scale_out(self, symbol: str, t: dict, cfg: StagedRsiExit, rsi: float) -> Optional[str]:
+        st = t['staged']
+        remaining = int(t['remaining_qty'])
+        exit_qty = int(remaining * cfg.scale_out_fraction)
+        # Latched before dispatch, so a slow broker cannot let the next tick fire
+        # a second partial against the same position.
+        st['scaled_out'] = True
+
+        if exit_qty <= 0:
+            logger.info("[STAGED] %s has %s share(s) — nothing to scale out", symbol, remaining)
+            if cfg.stop_to_cost and not self._resize_stop_after_partial(symbol, t, stop_to_cost=True):
+                return 'done'
+            return None
+
+        logger.info(
+            "🎯 [STAGED] %s %s-min RSI %.1f ≤ %.0f in profit — booking %s of %s",
+            symbol, cfg.bar_minutes, rsi, cfg.scale_out_rsi, exit_qty, remaining,
+        )
+        filled = False
+        try:
+            filled = asyncio.run_coroutine_threadsafe(
+                self.order_manager.partial_exit(symbol, exit_qty, "RSI_SCALE_OUT"),
+                self._event_loop,
+            ).result(timeout=25)
+        except Exception as pe:
+            logger.error("[STAGED] %s partial_exit raised: %s", symbol, pe)
+
+        if not filled:
+            # Nothing sold: position and stop still agree. Re-decide on a later pass.
+            st['scaled_out'] = False
+            st['rsi_epoch'] = None
+            st['retry_at'] = time.time() + 10.0
+            logger.warning("[STAGED] %s scale-out did not fill — position unchanged, "
+                           "retrying in 10s", symbol)
+            return None
+
+        t['remaining_qty'] -= exit_qty
+        if not self._resize_stop_after_partial(symbol, t, stop_to_cost=cfg.stop_to_cost):
+            return 'done'
+        self._dispatch_alert(
+            f"🎯 *SCALE-OUT*\n\n`{symbol}` RSI {rsi:.1f} — booked {exit_qty}, "
+            f"{t['remaining_qty']} left with the stop at "
+            f"{'cost' if t.get('be_moved') else 'its original level'}."
+        )
+        return None
+
+    def _staged_trail(self, symbol: str, t: dict, cfg: StagedRsiExit,
+                      candles, ltp: float, now: float) -> Optional[str]:
+        st = t['staged']
+        bars = completed_bars(candles, cfg.trail_bar_minutes, now)
+        if not bars or bars[-1].epoch == st.get('trail_epoch'):
+            return None
+        last = bars[-1]
+        st['trail_epoch'] = last.epoch
+
+        tick = float(t.get('tick_size') or 0.05)
+        new_stop = OrderManager._round_sl_to_tick(
+            last.high * (1 + cfg.trail_buffer_pct / 100.0), 'SELL', tick
+        )
+        current = float(t.get('sl') or 0)
+        if current and new_stop >= current:
+            return None                                  # a trail only ever tightens
+
+        if ltp >= new_stop:
+            # Price is already back above the level the trail would use, so the
+            # trail is hit. A stop placed there would be marketable on arrival.
+            logger.info("🪢 [STAGED] %s ltp ₹%.2f is above the trail level ₹%.2f — closing",
+                        symbol, ltp, new_stop)
+            exited = False
+            try:
+                exited = asyncio.run_coroutine_threadsafe(
+                    self.order_manager.safe_exit(symbol, "TRAIL_STOP"), self._event_loop,
+                ).result(timeout=30)
+            except Exception as err:
+                logger.error("[STAGED] %s trail exit failed: %s", symbol, err)
+            if self._retire_or_retry(symbol, exited, "TRAIL_STOP"):
+                return 'done'
+            st['trail_epoch'] = None
+            st['retry_at'] = time.time() + 10.0
+            return 'retry'
+
+        ok = False
+        try:
+            ok = asyncio.run_coroutine_threadsafe(
+                self.order_manager.move_hard_stop(symbol, new_stop, new_qty=t['remaining_qty']),
+                self._event_loop,
+            ).result(timeout=15)
+        except Exception as err:
+            logger.error("[STAGED] %s trail move raised: %s", symbol, err)
+        if ok:
+            logger.info("🪢 [STAGED] %s stop trailed ₹%.2f → ₹%.2f x%s",
+                        symbol, current, new_stop, t['remaining_qty'])
+            t['sl'] = new_stop
+        else:
+            # The previous stop is still resting, so the position is protected.
+            st['trail_epoch'] = None
+            st['retry_at'] = time.time() + 10.0
+            logger.warning("[STAGED] %s trail to ₹%.2f not accepted — stop stays at ₹%.2f, "
+                           "retrying in 10s", symbol, new_stop, current)
+        return None
+
     def _retire_or_retry(self, symbol: str, exited: bool, reason: str) -> bool:
         """
         True to stop watching this position, False to keep the loop alive.
@@ -866,7 +1078,8 @@ class FocusEngine:
         except Exception as e:
             logger.warning(f"[ALERT] Dispatch failed: {e}")
 
-    def _resize_stop_after_partial(self, symbol: str, t: dict) -> bool:
+    def _resize_stop_after_partial(self, symbol: str, t: dict,
+                                   stop_to_cost: Optional[bool] = None) -> bool:
         """Shrink the broker-side stop to match what is left after a partial fill.
 
         Returns True if the trade is still open, False if the remainder was closed.
@@ -880,9 +1093,13 @@ class FocusEngine:
         Breakeven only decides the stop PRICE. The quantity is corrected either way,
         and if it cannot be corrected the remainder is closed rather than left under
         an oversized stop.
+
+        `stop_to_cost` is the strategy's own breakeven choice (STAGED_RSI); None
+        defers to P52_BREAKEVEN_AFTER_TP1, the TP-1 ladder's switch.
         """
         new_qty = t['remaining_qty']
-        be_enabled = getattr(config, 'P52_BREAKEVEN_AFTER_TP1', False)
+        be_enabled = (getattr(config, 'P52_BREAKEVEN_AFTER_TP1', False)
+                      if stop_to_cost is None else bool(stop_to_cost))
         target_price = t['entry'] if be_enabled else t['sl']
         t['be_moved'] = False
 
@@ -922,6 +1139,7 @@ class FocusEngine:
                 continue
 
             t['be_moved'] = be_enabled
+            t['sl'] = target_price
             logger.info(
                 "🔒 [SL_RESIZE] %s stop now ₹%.2f x%s (verified=%s)%s",
                 symbol, target_price, new_qty,
@@ -937,10 +1155,13 @@ class FocusEngine:
             "flattening the remainder rather than leaving an oversized stop resting.",
             symbol, new_qty,
         )
+        # A STAGED_RSI partial has no TP-1 level; formatting None would raise
+        # here, on the path that is meant to flatten an oversized stop.
+        partial_at = f" at ₹{t['tp_1']:.2f}" if t.get('tp_1') else ""
         self._dispatch_alert(
             f"🚨 *STOP RESIZE FAILED*\n\n"
             f"Symbol: `{symbol}`\n"
-            f"Took the partial at ₹{t['tp_1']:.2f}, but the broker stop could not be "
+            f"Took the partial{partial_at}, but the broker stop could not be "
             f"reduced to {new_qty}.\n\n"
             f"Closing the remainder now — an oversized stop would flip the position."
         )
@@ -981,27 +1202,30 @@ class FocusEngine:
         soft_stop_pct = getattr(config, 'DISCRETIONARY_CONFIG', {}).get('soft_stop_pct', 0.015)
 
         exit_profile = str(position_data.get('exit_profile') or 'DEFAULT').upper()
-        eod_hold = exit_profile == 'EOD_HOLD'
+        # Both non-default profiles run without the VWAP ladder, and their hard
+        # stop — not the 1.5% soft stop — is the one that governs.
+        eod_hold = exit_profile in ('EOD_HOLD', 'STAGED_RSI')
 
         if is_long:
             soft_sl = entry_price * (1 - soft_stop_pct)
         else:
             soft_sl = entry_price * (1 + soft_stop_pct)
 
-        # EOD_HOLD was measured against the hard stop above the coil high — median
-        # risk 1.63%. The 1.5% soft stop sits INSIDE that on most of these trades
-        # and would quietly exit roughly half of them early, which is a different
-        # strategy from the one that was backtested. Push it just past the hard
-        # stop so it still backstops a broker stop that never fired, but never
-        # governs the exit.
+        # A non-default profile's hard stop is the strategy's measured risk, and
+        # is often wider than the 1.5% soft stop (median 1.63% on the setups
+        # EOD_HOLD was measured on). Left inside it, the soft stop would quietly
+        # exit many trades early, which is not the strategy that was tested.
+        # Push it just past the hard stop so it still backstops a broker stop
+        # that never fired, but never governs the exit.
         if eod_hold and sl_price > 0:
             if is_long:
                 soft_sl = min(soft_sl, sl_price * 0.999)
             else:
                 soft_sl = max(soft_sl, sl_price * 1.001)
             logger.info(
-                "[TOPCOIL] %s EOD_HOLD — soft stop moved to ₹%.2f, behind the hard "
-                "stop at ₹%.2f", symbol, soft_sl, sl_price,
+                "%s %s %s — soft stop moved to ₹%.2f, behind the hard stop at ₹%.2f",
+                f"[{exit_profile}]",
+                symbol, exit_profile, soft_sl, sl_price,
             )
 
         tick = position_data.get('tick_size', 0.05)
@@ -1065,6 +1289,12 @@ class FocusEngine:
             'exit_profile':    exit_profile,
             'exit_params':     position_data.get('exit_params'),
             'entry_minute':    int(time.time() // 60 * 60),
+            'entry_ts':        time.time(),
+            'tick_size':       tick,
+            # STAGED_RSI progress. Latched before each action is dispatched, and
+            # unlatched only if the action provably did not happen.
+            'staged':          {'scaled_out': False, 'trailing': False,
+                                'rsi_epoch': None, 'trail_epoch': None},
         }
         
         # Per-trade detector state MUST be reset here — it lives on the engine,
@@ -1206,9 +1436,11 @@ class FocusEngine:
                 if self.order_manager:
                     pos = self.order_manager.active_positions.get(symbol, {})
                     manual_override = pos.get('manual_override', False)
+                    # STAGED_RSI is exempt for the same reason: its exits are
+                    # RSI-timed, and a clock would cut them short.
                     _eod_hold = str(
                         pos.get('exit_profile') or 'DEFAULT'
-                    ).upper() == 'EOD_HOLD'
+                    ).upper() in ('EOD_HOLD', 'STAGED_RSI')
 
                 # Time-based stop: the mean-reversion thesis has expired.
                 # It does not apply to EOD_HOLD, whose thesis is distribution into
@@ -1233,10 +1465,14 @@ class FocusEngine:
                             self.stop_focus("TIME_STOP")
                             return
 
-                # EOD square-off at 15:10.
-                now = datetime.datetime.now()
-                if now.hour == 15 and now.minute >= 10:
-                    logger.warning(f"⏰ [EOD] Force Closing {symbol} at 15:10")
+                # EOD square-off: 15:10, or the closing-auction cutoff for an F&O
+                # stock, which the broker squares off itself at 15:05. IST
+                # explicitly — the container clock is UTC.
+                if squareoff.past_squareoff(symbol):
+                    logger.warning(
+                        "⏰ [EOD] Force Closing %s at %s", symbol,
+                        squareoff.squareoff_time(symbol).strftime("%H:%M"),
+                    )
                     if self.order_manager and self._event_loop:
                         future = asyncio.run_coroutine_threadsafe(
                             self.order_manager.safe_exit(symbol, "EOD_SQUARE_OFF"),
@@ -1452,6 +1688,14 @@ class FocusEngine:
                     else:
                         self.stop_focus("RSI_TP")
                     return
+
+                # STAGED_RSI: scale-out to cost, then a trailing stop. Respects
+                # manual_override like every other bot-initiated exit.
+                _staged = None if manual_override else self._staged_rsi_step(symbol, t, ltp)
+                if _staged == 'done':
+                    return
+                if _staged == 'retry':
+                    continue
 
                 # Take-profit engine — see config.TP_MODE for the mode ranking.
                 # Both stages respect manual_override: once the operator has taken

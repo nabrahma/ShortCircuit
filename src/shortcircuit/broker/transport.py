@@ -37,6 +37,7 @@ from typing import Any, Callable, TypeVar
 from urllib.parse import urlsplit
 
 from shortcircuit.broker.rest_limiter import Priority, RateLimiter, rest_limiter
+from shortcircuit.runtime import mode as run_mode
 
 logger = logging.getLogger(__name__)
 
@@ -101,16 +102,35 @@ _HIGH_PRIORITY_PREFIXES: tuple[str, ...] = (
 
 _API_PREFIX = "/api/v3"
 
+# Endpoints whose non-GET requests change orders or positions: place, modify and
+# cancel (/orders/sync and the basket, multileg and GTT variants), and exit or
+# convert (/positions). Reads of the same resources are GETs. The margin
+# calculator (/multiorder/margin) and login are POSTs that change nothing.
+_ORDER_WRITE_PREFIXES: tuple[str, ...] = (
+    "/orders", "/multi-order", "/multileg", "/gtt", "/positions",
+)
+_READ_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
-def classify(method: str, url: str) -> Priority:
-    """Rate-limit priority for a request, from its endpoint path."""
+
+def _api_path(url: str) -> str:
     path = urlsplit(url).path or "/"
     if path.startswith(_API_PREFIX):
         path = path[len(_API_PREFIX):] or "/"
-    for prefix in _HIGH_PRIORITY_PREFIXES:
-        if path == prefix or path.startswith(prefix + "/"):
-            return Priority.HIGH
-    return Priority.NORMAL
+    return path
+
+
+def _matches(path: str, prefixes: tuple[str, ...]) -> bool:
+    return any(path == p or path.startswith(p + "/") for p in prefixes)
+
+
+def classify(method: str, url: str) -> Priority:
+    """Rate-limit priority for a request, from its endpoint path."""
+    return Priority.HIGH if _matches(_api_path(url), _HIGH_PRIORITY_PREFIXES) else Priority.NORMAL
+
+
+def is_order_write(method: str, url: str) -> bool:
+    """True if this request would place, modify or cancel an order, or exit a position."""
+    return method.upper() not in _READ_METHODS and _matches(_api_path(url), _ORDER_WRITE_PREFIXES)
 
 
 # Throttle detection
@@ -242,6 +262,12 @@ class MeteredRequests:
     ) -> Callable[..., Any]:
         def metered(*args: Any, **kwargs: Any) -> Any:
             method, url = describe(args, kwargs)
+            # Checked first, before a token is spent or a byte is sent. Raised
+            # inside the SDK's try-block, so callers see an ordinary error reply.
+            if is_order_write(method, url) and run_mode.is_data_only():
+                logger.warning("🧪 [DATA-ONLY] refused %s %s — no orders in data-only mode",
+                               method, _api_path(url))
+                raise run_mode.TradingDisabled(f"{method} {_api_path(url)} refused: data-only mode")
             priority = classify(method, url)
             if not _take_credit() and not self._limiter.acquire(priority=priority):
                 # Raised inside the SDK's own try-block, which converts it to its

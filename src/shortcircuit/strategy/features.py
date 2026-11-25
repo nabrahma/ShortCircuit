@@ -2,7 +2,7 @@
 features.py — Pure stateless feature extraction.
 
 All functions are pure: data in, value out. No broker calls, no side effects.
-Extracted from god_mode_logic.py and analyzer.py during the BackToVWAPShort collapse.
+Shared by the engine and by strategy plug-ins.
 """
 
 import numpy as np

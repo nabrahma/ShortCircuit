@@ -148,12 +148,24 @@ The exit mechanics live in the engine; a strategy picks and parameterises one.
 |---|---|---|
 | `ExitProfile.DEFAULT` | Take-profit ladder per `TP_MODE` toward VWAP, soft stop, `MAX_HOLD_TIME_MINUTES` time stop | `tp_atr_mult` scales the target |
 | `ExitProfile.EOD_HOLD` | No ladder, no time stop: runs on the hard stop to the 15:10 square-off | `rsi_cover=RsiCover(...)` covers early on a relief-rally RSI dip once in profit |
+| `ExitProfile.STAGED_RSI` | No ladder, no time stop. In profit, RSI cooling to one level books part of the position and moves the stop on the rest to cost; RSI reaching a second level trails the stop above each completed bar's high | `staged_rsi=StagedRsiExit(...)`: levels, fraction, RSI and trail timeframes |
+
+Any profile can also set `stop_pct`: the hard stop then sits that far from the
+actual fill (e.g. `ExitPlan(stop_pct=5.0)` is 5% above a short's fill) instead
+of at `stop_reference` plus the ATR buffer. `stop_reference` still decides when
+a pending setup is abandoned.
+
+**Square-off is per stock.** Fyers squares off intraday positions in F&O stocks
+(the closing-auction list) at 15:05, so those close at 15:02 and take no new
+entries after it; everything else closes at 15:10. A stock moves to the earlier
+cutoff only when it is on Fyers' published F&O list. If the list cannot be
+loaded, every position keeps 15:10.
 
 ```python
 Signal(
-    pattern="COIL_BREAK",
-    stop_reference=coil_high,
-    trigger_price=coil_low * 0.999,
+    pattern="RANGE_BREAK",
+    stop_reference=range_high,
+    trigger_price=range_low * 0.999,
     exit=ExitPlan(profile=ExitProfile.EOD_HOLD, rsi_cover=RsiCover(threshold=40)),
     rearm_window=timedelta(minutes=15),
 )

@@ -33,6 +33,8 @@ from shortcircuit.marketdata.scanner import FyersScanner
 from shortcircuit.runtime.startup_recovery import StartupRecovery
 from shortcircuit.observability.telegram_bot import ShortCircuitBot
 from shortcircuit.execution.trade_manager import TradeManager
+from shortcircuit.eod import squareoff
+from shortcircuit.runtime import mode as run_mode
 from shortcircuit.strategy import registry as strategy_registry
 
 IST = pytz.timezone("Asia/Kolkata")
@@ -200,9 +202,26 @@ class RuntimeContext:
 
 
 async def _initialize_runtime() -> RuntimeContext:
+    # The mode first: an unrecognised SHORTCIRCUIT_MODE must stop the process
+    # rather than fall back to trading.
+    if run_mode.current() is run_mode.Mode.DATA_ONLY:
+        logger.warning("=" * 70)
+        logger.warning("🧪 DATA-ONLY MODE — market data, scans and signals only. "
+                       "No order can be placed, modified or cancelled.")
+        logger.warning("=" * 70)
+
     # Strategies first: a misconfigured plug-in is a configuration error, and it
     # should stop the process before it logs in, opens sockets or syncs capital.
     strategies = strategy_registry.load()
+
+    # Which stocks the broker squares off at its earlier closing-auction cutoff.
+    # Bounded and non-fatal: without the list every position keeps 15:10.
+    try:
+        await asyncio.wait_for(asyncio.to_thread(squareoff.registry.refresh), timeout=45)
+    except asyncio.TimeoutError:
+        logger.warning("[INIT] F&O list still downloading after 45s — continuing; "
+                       "positions keep 15:10 until it lands.")
+
     logger.info("[INIT] Authenticating with Fyers...")
     fyers_conn = FyersConnect(config)
     fyers_client = fyers_conn.fyers
@@ -805,6 +824,12 @@ async def main() -> int:
             if ctx.focus_engine:
                 ctx.focus_engine.stop("EOD_SQUAREOFF")
                 logger.info("[EOD] FocusEngine validation monitor stopped before square-off.")
+
+            # Data-only opened nothing, and anything open at the broker is the
+            # operator's own: not ours to close, and closing is refused anyway.
+            if run_mode.is_data_only():
+                logger.info("🧪 [DATA-ONLY] square-off skipped — this mode holds no positions")
+                return True
 
             # Retried until the account is provably flat or the deadline passes,
             # never one-shot. On 2026-07-29 a single attempt hung 974s in its first

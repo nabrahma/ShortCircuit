@@ -188,7 +188,7 @@ class FyersAnalyzer:
             list(strategies) if strategies is not None else registry.load()
         )
         # (strategy, symbol) -> (obs_id, last re-arm). A setup re-qualifies on every
-        # bar it persists, so without this one JAYKAY coil on 23 Sep wrote 43 ML
+        # bar it persists, so without this one setup on NSE:JAYKAY 23 Sep wrote 43 ML
         # rows and 43 signal-log lines, each graded as a separate 'missed trade'.
         self._episodes: Dict[Tuple[str, str], Tuple[str, datetime.datetime]] = {}
 
@@ -335,25 +335,6 @@ class FyersAnalyzer:
             return None
         gr.g2_pass = True
 
-        # Enrichment
-        F.enrich_dataframe(df)
-        prev_df = df.iloc[:-1]
-
-        atr = F.compute_atr(df)
-        vwap_sd = F.compute_vwap_sd(prev_df)
-        slope_30m, _ = F.compute_vwap_slope(df.iloc[-30:], window=30)
-        slope_5m, _ = F.compute_vwap_slope(df.iloc[-5:], window=5)
-
-        # Decay trigger: fast slope drops below slow slope
-        is_decaying = False
-        decay_sd = 2.0
-        if slope_5m < (slope_30m * 0.90) and vwap_sd > decay_sd:
-            is_decaying = True
-            logger.info(
-                "⚡ [INFLECTION] %s Decaying: Fast(%.2f) < Slow(%.2f)",
-                symbol, slope_5m, slope_30m,
-            )
-
         # Gain calculation
         pc = 0
         try:
@@ -369,22 +350,9 @@ class FyersAnalyzer:
         except Exception:
             pass
 
-        day_high = df['high'].max()
-        open_price = df.iloc[0]['open']
-        baseline = pc if pc > 0 else open_price
-        gain_pct = ((ltp - baseline) / baseline) * 100
-
-        # Profile pre-calc
-        profile = None
-        profile_rejection = False
-        vol_z = 0.0
-        try:
-            profile = self.profile_analyzer.calculate_market_profile(df, mode='VOLUME')
-            if profile:
-                profile_rejection, _ = self.profile_analyzer.check_profile_rejection(df, ltp)
-            vol_z = self.market_context.get_volume_z_score(df)
-        except Exception as e:
-            logger.warning(f"Profile/VolZ pre-calc error for {symbol}: {e}")
+        feats = derive_features(symbol, df, ltp, pc, self.profile_analyzer, self.market_context)
+        atr, vwap_sd = feats['atr'], feats['vwap_sd']
+        gain_pct, day_high = feats['gain_pct'], feats['day_high']
 
         allowed, reason = self.market_context.is_safe_trade_window()
         gr.g7_pass = allowed
@@ -443,21 +411,11 @@ class FyersAnalyzer:
             now=datetime.datetime.now(),
             df=df,
             df_15m=df_15m,
-            gain_pct=gain_pct,
-            day_high=float(day_high),
-            open_price=float(open_price),
-            atr=atr,
-            vwap_sd=vwap_sd,
-            slope_fast=slope_5m,
-            slope_slow=slope_30m,
-            is_decaying=is_decaying,
-            vol_z=vol_z,
-            profile=profile,
-            profile_rejection=profile_rejection,
             upper_circuit=upper_circuit,
             lower_circuit=lower_circuit,
             spread_pct=spread_pct,
             is_circuit_hitter=is_circuit_hitter,
+            **feats,
         )
 
         # G5/G6: strategies, in priority order. The first Signal wins; a later
@@ -579,13 +537,18 @@ class FyersAnalyzer:
         """Stop, signal log, ML observation and the execution signal dict. No gates."""
         symbol, ltp, df = ctx.symbol, ctx.ltp, ctx.df
         plan = signal.exit
-        holds_to_close = plan.profile is ExitProfile.EOD_HOLD
+        # Neither non-default profile exits at the VWAP target.
+        holds_to_close = plan.profile is not ExitProfile.DEFAULT
 
-        # Stop: the strategy's reference level plus the engine's ATR buffer.
+        # Stop: the strategy's reference level plus the engine's ATR buffer, or a
+        # fixed percentage. The latter is measured from the fill by the order
+        # path; the figure here, from the signal price, is the planning estimate.
         atr = ctx.atr
         buffer = max(atr * 0.5, 0.25)
         setup_high = signal.stop_reference
         sl_price = setup_high + buffer
+        if plan.stop_pct is not None:
+            sl_price = ltp * (1 + plan.stop_pct / 100.0)
         pattern_desc = signal.pattern
         slope = ctx.slope_fast
 
@@ -628,6 +591,7 @@ class FyersAnalyzer:
             'exit_profile': plan.profile.value,
             'exit_params': plan.params(),
             'trigger_price': signal.trigger_price,
+            'setup_high': setup_high,
             'sl_price': sl_price,
             'armed_at': now_ist.isoformat(timespec='seconds'),
         } if plan.profile is not ExitProfile.DEFAULT else {}
@@ -733,18 +697,69 @@ class FyersAnalyzer:
         if plan.profile is not ExitProfile.DEFAULT:
             signal_data['exit_profile'] = plan.profile.value
             signal_data['exit_params'] = plan.params()
+        if plan.stop_pct is not None:
+            signal_data['stop_pct'] = float(plan.stop_pct)
         for key, value in signal.extra.items():
             signal_data.setdefault(key, value)
 
         # The validation gate watches signal_low at 5Hz and enters the moment price
         # crosses it. A strategy that names its own trigger replaces the default
         # (the previous bar's low): entering AT a level rather than after a
-        # confirming close was worth 0.23pp per trade on the coil setup.
+        # confirming close was worth 0.23pp per trade on a measured setup.
         if signal.trigger_price is not None:
             signal_data['signal_low'] = float(signal.trigger_price)
             signal_data['trigger_price'] = float(signal.trigger_price)
 
         return signal_data
+
+
+def derive_features(symbol: str, df: pd.DataFrame, ltp: float, prev_close: float,
+                    profile_analyzer, market_context) -> Dict[str, Any]:
+    """
+    The indicator fields of a SetupContext, from the 1-minute frame alone.
+
+    Enriches `df` in place (vwap and the indicator columns). Shared by the live
+    analyzer and the backtest, so a strategy sees the same numbers in both.
+    """
+    F.enrich_dataframe(df)
+    prev_df = df.iloc[:-1]
+
+    atr = F.compute_atr(df)
+    vwap_sd = F.compute_vwap_sd(prev_df)
+    slope_30m, _ = F.compute_vwap_slope(df.iloc[-30:], window=30)
+    slope_5m, _ = F.compute_vwap_slope(df.iloc[-5:], window=5)
+
+    # Decay trigger: fast slope drops below slow slope
+    is_decaying = False
+    if slope_5m < (slope_30m * 0.90) and vwap_sd > 2.0:
+        is_decaying = True
+        logger.info(
+            "⚡ [INFLECTION] %s Decaying: Fast(%.2f) < Slow(%.2f)",
+            symbol, slope_5m, slope_30m,
+        )
+
+    day_high = df['high'].max()
+    open_price = df.iloc[0]['open']
+    baseline = prev_close if prev_close and prev_close > 0 else open_price
+    gain_pct = ((ltp - baseline) / baseline) * 100
+
+    profile = None
+    profile_rejection = False
+    vol_z = 0.0
+    try:
+        profile = profile_analyzer.calculate_market_profile(df, mode='VOLUME')
+        if profile:
+            profile_rejection, _ = profile_analyzer.check_profile_rejection(df, ltp)
+        vol_z = market_context.get_volume_z_score(df)
+    except Exception as e:
+        logger.warning(f"Profile/VolZ pre-calc error for {symbol}: {e}")
+
+    return dict(
+        gain_pct=gain_pct, day_high=float(day_high), open_price=float(open_price),
+        atr=atr, vwap_sd=vwap_sd, slope_fast=slope_5m, slope_slow=slope_30m,
+        is_decaying=is_decaying, vol_z=vol_z, profile=profile,
+        profile_rejection=profile_rejection,
+    )
 
 
 def signal_problem(signal: Signal) -> Optional[str]:

@@ -106,8 +106,12 @@ credentials and fail everywhere else.
 
 ## Coverage
 
-Reported honestly rather than padded. Current figures:
-[`evidence/coverage-by-package.txt`](evidence/coverage-by-package.txt).
+Reported honestly rather than padded. The figures below and in
+[`evidence/coverage-by-package.txt`](evidence/coverage-by-package.txt) were
+captured at 1.0.0, before strategies became plug-ins, so they still name the
+strategy modules that have since left the engine. `make evidence` regenerates
+them; run it on Linux (or in the test container) so no local paths end up in
+the output.
 
 ```
 market_utils.py            100%
