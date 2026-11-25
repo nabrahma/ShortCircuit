@@ -19,8 +19,12 @@ What is modelled, because history cannot show it:
     exits at the next bar's open — every fill then moved against the trade by
     `slippage_pct`. When one bar could have hit both the stop and something
     better, the stop is assumed to have come first.
-  * The live depth feed's circuit limits and spread are unavailable, so the
-    upper-circuit guards of a strategy do not run, and leverage is not screened.
+  * The live depth feed is unavailable. The upper circuit is inferred from the
+    day itself (`infer_upper_circuit`): NSE bands a non-F&O stock at 5, 10 or
+    20%, and a day that stopped dead at +10% was banded at 10. A strategy's
+    circuit guards then run on that, and `is_circuit_hitter` is set once the
+    session high has reached it, as the live analyzer marks it. Spread is
+    unknown (0.0) and leverage is not screened.
   * One position per symbol-day; the engine's single capital slot across
     symbols is not modelled.
 
@@ -31,6 +35,7 @@ take-profit ladder — flagged as `exit_model` on every such trade.
 from __future__ import annotations
 
 import datetime as dt
+import json
 import logging
 import math
 from dataclasses import dataclass, field
@@ -78,6 +83,10 @@ class Trade:
     mfe_pct: float = 0.0
     mae_pct: float = 0.0
     features: dict = field(default_factory=dict)
+    trigger: float = 0.0
+    stop_reference: float = 0.0
+    # (time, stop) every time the stop moved, the first entry the initial stop.
+    stop_path: list = field(default_factory=list)
 
     @property
     def exit_reason(self) -> str:
@@ -100,7 +109,13 @@ class Trade:
             "legs": " | ".join(f"{f:.0%}@{p:.2f} {r}" for f, p, r, _ in self.legs),
             "gross_pct": round(self.gross_pct, 3), "net_pct": round(self.net_pct(costs), 3),
             "mfe_pct": round(self.mfe_pct, 3), "mae_pct": round(self.mae_pct, 3),
-            "exit_model": self.exit_model, **self.features,
+            "exit_model": self.exit_model,
+            "trigger": round(self.trigger, 2), "stop_reference": round(self.stop_reference, 2),
+            # Machine-readable twins of `legs`, for the dashboard.
+            "legs_json": json.dumps([[round(f, 4), round(p, 2), r, w.isoformat()]
+                                     for f, p, r, w in self.legs]),
+            "stop_path_json": json.dumps([[w.isoformat(), round(p, 2)] for w, p in self.stop_path]),
+            **self.features,
         }
 
 
@@ -110,6 +125,32 @@ class DayResult:
     invalidated: int = 0
     expired: int = 0
     trades: list = field(default_factory=list)
+    # One dict per signal: what became of it (ENTERED, INVALIDATED, EXPIRED).
+    events: list = field(default_factory=list)
+
+
+def infer_upper_circuit(prev_close: float, day_high: float, fno: Optional[bool]) -> float:
+    """
+    The day's upper circuit as well as daily bars can tell it; 0.0 when unknown.
+
+    F&O stocks have no fixed band, only dynamic ones that widen, so 0.0. Other
+    stocks are banded at 2, 5, 10 or 20%; one that topped out within a tick or
+    two of +10% was banded at 10 (it could not go higher), and one that went
+    beyond it at 20. Days that never reached +9.9% leave the band unknown: a
+    strategy shorting smaller moves against a 2% or 5% band runs without its
+    circuit guard here. The band is a fixed exchange parameter the live engine reads
+    at the open, so deriving it from the whole day leaks no price direction.
+    """
+    if fno or prev_close <= 0 or day_high <= 0:
+        return 0.0
+    gain = (day_high / prev_close - 1) * 100
+    if 9.9 <= gain <= 10.1:
+        band = 10.0
+    elif 10.1 < gain <= 20.1:
+        band = 20.0
+    else:
+        return 0.0
+    return round(round(prev_close * (1 + band / 100) / 0.05) * 0.05, 2)
 
 
 def _tick_up(price: float, tick: float = 0.05) -> float:
@@ -147,10 +188,11 @@ def _first_signal(strategies: Sequence[Strategy], ctx: SetupContext):
 
 def replay_day(symbol: str, day: pd.DataFrame, prev_close: float,
                strategies: Sequence[Strategy], costs: Costs = Costs(),
-               max_trades: int = 1) -> DayResult:
+               max_trades: int = 1, upper_circuit: float = 0.0) -> DayResult:
     """
     `day` is one session's 1-minute bars: epoch, datetime (IST), open, high,
-    low, close, volume — completed bars only.
+    low, close, volume — completed bars only. `upper_circuit` is the day's
+    band, 0.0 when unknown (see `infer_upper_circuit`).
     """
     out = DayResult()
     if day is None or len(day) < 20:
@@ -178,9 +220,11 @@ def replay_day(symbol: str, day: pd.DataFrame, prev_close: float,
 
         frame = _frame_at(day, i)
         feats = derive_features(symbol, frame, ltp, prev_close, profile, market)
+        high_so_far = max(float(day["high"].iloc[:i].max()), ltp)
+        hitter = upper_circuit > 0 and high_so_far >= upper_circuit * 0.999
         ctx = SetupContext(symbol=symbol, ltp=ltp, now=t.to_pydatetime(), df=frame,
-                           df_15m=None, upper_circuit=0.0, lower_circuit=0.0,
-                           spread_pct=0.0, is_circuit_hitter=False, **feats)
+                           df_15m=None, upper_circuit=upper_circuit, lower_circuit=0.0,
+                           spread_pct=0.0, is_circuit_hitter=hitter, **feats)
         strategy, sig = _first_signal(strategies, ctx)
         if sig is None:
             i += 1
@@ -190,6 +234,12 @@ def replay_day(symbol: str, day: pd.DataFrame, prev_close: float,
         trigger = float(sig.trigger_price) if sig.trigger_price is not None \
             else float(frame["low"].iloc[-2])
         entry_i, fill = _gate(day, i, trigger, float(sig.stop_reference) * INVALIDATION)
+        out.events.append({
+            "date": t.date().isoformat(), "symbol": symbol, "strategy": strategy.name,
+            "time": t.strftime("%H:%M"), "trigger": round(trigger, 2),
+            "stop_reference": round(float(sig.stop_reference), 2),
+            "outcome": "ENTERED" if entry_i is not None else fill,
+        })
         if entry_i is None:
             out.invalidated += fill == "INVALIDATED"
             out.expired += fill == "EXPIRED"
@@ -198,6 +248,7 @@ def replay_day(symbol: str, day: pd.DataFrame, prev_close: float,
 
         trade = _run_trade(symbol, day, entry_i, float(fill) * (1 - costs.slippage_pct / 100),
                            sig, strategy, feats["atr"], t, costs, cutoff_time)
+        trade.trigger = trigger
         out.trades.append(trade)
         exit_t = trade.legs[-1][3] if trade.legs else day["datetime"].iloc[-1]
         i = int((day["datetime"] > exit_t).idxmax()) if (day["datetime"] > exit_t).any() else len(day)
@@ -232,6 +283,8 @@ def _run_trade(symbol, day, j, entry, sig: Signal, strategy: Strategy, atr: floa
         entry=entry, stop=stop,
         exit_model="staged_rsi" if staged else "stop_or_squareoff",
         features={k: v for k, v in sig.ml_features.items() if isinstance(v, (int, float, str))},
+        stop_reference=float(sig.stop_reference),
+        stop_path=[(day["datetime"].iloc[j], stop)],
     )
     remaining, scaled, trailing = 1.0, False, False
     rsi_seen, trail_seen = None, None
@@ -255,8 +308,9 @@ def _run_trade(symbol, day, j, entry, sig: Signal, strategy: Strategy, atr: floa
                 if o < entry:
                     close(remaining * staged.scale_out_fraction, o, "RSI_SCALE_OUT", when)
                     scaled = True
-                    if staged.stop_to_cost:
-                        stop = min(stop, entry)
+                    if staged.stop_to_cost and entry < stop:
+                        stop = entry
+                        trade.stop_path.append((when, stop))
                 pending = None
             elif pending == "TRAIL_EXIT":
                 close(remaining, o, "TRAIL_STOP", when)
@@ -297,6 +351,7 @@ def _run_trade(symbol, day, j, entry, sig: Signal, strategy: Strategy, atr: floa
                         pending = "TRAIL_EXIT"
                     else:
                         stop = level
+                        trade.stop_path.append((when, stop))
 
     if remaining > 1e-9:
         close(remaining, float(day["close"].iloc[-1]), "EOD_SQUAREOFF", day["datetime"].iloc[-1])
@@ -332,4 +387,4 @@ def summarise(trades: Sequence[Trade], costs: Costs) -> dict:
     }
 
 
-__all__ = ["Costs", "DayResult", "Trade", "replay_day", "summarise"]
+__all__ = ["Costs", "DayResult", "Trade", "infer_upper_circuit", "replay_day", "summarise"]

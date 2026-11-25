@@ -347,6 +347,7 @@ def test_the_equity_list_is_eq_series_only():
         "1,A,0,1,0.05,X,s,d,0,NSE:AAA-EQ,0",
         "2,B,0,1,0.05,X,s,d,0,NSE:BBB-BE,0",
         "3,C,0,1,0.05,X,s,d,0,NSE:NIFTY50-INDEX,0",
+        "4,NIPPON INDIA ETF GOLD BEES,9,1,0.01,X,s,d,0,NSE:GOLDBEES-EQ,0",
     ])
     assert hist.nse_equities(text) == ["NSE:AAA-EQ"]
 
@@ -367,8 +368,8 @@ def test_the_command_line_runs_end_to_end_without_the_network(tmp_path, monkeypa
     monkeypatch.setattr(cli, "History", lambda client: hist.History(client, cache_dir=tmp_path))
     strat = _Once(at="09:35", trigger=112.0, stop_ref=113.0)
     monkeypatch.setattr(cli.registry, "load", lambda names=None: [strat])
-    args = cli.parse(["--from", d, "--to", d, "--symbols", "NSE:A-EQ", "--slippage", "0", "--cost", "0"])
-    frame, summary = cli.run(args, _Client(daily=daily, minute=minute))
+    args = cli.parse(["--from", d, "--to", d, "--symbols", "NSE:A-EQ", "--slippage", "0", "--cost", "0", "--jobs", "1"])
+    frame, summary, signals = cli.run(args, _Client(daily=daily, minute=minute))
     assert summary["gainer_days"] == 1 and summary["trades"] == 1
     assert frame["exit_reason"].tolist() == ["SL_HIT"]
     assert run_mode.is_data_only(), "the backtest forces data-only mode"
@@ -391,3 +392,212 @@ def test_strategy_features_reach_the_ml_file_and_never_overwrite_engine_fields(t
     assert isinstance(row["bars_since"], int), "numpy scalars are unwrapped"
     assert row["levels"] == '{"a": 1}'
     assert row["ltp"] == 120.0, "an engine field is never overwritten by a feature"
+
+
+# ── circuit inference, the signal record, the dashboard ──────────────────────
+
+from shortcircuit.backtest.replay import infer_upper_circuit  # noqa: E402
+
+
+@pytest.mark.parametrize("high,fno,uc", [
+    (110.0, False, 110.0),      # stopped dead at +10%: banded at 10
+    (113.0, False, 120.0),      # went past +10%: banded at 20
+    (125.0, False, 0.0),        # past +20%: no band applies
+    (105.0, False, 0.0),        # never near a band that matters
+    (113.0, True, 0.0),         # F&O: no fixed band
+    (113.0, None, 120.0),       # F&O list unknown: treated as banded
+])
+def test_the_upper_circuit_is_inferred_from_the_day(high, fno, uc):
+    assert infer_upper_circuit(100.0, high, fno) == uc
+
+
+def test_the_circuit_guard_sees_the_band_and_marks_a_hitter():
+    closes = [104 + 0.4 * i for i in range(20)] + [113.0] * 20
+    highs = [c + 0.05 for c in closes]
+    highs[22] = 120.0                                   # touched the 20% circuit at 09:37
+    s = _Once(at="99:99", trigger=1, stop_ref=200)
+    replay_day("NSE:X-EQ", _day(closes, highs=highs), PREV, [s], Costs(0, 0), upper_circuit=120.0)
+    by_time = {c.now.strftime("%H:%M"): c for c in s.seen}
+    assert by_time["09:36"].upper_circuit == 120.0 and not by_time["09:36"].is_circuit_hitter
+    assert by_time["09:38"].is_circuit_hitter, "marked once the session high reached the band"
+
+
+def test_every_signal_is_recorded_with_its_outcome_and_the_stop_path():
+    up = [104 + 0.4 * i for i in range(20)]
+    fall = [up[-1] - 1.0 * (i + 1) for i in range(6)]
+    s = _Once(at="09:35", trigger=111.0, stop_ref=112.5)
+    res = _run(up + fall + [108.0, 110.0, 112.0, 113.0], s)
+    assert [e["outcome"] for e in res.events] == ["ENTERED"]
+    assert res.events[0]["time"] == "09:35" and res.events[0]["trigger"] == 111.0
+    (trade,) = res.trades
+    assert trade.trigger == 111.0
+    assert [p for _, p in trade.stop_path] == [trade.stop, trade.entry], "initial stop, then to cost"
+    row = trade.row(Costs(0, 0))
+    import json
+    assert [leg[2] for leg in json.loads(row["legs_json"])] == ["RSI_SCALE_OUT", "COST_STOP"]
+    assert len(json.loads(row["stop_path_json"])) == 2
+
+    s2 = _Once(at="09:35", trigger=100.0, stop_ref=150.0)
+    assert [e["outcome"] for e in _run([112.0] * 60, s2).events] == ["EXPIRED"]
+
+
+def test_the_command_line_writes_the_signals_and_the_dashboard(tmp_path, monkeypatch):
+    import json
+    from shortcircuit.backtest import __main__ as cli
+    from shortcircuit.backtest import report
+    from shortcircuit.eod import squareoff
+    monkeypatch.setenv(run_mode.ENV, "live")
+    monkeypatch.setattr(squareoff.registry, "refresh", lambda *a, **k: False)
+    monkeypatch.setattr(hist, "CACHE_DIR", tmp_path / "cache")
+    d = "2026-11-24"
+    daily = {"NSE:A-EQ": [[_epoch("2026-11-21"), 100, 101, 99, 100, 5e5],
+                          [_epoch(d), 101, 113, 100, 112, 9e5]]}
+    bars = _day(list(RUN_UP))
+    minute = {"NSE:A-EQ": bars[["epoch", "open", "high", "low", "close", "volume"]].values.tolist()}
+    client = _Client(daily=daily, minute=minute)
+    monkeypatch.setattr(cli, "History", lambda c: hist.History(c, cache_dir=tmp_path / "cache"))
+    monkeypatch.setattr(cli, "connect", lambda: client)
+    # A hostile feature string must not be able to end the page's data script.
+    strat = _Once(at="09:35", trigger=112.0, stop_ref=113.0)
+    real_eval = strat.evaluate
+
+    def evaluate(ctx):
+        sig = real_eval(ctx)
+        if sig is not None:
+            sig.ml_features = {"note": "</script><script>alert(1)</script>", "score": 1.5}
+        return sig
+    strat.evaluate = evaluate
+    monkeypatch.setattr(cli.registry, "load", lambda names=None: [strat])
+    out = tmp_path / "run.csv"
+    assert cli.main(["--from", d, "--to", d, "--symbols", "NSE:A-EQ", "--slippage", "0",
+                     "--cost", "0", "--jobs", "1", "--out", str(out)]) == 0
+
+    signals = pd.read_csv(tmp_path / "run_signals.csv")
+    assert signals["outcome"].tolist() == ["ENTERED"]
+    page = (tmp_path / "run.html").read_text(encoding="utf-8")
+    for url, sri in report.LIBS.values():
+        assert f'src="{url}" integrity="{sri}"' in page, "libraries are pinned by hash"
+    assert "{{" not in page, "every placeholder is filled"
+    assert "</script><script>alert" not in page
+    blob = page.split('<script id="data" type="application/json">', 1)[1].split("</script>", 1)[0]
+    data = json.loads(blob)
+    (t,) = data["trades"]
+    assert t["reason"] == "SL_HIT" and t["features"]["note"].startswith("</script>")
+    assert t["key"] in data["bars"], "the trade's minute bars are embedded for the replay"
+    assert len(data["bars"][t["key"]]["t"]) == len(bars)
+    assert t["entry_t"] == _epoch(d, 9, 35) + report.IST_OFFSET_S, "chart time reads as IST"
+
+
+def test_the_dashboard_builds_for_a_run_with_no_trades(tmp_path):
+    from shortcircuit.backtest import report
+    csv = tmp_path / "empty.csv"
+    csv.write_text("")
+    page = (tmp_path / "empty.html")
+    assert report.build(str(csv), cache_dir=tmp_path) == str(page)
+    assert '"trades":[]' in page.read_text(encoding="utf-8")
+
+
+def test_the_page_rsi_matches_the_engine_rsi():
+    from shortcircuit.backtest import report
+    from shortcircuit.strategy import features as F
+    closes = pd.Series([100 + (i % 7) - 0.3 * i for i in range(60)], dtype=float)
+    series = report._rsi(closes)
+    assert series[:14] == [None] * 14
+    for k in (20, 40, 59):
+        assert series[k] == pytest.approx(F.compute_rsi_wilder(closes.iloc[: k + 1]), abs=0.01)
+
+
+def test_parallel_replay_matches_the_serial_one(tmp_path, monkeypatch):
+    """Worker processes load the strategy by name and get the parent's F&O list;
+    the trades they find must be exactly the serial run's."""
+    from shortcircuit.backtest import __main__ as cli
+    from shortcircuit.eod import squareoff
+    monkeypatch.setenv(run_mode.ENV, "live")
+    monkeypatch.setattr(squareoff.registry, "refresh", lambda *a, **k: False)
+    rng = __import__("random").Random(3)
+    daily, minute, sessions = {}, {}, ["2026-11-23", "2026-11-24"]
+    for k in range(3):
+        sym = f"NSE:P{k}-EQ"
+        daily[sym] = [[_epoch("2026-11-20"), 100, 101, 99, 100, 5e5]] + \
+                     [[_epoch(d), 101, 116, 100, 100, 9e5] for d in sessions]
+        rows = []
+        for d in sessions:
+            px = 103.0
+            for i in range(375):
+                o = px
+                px = max(50.0, px + (0.06 if i < 90 else -0.03) + rng.uniform(-0.25, 0.25))
+                rows.append([_epoch(d) + 60 * i, o, max(o, px) + 0.1, min(o, px) - 0.1, px,
+                             900_000 if i == 88 else 40_000])
+        minute[sym] = rows
+
+    def run(jobs):
+        monkeypatch.setattr(cli, "History", lambda c: hist.History(c, cache_dir=tmp_path / str(jobs)))
+        args = cli.parse(["--from", sessions[0], "--to", sessions[-1], "--symbols", ",".join(daily),
+                          "--strategies", "example_vwap_stretch_fade", "--jobs", str(jobs)])
+        frame, summary, _ = cli.run(args, _Client(daily=daily, minute=minute))
+        return frame, summary
+
+    serial, s1 = run(1)
+    parallel, s2 = run(2)
+    assert s1["gainer_days"] == s2["gainer_days"] == 6
+    assert s1["signals"] == s2["signals"] and s1["signals"] > 0, "the fixture must produce signals"
+    pd.testing.assert_frame_equal(serial.reset_index(drop=True), parallel.reset_index(drop=True))
+
+
+def test_minute_bars_are_fetched_per_100_day_window_and_cached_per_day(tmp_path):
+    days = [dt.date(2026, 1, 5), dt.date(2026, 1, 6), dt.date(2026, 3, 30), dt.date(2026, 6, 1)]
+    rows = [[_epoch(d.isoformat(), 10, 0), 100, 101, 99, 100, 10] for d in days]
+    rows.append([_epoch("2026-01-07", 10, 0), 1, 1, 1, 1, 1])          # not a wanted day
+
+    class Ranged(_Client):
+        def history(self, data):
+            self.calls.append((data["symbol"], data["range_from"], data["range_to"]))
+            lo, hi = data["range_from"], data["range_to"]
+            return {"s": "ok", "candles": [r for r in rows if lo <= pd.Timestamp(r[0], unit="s", tz="UTC")
+                                           .tz_convert(IST).date().isoformat() <= hi]}
+
+    client = Ranged()
+    h = hist.History(client, cache_dir=tmp_path)
+    assert hist.prefetch_minutes(h, [("NSE:A-EQ", d) for d in days]) == 2
+    assert client.calls == [("NSE:A-EQ", "2026-01-05", "2026-03-30"), ("NSE:A-EQ", "2026-06-01", "2026-06-01")]
+    for d in days:
+        df = h.minute("NSE:A-EQ", d)
+        assert len(df) == 1 and df["datetime"].iloc[0].date() == d
+    assert not h._path("minute", "NSE:A-EQ", "2026-01-07").exists(), "only wanted days are written"
+    assert hist.prefetch_minutes(h, [("NSE:A-EQ", d) for d in days]) == 0, "cached days cost nothing"
+
+
+
+def test_a_throttled_history_request_is_retried_not_dropped(tmp_path):
+    class Throttled(_Client):
+        def __init__(self, fails):
+            super().__init__(daily={"NSE:A-EQ": [[_epoch("2026-11-23"), 1, 2, 1, 2, 9]]})
+            self.fails = fails
+
+        def history(self, data):
+            if self.fails:
+                self.fails -= 1
+                return {"s": "error", "code": -360, "message": "You've reached your API request limit."}
+            return super().history(data)
+
+    waits = []
+    h = hist.History(Throttled(2), cache_dir=tmp_path, sleep=waits.append)
+    assert len(h.daily("NSE:A-EQ", dt.date(2026, 11, 23), dt.date(2026, 11, 23))) == 1
+    assert waits == list(hist.RETRY_WAITS_S[:2]) and h.failures == []
+
+    h2 = hist.History(Throttled(99), cache_dir=tmp_path / "b", sleep=waits.append)
+    assert hist.gainer_days(h2, ["NSE:A-EQ"], dt.date(2026, 11, 23), dt.date(2026, 11, 23),
+                            10, 40, 1) == []
+    assert len(h2.failures) == 1, "a request that never succeeds is counted, not lost"
+
+
+def test_a_long_run_charts_the_recent_best_and_worst_trades_only():
+    from shortcircuit.backtest import report
+    n = 50
+    trades = pd.DataFrame({"date": [f"2026-{1 + i // 28:02d}-{1 + i % 28:02d}" for i in range(n)],
+                           "entry_time": ["10:00"] * n, "net_pct": [float(i % 17 - 8) for i in range(n)]})
+    keep = report._charted(trades, recent=5, extremes=3)
+    assert set(range(45, 50)) <= keep, "the most recent"
+    assert trades["net_pct"].idxmax() in keep and trades["net_pct"].idxmin() in keep
+    assert len(keep) <= 5 + 2 * 3
+    assert report._charted(trades.head(8), recent=5, extremes=3) == set(range(8))

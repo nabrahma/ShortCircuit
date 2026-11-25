@@ -40,6 +40,10 @@ package-dir = { "" = "src" }
 where = ["src"]
 include = ["shortcircuit*"]
 
+# The backtest dashboard's page template.
+[tool.setuptools.package-data]
+"shortcircuit.backtest" = ["*.html"]
+
 # ── pytest ────────────────────────────────────────────────────────────────
 # Replaces pytest.ini. asyncio_mode=auto is preserved from the original.
 [tool.pytest.ini_options]

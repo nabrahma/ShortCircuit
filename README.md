@@ -397,10 +397,21 @@ connection.
 The backtest is always data-only. It finds every session in which a stock traded
 10%+ above its previous close, fetches those days' 1-minute candles (cached
 under `data/backtest/`), and replays them minute by minute through the live
-analyzer's feature code and the engine's exit rules. Trades and a summary go to
-`reports/backtest/`. What it models rather than replays (fills, slippage, the
-circuit limits history cannot show) is listed at the top of
+analyzer's feature code and the engine's exit rules. Trades, every signal and
+a summary go to `reports/backtest/`. What it models rather than replays (fills,
+slippage, the circuit band it infers from the day) is listed at the top of
 [`backtest/replay.py`](src/shortcircuit/backtest/replay.py).
+
+Each run also writes an HTML dashboard beside the CSV: the account curve and
+drawdown, a scorecard and funnel, a candlestick replay of every trade with its
+entry, partials, stop path and RSI, a daily P&L calendar, and exit, return,
+time-of-day and monthly breakdowns. Leverage (1×/4×/5×) and single-slot versus
+every-signal are toggles on the page. It is built from cached data, so it can
+be rebuilt without logging in:
+
+```bash
+python -m shortcircuit.backtest.report reports/backtest/<run>.csv --leverage 5
+```
 
 ---
 
@@ -446,8 +457,9 @@ Worth stating plainly. A repo with no limitations section usually just has undoc
   means concurrent opportunities are logged and skipped.
 - **One broker.** Fyers-specific. The broker interface is not abstracted behind a
   generic protocol.
-- **No backtester in this repository.** Historical evaluation is done separately;
-  nothing here validates a strategy against past data.
+- **The backtest models what history cannot show.** Fills, slippage, the
+  circuit band and the single capital slot are approximated, and MIS leverage
+  is not screened; see the list at the top of `backtest/replay.py`.
 - **Short side only.** The validation gate and stop mechanics are short-only;
   LONG strategies are refused at load time until they are supported.
 - **One scan universe.** The scanner's gain, volume and price filters are engine

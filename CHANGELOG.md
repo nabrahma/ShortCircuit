@@ -19,9 +19,24 @@ this project follows [Semantic Versioning](https://semver.org/).
 - **Backtester** (`python -m shortcircuit.backtest`): finds 10%+ gainer days,
   caches their 1-minute history and replays them through the live analyzer's
   feature code (`derive_features`, now shared) and the engine's exit rules.
+- **Backtest dashboard**: every run writes a self-contained HTML page — account
+  curve, scorecard, a candlestick replay of each trade with its stop path and
+  RSI, daily P&L calendar and breakdowns — rebuildable offline with
+  `python -m shortcircuit.backtest.report`. Charts by TradingView Lightweight
+  Charts and Apache ECharts, pinned by subresource-integrity hash.
+- The backtest now infers each day's upper circuit, so strategies' circuit
+  guards run on history, and records every signal and what became of it.
+- Multi-year backtests: minute history is fetched in 100-day windows per stock
+  (about 60% fewer requests), days replay across processes (`--jobs`), and a
+  throttled or failed history request is retried instead of silently dropping
+  its stock. Requests that still fail are counted in the summary and flagged on
+  the dashboard. Long runs chart the most recent, best and worst trades only.
+
 
 ### Fixed
 
+- The backtest universe included ETFs, which share the `-EQ` suffix. It now
+  takes stocks only, from the symbol master's instrument type.
 - **F&O positions were squared off by the broker, not the bot.** Since 3 Aug
   2026 Fyers closes MIS in closing-auction (F&O) stocks at 15:05, before the
   engine's 15:10. These now close at 15:02 and take no new entries after it,

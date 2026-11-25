@@ -103,6 +103,16 @@ class FnoRegistry:
         )
         return True
 
+    def snapshot(self) -> Optional[frozenset[str]]:
+        """The loaded list, for handing to another process; None when unknown."""
+        with self._lock:
+            return self._symbols
+
+    def adopt(self, symbols: Optional[frozenset[str]]) -> None:
+        """Take a list another process already loaded and validated."""
+        with self._lock:
+            self._symbols = frozenset(symbols) if symbols is not None else None
+
     def is_fno(self, symbol: str) -> Optional[bool]:
         """True or False when known; None when the list has not loaded."""
         with self._lock:
