@@ -19,9 +19,9 @@ this project follows [Semantic Versioning](https://semver.org/).
 - **Backtester** (`python -m shortcircuit.backtest`): finds 10%+ gainer days,
   caches their 1-minute history and replays them through the live analyzer's
   feature code (`derive_features`, now shared) and the engine's exit rules.
-- **Backtest dashboard**: every run writes a self-contained HTML page — account
-  curve, scorecard, a candlestick replay of each trade with its stop path and
-  RSI, daily P&L calendar and breakdowns — rebuildable offline with
+- **Backtest dashboard**: every run writes a self-contained HTML page that fits
+  one screen — account curve, scorecard, a candlestick replay of each trade with
+  its stop path and RSI, a year × month return grid and breakdowns — rebuildable offline with
   `python -m shortcircuit.backtest.report`. Charts by TradingView Lightweight
   Charts and Apache ECharts, pinned by subresource-integrity hash.
 - The backtest now infers each day's upper circuit, so strategies' circuit
