@@ -212,9 +212,10 @@ rule. A strategy whose direction differs from the engine's runtime
 `TRADE_DIRECTION` is skipped rather than inverted. A strategy that raises, or
 returns unusable levels, counts as no setup.
 
-**Cost.** LONG strategies are refused until the validation gate supports them,
-and the scan universe is still one engine-wide filter rather than per strategy.
-Strategies removed from the tree remain in the repository's history.
+**Cost.** LONG strategies were refused until the validation gate supported them
+(superseded by ADR-014), and the scan universe is still one engine-wide filter
+rather than per strategy. Strategies removed from the tree remain in the
+repository's history.
 
 ---
 
@@ -238,3 +239,41 @@ minimum interval; the transport makes "every request is counted" structural.
 prepaid. Two tests in `tests/unit/test_transport.py` pin the invariant: no module
 outside the transport takes tokens, and none reaches the API through bare
 `requests`.
+
+---
+
+## ADR-014 — Each strategy trades its own side
+
+**Decision.** `Strategy.direction` decides a signal's side, and the signal
+carries it (`direction`) through the validation gate, the order path, the
+position (`side`), the focus loop and reconciliation. `config.TRADE_DIRECTION`
+becomes a filter — `'BOTH'` (default), `'SHORT'` or `'LONG'` — that only decides
+which sides may open positions. A strategy also declares the movers it wants
+(`Universe`: gainers, losers or both; AUTO means gainers for a short, losers for
+a long), and the scanner watches the union. Every rule that was written for a
+short is mirrored for a long: gate, stop, take-profit ladder, G9, the RSI exits
+(read as 100 − RSI) and the trail (under each bar's low). The side-specific
+logic lives in one module, `execution/directions.py`, used by both the live
+engine and the backtest.
+
+**Why.** The engine had a global LONG mode left over from before the plug-ins,
+but the plug-in registry refused LONG strategies, so a long strategy could not
+run at all, and a short and a long could never run together. With one global
+switch, flipping it would also have changed the side assumed for an open
+position. Reading the side from the signal and the position makes that
+impossible: a filter change on Telegram decides which new signals reach the
+order path and never touches an open one.
+
+**Consequences.** A deployment of short strategies is unchanged: it scans the
+same gainers, asks the same strategies and places the same orders. Losers are
+scanned only while a strategy wants them, because each is a history fetch on the
+shared rate limit. The backtest picks loser days for long strategies.
+`tests/unit/test_long_short.py` pins it, including a symmetry property: a long on
+a price path reflected through 2 × the previous close trades exactly the
+reflection of the short, through every exit profile.
+
+**Cost.** Percentages (`stop_pct`, the trail buffer, the 0.2% invalidation) are
+taken of each side's own prices, so a long mirrors a short in percent, not in
+rupees. The live order path for a long is covered by unit tests against fake
+brokers; it has not yet run against the broker, and should be watched in
+data-only mode before it trades.

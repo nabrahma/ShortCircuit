@@ -12,7 +12,7 @@ The product thesis:
 
 > The edge is not in predicting every move. The edge is in waiting until momentum is extended, structurally rejected, liquidity is fading, and execution can be verified.
 
-The system infrastructure is: Python 3.10+ asyncio, Fyers API v3 (REST for quote batches and order submission; WebSocket for real-time tick data and order fill events), PostgreSQL + asyncpg for trade journaling, and python-telegram-bot (PTB) v20+ for the operator interface. The operator has no web UI — all signals, trade alerts, live P&L, commands (`/auto on`, `/status`, `/mode buy|sell`), and EOD summaries flow exclusively through Telegram.
+The system infrastructure is: Python 3.10+ asyncio, Fyers API v3 (REST for quote batches and order submission; WebSocket for real-time tick data and order fill events), PostgreSQL + asyncpg for trade journaling, and python-telegram-bot (PTB) v20+ for the operator interface. The operator has no web UI — all signals, trade alerts, live P&L, commands (`/auto on`, `/status`, `/mode both|long|short`), and EOD summaries flow exclusively through Telegram.
 
 The concurrency model is a **single asyncio event loop** with a `TaskGroup` launching four concurrent tasks: `trading_loop`, `telegram_bot`, `reconciliation`, and `eod_scheduler`, plus `eod_watchdog`. All tasks share a single `asyncio.Event` called `shutdown_event`. When any component sets this event, every `while not shutdown_event.is_set()` loop exits cleanly.
 
@@ -277,7 +277,7 @@ Telegram is the only operator interface. It handles:
 - Signal discovery notifications
 - Validation updates
 - Auto-mode control (`/auto on`, `/auto off`)
-- Direction switching (`/mode buy`, `/mode sell`)
+- Direction filter (`/mode both`, `/mode long`, `/mode short`)
 - Position and P&L snapshots (`/status`)
 - Broker health alerts
 - Trade notifications (entry, SL, TP, exit)

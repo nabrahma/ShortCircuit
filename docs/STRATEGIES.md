@@ -41,6 +41,10 @@ A complete working example is
    ACTIVE = ("my_fade",)
    ```
 
+   A long is the same contract with `direction = Direction.LONG`: its
+   `stop_reference` is the setup low, and the engine buys the break above its
+   trigger. See [Long and short](#long-and-short).
+
 3. Start the bot. The startup log names every active strategy and where it was
    loaded from:
 
@@ -99,6 +103,66 @@ Import errors are included in the message.
 
 ---
 
+## Long and short
+
+Every strategy declares the side it trades, and every signal it returns trades
+that side. A short and a long can be active at once, and the one capital slot is
+shared between them (the first to fill takes it).
+
+```python
+from shortcircuit.strategy.sdk import Direction, Signal, Strategy, Universe
+
+class Capitulation(Strategy):
+    name = "capitulation"
+    direction = Direction.LONG          # buys; the stop sits under stop_reference
+    universe = Universe.LOSERS          # the default for a LONG anyway (AUTO)
+
+    def evaluate(self, ctx):
+        if ctx.gain_pct > -8 or ctx.vwap_sd > -3:
+            return None
+        return Signal(pattern="CAPITULATION", stop_reference=ctx.day_low)
+```
+
+**The engine mirrors everything for a long.**
+
+| | SHORT | LONG |
+|---|---|---|
+| Entry order | SELL | BUY |
+| `stop_reference` | the setup high | the setup low |
+| Hard stop | above it, by `max(0.5 × ATR, 0.25)` | below it, by the same buffer |
+| Default trigger | the previous bar's low | the previous bar's high |
+| Validation gate | enters on a break **below** the trigger; abandoned if price first pushes 0.2% above `stop_reference` | enters on a break **above** the trigger; abandoned if price first drops 0.2% below `stop_reference` |
+| Take-profit ladder | targets below entry, toward VWAP | targets above entry, toward VWAP |
+| G9 HTF check | passes stretch above VWAP; blocks a move up that is accelerating | the mirror: stretch below VWAP, blocks an accelerating fall |
+| RSI exits | levels as written | read as 100 − RSI, so one set of parameters means the same thing on both sides |
+| Trailing stop | above each completed bar's high, only falling | below each completed bar's low, only rising |
+
+`stop_pct` and the trail buffer are percentages of the long's own prices, so a
+long mirrors a short in percent, not in rupees.
+
+**Which movers a strategy is offered: `universe`.** The scanner watches the
+union of what the active strategies ask for, and offers each candidate only to
+the strategies whose universe includes it.
+
+| `Universe` | Offered |
+|---|---|
+| `AUTO` (default) | gainers for a SHORT, losers for a LONG |
+| `GAINERS` | up `SCANNER_GAIN_MIN_PCT`–`SCANNER_GAIN_MAX_PCT` on the day |
+| `LOSERS` | down `SCANNER_LOSS_MIN_PCT`–`SCANNER_LOSS_MAX_PCT` |
+| `MOVERS` | both |
+
+Losers are only scanned while some active strategy wants them: each candidate
+is a history fetch, and fetches share the broker's rate limit with the order
+path. A deployment of short strategies scans exactly what it always has.
+
+**The operator's filter: `config.TRADE_DIRECTION`.** `'BOTH'` (the default)
+lets each strategy trade its own side; `'SHORT'` or `'LONG'` holds the other
+side back. It is switchable from Telegram with `/mode both|long|short`. It only
+filters: it never turns a short setup into a buy, and an open position keeps its
+own side, stop and exits whatever it is switched to.
+
+---
+
 ## What a strategy receives: `SetupContext`
 
 Computed once per candidate by the engine, for every strategy.
@@ -108,8 +172,8 @@ Computed once per candidate by the engine, for every strategy.
 | `symbol`, `ltp`, `now` | The candidate, its last price, evaluation time |
 | `df` | Session 1-minute frame, enriched with `vwap` and indicator columns. **The last row is the bar still forming**; use `df.iloc[:-1]` for completed bars |
 | `df_15m` | 15-minute frame, or `None` |
-| `gain_pct` | % change vs previous close (open if unavailable) |
-| `day_high`, `open_price` | Session high and open |
+| `gain_pct` | % change vs previous close (open if unavailable); negative for a loser |
+| `day_high`, `day_low`, `open_price` | Session high, low and open |
 | `atr` | ATR of the 1-minute frame |
 | `vwap_sd` | Stretch from session VWAP in standard deviations (completed bars) |
 | `slope_fast`, `slope_slow` | 5- and 30-minute VWAP slopes |
@@ -119,6 +183,7 @@ Computed once per candidate by the engine, for every strategy.
 | `upper_circuit`, `lower_circuit` | Circuit limits; `0.0` when unknown |
 | `spread_pct` | `(ask − bid) / ltp`; `0.0` when unknown |
 | `is_circuit_hitter` | Touched its upper circuit earlier this session |
+| `is_lower_circuit_hitter` | Touched its lower circuit earlier this session (the long-side twin) |
 
 The helpers in `shortcircuit.strategy.features` (RSI, VWAP SD, ATR, volume fade,
 pattern detection) are available for anything the context does not carry.
@@ -128,9 +193,9 @@ pattern detection) are available for anything the context does not carry.
 | Field | Default | Meaning |
 |---|---|---|
 | `pattern` | required | Label for logs, the signal CSV and the ML row |
-| `stop_reference` | required | The hard stop sits here plus the engine's buffer, `max(0.5 × ATR, 0.25)`. The setup is also abandoned if price pushes above it before entry |
+| `stop_reference` | required | The setup level the hard stop is built from: the stop sits beyond it by the engine's buffer, `max(0.5 × ATR, 0.25)` — above it for a SHORT, below it for a LONG. The setup is also abandoned if price runs through it before entry |
 | `confidence` | `"MEDIUM"` | Passed to the signal manager (G8) and logged |
-| `trigger_price` | previous bar's low | Entry level the validation gate watches at 5 Hz; must sit below `stop_reference` |
+| `trigger_price` | previous bar's low (SHORT) or high (LONG) | Entry level the validation gate watches at 5 Hz; must sit on the entry side of `stop_reference`: below it for a SHORT, above it for a LONG |
 | `exit` | `ExitPlan()` | How the engine manages the position (below) |
 | `rearm_window` | `None` | A setup re-qualifying inside this window keeps its first ML observation instead of logging a new one |
 | `stretch_score`, `vol_fade_ratio`, `oi_direction` | `0.0`, `0.0`, `"unknown"` | Quality scores logged for analysis |
@@ -138,7 +203,7 @@ pattern detection) are available for anything the context does not carry.
 | `ml_features` | `{}` | Strategy-specific features written to the ML observation |
 
 A `Signal` the engine cannot execute (a non-positive or non-finite stop, a
-trigger at or above the stop) is logged and treated as no setup.
+trigger on the wrong side of it) is logged and treated as no setup.
 
 ### Exits: `ExitPlan`
 
@@ -148,11 +213,11 @@ The exit mechanics live in the engine; a strategy picks and parameterises one.
 |---|---|---|
 | `ExitProfile.DEFAULT` | Take-profit ladder per `TP_MODE` toward VWAP, soft stop, `MAX_HOLD_TIME_MINUTES` time stop | `tp_atr_mult` scales the target |
 | `ExitProfile.EOD_HOLD` | No ladder, no time stop: runs on the hard stop to the 15:10 square-off | `rsi_cover=RsiCover(...)` covers early on a relief-rally RSI dip once in profit |
-| `ExitProfile.STAGED_RSI` | No ladder, no time stop. In profit, RSI cooling to one level books part of the position and moves the stop on the rest to cost; RSI reaching a second level trails the stop above each completed bar's high | `staged_rsi=StagedRsiExit(...)`: levels, fraction, RSI and trail timeframes |
+| `ExitProfile.STAGED_RSI` | No ladder, no time stop. In profit, RSI cooling to one level books part of the position and moves the stop on the rest to cost; RSI reaching a second level trails the stop above each completed bar's high (below its low for a long) | `staged_rsi=StagedRsiExit(...)`: levels, fraction, RSI and trail timeframes |
 
 Any profile can also set `stop_pct`: the hard stop then sits that far from the
-actual fill (e.g. `ExitPlan(stop_pct=5.0)` is 5% above a short's fill) instead
-of at `stop_reference` plus the ATR buffer. `stop_reference` still decides when
+actual fill (e.g. `ExitPlan(stop_pct=5.0)` is 5% above a short's fill, 5% below
+a long's) instead of at `stop_reference` plus the ATR buffer. `stop_reference` still decides when
 a pending setup is abandoned.
 
 **Square-off is per stock.** Fyers squares off intraday positions in F&O stocks
@@ -195,10 +260,9 @@ ghost audit both apply the strategy's own parameters.
 - **Stateless, or idempotent.** A setup re-qualifies on every bar it persists;
   use `rearm_window` rather than remembering what you already signalled.
 - **Fast.** It runs once per candidate per scan.
-- **SHORT only, for now.** The validation gate enters on a break below the
-  trigger. A `Direction.LONG` strategy is refused at load time. Strategies whose
-  direction does not match the engine's current `TRADE_DIRECTION` (switchable
-  from Telegram) are skipped, never inverted.
+- **One side per strategy.** A strategy trades its `direction` and nothing
+  else. Strategies whose side the operator's `TRADE_DIRECTION` filter holds back
+  are not asked, never inverted.
 
 An exception from `evaluate` is logged and treated as no setup — one broken
 strategy cannot take the process down or block the others.

@@ -130,10 +130,12 @@ reaches a public fork. The full guide — the context a strategy receives, exit
 plans, re-arm windows, testing, and the rules a strategy must keep — is
 [docs/STRATEGIES.md](docs/STRATEGIES.md).
 
-The engine currently executes SHORT strategies only; its validation gate enters
-on a break below the trigger. The contract already carries `Direction.LONG`, and
-the registry refuses a LONG plug-in rather than let it trade through short-side
-mechanics.
+Strategies trade either side. Each declares its `direction` (SHORT or LONG) and
+the movers it wants (`universe`: gainers, losers or both); the engine mirrors the
+validation gate, stop, take-profit ladder, RSI exits, trailing stop, G9 check and
+backtest for a long, and a short and a long can be active at once.
+`TRADE_DIRECTION` (`'BOTH'` by default, `/mode both|long|short` on Telegram)
+only filters which sides may open positions.
 
 ---
 
@@ -208,7 +210,7 @@ The bot can scan continuously, but entry is blocked while capital is occupied.
 ## Operator surface
 
 Telegram is the only operator interface: startup and status alerts, signal
-discovery, validation updates, `/auto on|off`, `/mode buy|sell`, `/status`,
+discovery, validation updates, `/auto on|off`, `/mode both|long|short`, `/status`,
 `/health`, broker health alerts, trade notifications, risk alerts, and EOD
 reports.
 
@@ -372,7 +374,7 @@ The role you connect as should own the database; `v42_1_0_postgresql.sql` create
 the `uuid-ossp` extension, which a database owner may do on PostgreSQL 14+.
 
 ```bash
-make test           # 496 tests, no credentials or database needed
+make test           # 673 tests, no credentials or database needed
 make demo           # the same suite in a container, no credentials needed
 python main.py      # live — requires credentials and a migrated database
 ```
@@ -460,10 +462,9 @@ Worth stating plainly. A repo with no limitations section usually just has undoc
 - **The backtest models what history cannot show.** Fills, slippage, the
   circuit band and the single capital slot are approximated, and MIS leverage
   is not screened; see the list at the top of `backtest/replay.py`.
-- **Short side only.** The validation gate and stop mechanics are short-only;
-  LONG strategies are refused at load time until they are supported.
-- **One scan universe.** The scanner's gain, volume and price filters are engine
-  config shared by every strategy, not chosen per strategy.
+- **One scan universe per side.** A strategy picks gainers, losers or both, but
+  the band limits and the volume and price filters are engine config shared by
+  every strategy, not chosen per strategy.
 - **Coverage is uneven.** Concentrated in strategy math and the capital layer;
   three strategy modules are untested, and the order and focus engines are
   covered only indirectly ([KNOWN_GAPS.md](docs/KNOWN_GAPS.md)).
