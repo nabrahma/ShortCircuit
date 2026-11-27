@@ -44,6 +44,9 @@ def parse(argv=None) -> argparse.Namespace:
     p.add_argument("--cost", type=float, default=Costs.cost_pct,
                    help="%% per round trip, charges and brokerage (default %(default)s)")
     p.add_argument("--max-trades-per-day", type=int, default=1)
+    p.add_argument("--frame-bars", type=int, default=None,
+                   help="hand strategies only the last N 1-minute bars, as VWAP_ANCHOR_MODE="
+                        "'ROLLING' does live (e.g. 100); default: the whole session")
     p.add_argument("--jobs", type=int, default=max(1, min(8, (os.cpu_count() or 2) - 1)),
                    help="processes replaying days in parallel (default %(default)s)")
     p.add_argument("--workers", type=int, default=3,
@@ -109,7 +112,7 @@ def run(args, client, symbols_text=None) -> tuple[pd.DataFrame, dict, pd.DataFra
             return None
 
     def jobs():
-        """(symbol, bars, prev_close, costs, max_trades, upper_circuit), in day order."""
+        """(symbol, bars, prev_close, costs, max_trades, upper_circuit, frame_bars), in day order."""
         fetch = ThreadPoolExecutor(max_workers=max(1, args.workers))
         try:
             for n, ((symbol, _day, prev_close), bars) in enumerate(
@@ -120,7 +123,7 @@ def run(args, client, symbols_text=None) -> tuple[pd.DataFrame, dict, pd.DataFra
                     continue
                 uc = infer_upper_circuit(prev_close, float(bars["high"].max()),
                                          squareoff.registry.is_fno(symbol))
-                yield symbol, bars, prev_close, costs, args.max_trades_per_day, uc
+                yield symbol, bars, prev_close, costs, args.max_trades_per_day, uc, args.frame_bars
         finally:
             fetch.shutdown(cancel_futures=True)
 
@@ -132,16 +135,17 @@ def run(args, client, symbols_text=None) -> tuple[pd.DataFrame, dict, pd.DataFra
         results = (f.result() for f in [procs.submit(parallel.replay, j) for j in jobs()])
     else:
         procs = None
-        results = (replay_day(sym, bars, pc, strategies, c, mt, upper_circuit=uc)
-                   for sym, bars, pc, c, mt, uc in jobs())
+        results = (replay_day(sym, bars, pc, strategies, c, mt, upper_circuit=uc, frame_bars=fb)
+                   for sym, bars, pc, c, mt, uc, fb in jobs())
 
-    trades, events, signals, invalidated, expired = [], [], 0, 0, 0
+    trades, events, signals, invalidated, expired, g9_blocked = [], [], 0, 0, 0, 0
     try:
         for n, result in enumerate(results, 1):
             events.extend(result.events)
             signals += result.signals
             invalidated += result.invalidated
             expired += result.expired
+            g9_blocked += result.g9_blocked
             trades.extend(result.trades)
             if n % 25 == 0:
                 logger.info("[BACKTEST] replayed %d/%d days — %d trades", n, len(days), len(trades))
@@ -154,7 +158,9 @@ def run(args, client, symbols_text=None) -> tuple[pd.DataFrame, dict, pd.DataFra
                "from": args.start.isoformat(), "to": args.end.isoformat(),
                "symbols_scanned": len(symbols), "min_gain_pct": args.min_gain,
                "gainer_days": len(days), "signals": signals, "gate_invalidated": invalidated,
-               "gate_expired": expired, **summarise(trades, costs),
+               "gate_expired": expired, "g9_blocked": g9_blocked,
+               "frame": f"last {args.frame_bars} bars" if args.frame_bars else "session",
+               **summarise(trades, costs),
                # Requests that failed after every retry: their symbols or days are missing.
                "history_failures": len(history.failures),
                "slippage_pct_per_fill": costs.slippage_pct, "cost_pct_round_trip": costs.cost_pct}

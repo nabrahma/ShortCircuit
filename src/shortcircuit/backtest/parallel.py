@@ -25,6 +25,6 @@ def init_worker(names: Sequence[str], fno: Optional[frozenset]) -> None:
 
 
 def replay(job: tuple) -> DayResult:
-    symbol, bars, prev_close, costs, max_trades, upper_circuit = job
+    symbol, bars, prev_close, costs, max_trades, upper_circuit, *rest = job
     return replay_day(symbol, bars, prev_close, _strategies, costs or Costs(), max_trades,
-                      upper_circuit=upper_circuit)
+                      upper_circuit=upper_circuit, frame_bars=rest[0] if rest else None)

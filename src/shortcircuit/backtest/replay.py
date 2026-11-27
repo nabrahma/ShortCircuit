@@ -28,9 +28,21 @@ What is modelled, because history cannot show it:
   * One position per symbol-day; the engine's single capital slot across
     symbols is not modelled.
 
-Profiles: STAGED_RSI is replayed exactly as the focus engine runs it. EOD_HOLD
-and DEFAULT are replayed as stop-or-square-off, without their RSI cover or
-take-profit ladder — flagged as `exit_model` on every such trade.
+Profiles, each as the focus engine runs it, decided bar by bar:
+  * STAGED_RSI: the partial to cost, then the trail.
+  * DEFAULT: the take-profit ladder of config.TP_MODE toward the signal's VWAP
+    (SCALE: half at the midpoint, the stop to breakeven if
+    P52_BREAKEVEN_AFTER_TP1, the rest at the VWAP; SINGLE: all at the
+    midpoint) and the MAX_HOLD_TIME_MINUTES time stop. A level a bar's low
+    reached fills at the level, or at the open if the bar opened through it.
+  * EOD_HOLD: the hard stop to the square-off, covered early by the strategy's
+    RSI relief-rally rule (ExitPlan.rsi_cover) at the next open.
+`exit_model` on every trade says which ran.
+
+G9: a strategy with `requires_htf_confirmation` is held to the analyzer's HTF
+check, on 15-minute bars built from the session (the last one forming, closing
+at the minute's open). `frame_bars` hands the strategy only the last N bars,
+as VWAP_ANCHOR_MODE='ROLLING' does live; the default is the whole session.
 """
 from __future__ import annotations
 
@@ -47,8 +59,9 @@ import pandas as pd
 from shortcircuit import config
 from shortcircuit.eod import squareoff
 from shortcircuit.execution.analyzer import derive_features, signal_problem
-from shortcircuit.execution.focus_engine import completed_bars
+from shortcircuit.execution.focus_engine import completed_bars, compute_tp_levels
 from shortcircuit.strategy import features as F
+from shortcircuit.strategy.htf_confluence import HTFConfluence
 from shortcircuit.strategy.market_context import MarketContext
 from shortcircuit.strategy.market_profile import ProfileAnalyzer
 from shortcircuit.strategy.sdk import ExitProfile, SetupContext, Signal, Strategy
@@ -124,6 +137,7 @@ class DayResult:
     signals: int = 0
     invalidated: int = 0
     expired: int = 0
+    g9_blocked: int = 0
     trades: list = field(default_factory=list)
     # One dict per signal: what became of it (ENTERED, INVALIDATED, EXPIRED).
     events: list = field(default_factory=list)
@@ -162,14 +176,35 @@ def _candles(df: pd.DataFrame) -> list:
             for e, h, c in zip(df["epoch"], df["high"], df["close"], strict=True)]
 
 
-def _frame_at(day: pd.DataFrame, i: int) -> pd.DataFrame:
-    """Completed bars before minute i, plus minute i as a forming bar: open only."""
-    done = day.iloc[:i]
+def _frame_at(day: pd.DataFrame, i: int, bars: Optional[int] = None) -> pd.DataFrame:
+    """
+    Completed bars before minute i, plus minute i as a forming bar: open only.
+    With `bars`, the frame is that many rows, forming bar included — the live
+    ROLLING anchor's window.
+    """
+    done = day.iloc[max(0, i - (bars - 1)):i] if bars else day.iloc[:i]
     o = float(day["open"].iloc[i])
     forming = day.iloc[[i]].copy()
     forming[["high", "low", "close"]] = o
     forming["volume"] = 0
     return pd.concat([done, forming], ignore_index=True)
+
+
+def htf_bars(frame: pd.DataFrame, minutes: int = 15) -> pd.DataFrame:
+    """
+    `minutes` bars aligned to 09:15 from a 1-minute frame. The last is still
+    forming and closes at the frame's last price, as a REST fetch returns it
+    mid-bar to the live G9.
+    """
+    dts = frame["datetime"]
+    bucket = (dts.dt.hour * 60 + dts.dt.minute - (9 * 60 + 15)) // minutes
+    return frame.groupby(bucket.values, sort=True).agg(
+        open=("open", "first"), high=("high", "max"), low=("low", "min"),
+        close=("close", "last"), volume=("volume", "sum"),
+    ).reset_index(drop=True)
+
+
+_HTF = HTFConfluence(None)      # given its bars, the check fetches nothing
 
 
 def _first_signal(strategies: Sequence[Strategy], ctx: SetupContext):
@@ -188,11 +223,13 @@ def _first_signal(strategies: Sequence[Strategy], ctx: SetupContext):
 
 def replay_day(symbol: str, day: pd.DataFrame, prev_close: float,
                strategies: Sequence[Strategy], costs: Costs = Costs(),
-               max_trades: int = 1, upper_circuit: float = 0.0) -> DayResult:
+               max_trades: int = 1, upper_circuit: float = 0.0,
+               frame_bars: Optional[int] = None) -> DayResult:
     """
     `day` is one session's 1-minute bars: epoch, datetime (IST), open, high,
     low, close, volume — completed bars only. `upper_circuit` is the day's
-    band, 0.0 when unknown (see `infer_upper_circuit`).
+    band, 0.0 when unknown (see `infer_upper_circuit`). `frame_bars`: hand the
+    strategy only the last N bars (live ROLLING anchor); None = the session.
     """
     out = DayResult()
     if day is None or len(day) < 20:
@@ -218,7 +255,7 @@ def replay_day(symbol: str, day: pd.DataFrame, prev_close: float,
             i += 1
             continue
 
-        frame = _frame_at(day, i)
+        frame = _frame_at(day, i, frame_bars)
         feats = derive_features(symbol, frame, ltp, prev_close, profile, market)
         high_so_far = max(float(day["high"].iloc[:i].max()), ltp)
         hitter = upper_circuit > 0 and high_so_far >= upper_circuit * 0.999
@@ -233,21 +270,32 @@ def replay_day(symbol: str, day: pd.DataFrame, prev_close: float,
         out.signals += 1
         trigger = float(sig.trigger_price) if sig.trigger_price is not None \
             else float(frame["low"].iloc[-2])
-        entry_i, fill = _gate(day, i, trigger, float(sig.stop_reference) * INVALIDATION)
-        out.events.append({
+        event = {
             "date": t.date().isoformat(), "symbol": symbol, "strategy": strategy.name,
             "time": t.strftime("%H:%M"), "trigger": round(trigger, 2),
             "stop_reference": round(float(sig.stop_reference), 2),
-            "outcome": "ENTERED" if entry_i is not None else fill,
-        })
+        }
+        # G9, as the analyzer runs it after evaluate(). The 15-minute bars come
+        # from a REST fetch of the day, whatever the 1-minute frame's anchor.
+        if strategy.requires_htf_confirmation:
+            ok, _msg = _HTF.check_trend_exhaustion(
+                symbol, df_15m=htf_bars(_frame_at(day, i)), vwap_sd=feats["vwap_sd"])
+            if not ok:
+                out.g9_blocked += 1
+                out.events.append({**event, "outcome": "G9_BLOCKED"})
+                i += 1
+                continue
+        entry_i, fill = _gate(day, i, trigger, float(sig.stop_reference) * INVALIDATION)
+        out.events.append({**event, "outcome": "ENTERED" if entry_i is not None else fill})
         if entry_i is None:
             out.invalidated += fill == "INVALIDATED"
             out.expired += fill == "EXPIRED"
             i += 1
             continue
 
+        vwap_target = float(frame["vwap"].iloc[-1]) if "vwap" in frame.columns else 0.0
         trade = _run_trade(symbol, day, entry_i, float(fill) * (1 - costs.slippage_pct / 100),
-                           sig, strategy, feats["atr"], t, costs, cutoff_time)
+                           sig, strategy, feats["atr"], t, costs, cutoff_time, vwap_target)
         trade.trigger = trigger
         out.trades.append(trade)
         exit_t = trade.legs[-1][3] if trade.legs else day["datetime"].iloc[-1]
@@ -268,8 +316,26 @@ def _gate(day: pd.DataFrame, i: int, trigger: float, invalid_above: float):
     return None, "EXPIRED"
 
 
+def _ladder(plan, entry: float, vwap_target: float):
+    """
+    The DEFAULT profile's take-profit levels as the focus engine sets them at
+    entry: (mode, tp_1, tp_2, full-exit level). The VWAP target falls back to
+    1% below entry, as OrderManager.compute_take_profits does without a VWAP.
+    """
+    mode = str(getattr(config, "TP_MODE", "OFF")).upper()
+    if plan.profile is not ExitProfile.DEFAULT or mode not in ("SCALE", "SINGLE"):
+        return "OFF", None, None, None
+    target = vwap_target if vwap_target and vwap_target > 0 else entry * 0.99
+    target = round(round(target / 0.05) * 0.05, 2)
+    tp_1, tp_2 = compute_tp_levels(entry, target, 0.05, False)
+    if tp_1 is None:
+        return "OFF", None, None, None
+    return mode, tp_1, tp_2, (tp_1 if mode == "SINGLE" else tp_2)
+
+
 def _run_trade(symbol, day, j, entry, sig: Signal, strategy: Strategy, atr: float,
-               signal_time, costs: Costs, cutoff_time: dt.time) -> Trade:
+               signal_time, costs: Costs, cutoff_time: dt.time,
+               vwap_target: float = 0.0) -> Trade:
     plan = sig.exit
     slip = costs.slippage_pct / 100
     if plan.stop_pct is not None:
@@ -277,11 +343,18 @@ def _run_trade(symbol, day, j, entry, sig: Signal, strategy: Strategy, atr: floa
     else:
         stop = _tick_up(float(sig.stop_reference) + max(atr * 0.5, 0.15))
     staged = plan.staged_rsi if plan.profile is ExitProfile.STAGED_RSI else None
+    cover = plan.rsi_cover if plan.profile is ExitProfile.EOD_HOLD else None
+    tp_mode, tp_1, _tp_2, full_level = _ladder(plan, entry, vwap_target)
+    max_hold = int(getattr(config, "MAX_HOLD_TIME_MINUTES", 0) or 0) \
+        if plan.profile is ExitProfile.DEFAULT else 0
+    breakeven = bool(getattr(config, "P52_BREAKEVEN_AFTER_TP1", False))
+    model = ("staged_rsi" if staged else "eod_hold_rsi_cover" if cover
+             else "tp_ladder" if tp_mode != "OFF" else "stop_or_squareoff")
     trade = Trade(
         symbol=symbol, date=day["datetime"].iloc[0].date(), strategy=strategy.name,
         pattern=sig.pattern, signal_time=signal_time, entry_time=day["datetime"].iloc[j],
         entry=entry, stop=stop,
-        exit_model="staged_rsi" if staged else "stop_or_squareoff",
+        exit_model=model,
         features={k: v for k, v in sig.ml_features.items() if isinstance(v, (int, float, str))},
         stop_reference=float(sig.stop_reference),
         stop_path=[(day["datetime"].iloc[j], stop)],
@@ -304,6 +377,14 @@ def _run_trade(symbol, day, j, entry, sig: Signal, strategy: Strategy, atr: floa
             if when.time() >= cutoff_time:
                 close(remaining, o, "EOD_SQUAREOFF", when)
                 return trade
+            # The time stop runs before the square-off check live; both are at
+            # this open, so the order between them does not matter here.
+            if max_hold and (when - trade.entry_time).total_seconds() / 60 >= max_hold:
+                close(remaining, o, "TIME_STOP", when)
+                return trade
+            if pending == "RSI_TP":
+                close(remaining, o, "RSI_TP", when)
+                return trade
             if pending == "SCALE_OUT" and remaining > 0:
                 if o < entry:
                     close(remaining * staged.scale_out_fraction, o, "RSI_SCALE_OUT", when)
@@ -323,6 +404,31 @@ def _run_trade(symbol, day, j, entry, sig: Signal, strategy: Strategy, atr: floa
         if h >= stop:
             close(remaining, stop, _stop_reason(scaled, trailing, stop, entry), when)
             return trade
+
+        # DEFAULT: the take-profit ladder. Not on the entry bar, whose low may
+        # have come before the fill. The full exit is tested first, as live.
+        if tp_mode != "OFF" and k > j:
+            if lo <= full_level:
+                close(remaining, min(o, full_level), "TP_HIT", when)
+                return trade
+            if tp_mode == "SCALE" and not scaled and lo <= tp_1:
+                close(remaining * 0.5, min(o, tp_1), "TP1_PARTIAL", when)
+                scaled = True
+                if breakeven and entry < stop:
+                    stop = entry
+                    trade.stop_path.append((when, stop))
+                    # Which came first inside this bar is unknown: the stop.
+                    if h >= stop:
+                        close(remaining, stop, "COST_STOP", when)
+                        return trade
+
+        # EOD_HOLD: the RSI relief-rally cover, read on this completed bar and
+        # done at the next open.
+        if cover is not None and pending is None and k + 1 >= cover.min_candles \
+                and k - j >= cover.skip_minutes and c < entry:
+            rsi = F.compute_rsi_wilder(day["close"].iloc[: k + 1].tolist(), cover.period)
+            if rsi == rsi and rsi < cover.threshold:
+                pending = "RSI_TP"
 
         if staged is None:
             continue

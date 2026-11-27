@@ -601,3 +601,114 @@ def test_a_long_run_charts_the_recent_best_and_worst_trades_only():
     assert trades["net_pct"].idxmax() in keep and trades["net_pct"].idxmin() in keep
     assert len(keep) <= 5 + 2 * 3
     assert report._charted(trades.head(8), recent=5, extremes=3) == set(range(8))
+
+
+# ── the DEFAULT ladder, the EOD_HOLD RSI cover, G9 and the rolling frame ─────
+
+from shortcircuit import config as _cfg  # noqa: E402
+from shortcircuit.backtest.replay import htf_bars  # noqa: E402
+from shortcircuit.strategy.sdk import RsiCover  # noqa: E402
+
+CLIMB = [104 + 0.4 * i for i in range(20)]           # 104 -> 111.6; VWAP lags well below
+
+
+@pytest.fixture
+def ladder(monkeypatch):
+    monkeypatch.setattr(_cfg, "TP_MODE", "SCALE")
+    monkeypatch.setattr(_cfg, "P52_BREAKEVEN_AFTER_TP1", True)
+    monkeypatch.setattr(_cfg, "MAX_HOLD_TIME_MINUTES", 45)
+
+
+def test_the_default_ladder_halves_at_the_midpoint_then_closes_at_vwap(ladder):
+    closes = CLIMB + [111.0, 110.4, 109.6, 108.8, 108.0, 107.0, 106.0, 105.0] + [105.0] * 10
+    s = _Once(at="09:35", trigger=111.5, stop_ref=113.0, plan=ExitPlan())
+    (trade,) = _run(closes, s).trades
+    assert trade.exit_model == "tp_ladder"
+    assert [leg[2] for leg in trade.legs] == ["TP1_PARTIAL", "TP_HIT"]
+    (f1, p1, _, _), (f2, p2, _, _) = trade.legs
+    assert f1 == pytest.approx(0.5) and f2 == pytest.approx(0.5)
+    assert p2 < p1 < trade.entry
+    assert p1 == pytest.approx((trade.entry + p2) / 2, abs=0.05), "the midpoint to the VWAP"
+    assert trade.stop_path[-1][1] == pytest.approx(trade.entry), "breakeven after the partial"
+
+
+def test_after_the_partial_the_rest_stops_at_breakeven(ladder):
+    closes = CLIMB + [111.0, 110.4, 109.6, 108.9, 110.0, 111.0, 112.0, 112.5] + [112.5] * 10
+    s = _Once(at="09:35", trigger=111.5, stop_ref=113.0, plan=ExitPlan())
+    (trade,) = _run(closes, s).trades
+    assert [leg[2] for leg in trade.legs] == ["TP1_PARTIAL", "COST_STOP"]
+    assert trade.legs[1][1] == pytest.approx(trade.entry)
+
+
+def test_the_default_profile_has_a_time_stop(ladder):
+    closes = CLIMB + [111.0] + [111.2] * 80             # never near a target or the stop
+    s = _Once(at="09:35", trigger=111.5, stop_ref=113.0, plan=ExitPlan())
+    (trade,) = _run(closes, s).trades
+    assert trade.exit_reason == "TIME_STOP"
+    assert (trade.legs[-1][3] - trade.entry_time) == pd.Timedelta(minutes=45)
+
+
+def test_ladder_off_runs_on_its_stop(ladder, monkeypatch):
+    monkeypatch.setattr(_cfg, "TP_MODE", "OFF")
+    closes = CLIMB + [111.0, 110.4, 109.6, 108.8, 108.0, 107.0] + [107.0] * 10
+    (trade,) = _run(closes, _Once(at="09:35", trigger=111.5, stop_ref=113.0, plan=ExitPlan())).trades
+    assert "TP1_PARTIAL" not in [leg[2] for leg in trade.legs]
+
+
+def test_eod_hold_covers_on_the_rsi_relief_rule_at_the_next_open():
+    warm = [104 + 0.25 * i for i in range(36)]              # RSI pinned high
+    fall = [warm[-1] - 0.6 * (i + 1) for i in range(15)]
+    closes = warm + fall + [fall[-1]] * 20
+    plan = ExitPlan(profile=ExitProfile.EOD_HOLD, rsi_cover=RsiCover())
+    s = _Once(at="09:51", trigger=warm[-1] - 0.3, stop_ref=warm[-1] + 1.0, plan=plan)
+    (trade,) = _run(closes, s).trades
+    assert trade.exit_model == "eod_hold_rsi_cover" and trade.exit_reason == "RSI_TP"
+    day = _day(closes)
+    j = int((day["datetime"] == trade.entry_time).idxmax())
+    x = int((day["datetime"] == trade.legs[-1][3]).idxmax())
+    from shortcircuit.strategy import features as F
+    fired = [k for k in range(j, x) if k - j >= 5 and day["close"].iloc[k] < trade.entry
+             and F.compute_rsi_wilder(day["close"].iloc[:k + 1].tolist(), 14) < 40]
+    assert fired and x == fired[0] + 1, "decided on a close, done at the next open"
+    assert trade.legs[-1][1] == pytest.approx(day["open"].iloc[x])
+
+
+class _NeedsHtf(_Once):
+    requires_htf_confirmation = True
+
+
+def test_g9_blocks_an_accelerating_15_minute_trend(monkeypatch):
+    monkeypatch.setattr(_cfg, "P61_G9_BYPASS_SD_THRESHOLD", 1e9)
+    closes = [104 + 0.15 * i for i in range(60)]           # +2% every 15 minutes
+    res = _run(closes, _NeedsHtf(at="09:50", trigger=closes[34] - 0.3, stop_ref=closes[34] + 1))
+    assert res.trades == [] and res.g9_blocked == 1
+    assert [e["outcome"] for e in res.events] == ["G9_BLOCKED"]
+
+
+def test_g9_passes_a_stall_and_the_alpha_strike(monkeypatch):
+    monkeypatch.setattr(_cfg, "P61_G9_BYPASS_SD_THRESHOLD", 1e9)
+    stall = [104 + 0.15 * i for i in range(30)] + [108.35] * 30
+    res = _run(stall, _NeedsHtf(at="09:55", trigger=108.0, stop_ref=109.0))
+    assert res.g9_blocked == 0 and res.events[0]["outcome"] != "G9_BLOCKED"
+    monkeypatch.setattr(_cfg, "P61_G9_BYPASS_SD_THRESHOLD", -1.0)
+    climb = [104 + 0.15 * i for i in range(60)]
+    res = _run(climb, _NeedsHtf(at="09:50", trigger=climb[34] - 0.3, stop_ref=climb[34] + 1))
+    assert res.g9_blocked == 0, "an extreme stretch skips the HTF check"
+
+
+def test_htf_bars_align_to_the_open_and_the_last_is_forming():
+    day = _day([104 + 0.1 * i for i in range(40)])
+    from shortcircuit.backtest.replay import _frame_at
+    frame = _frame_at(day, 35)                               # 09:50 forming
+    bars = htf_bars(frame)
+    assert len(bars) == 3                                   # 09:15, 09:30, 09:45 (forming)
+    assert bars["close"].iloc[-1] == pytest.approx(day["open"].iloc[35])
+    assert bars["open"].iloc[0] == pytest.approx(day["open"].iloc[0])
+
+
+def test_a_rolling_frame_shows_the_strategy_only_the_last_bars():
+    s = _Once(at="99:99", trigger=1, stop_ref=200)
+    replay_day("NSE:X-EQ", _day([112 + 0.01 * i for i in range(200)]), PREV, [s], Costs(0.0, 0.0),
+               frame_bars=100)
+    assert max(len(c.df) for c in s.seen) == 100
+    assert s.seen[-1].df["datetime"].iloc[-1] == s.seen[-1].now
