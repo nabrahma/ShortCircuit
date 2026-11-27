@@ -31,7 +31,7 @@ from shortcircuit.marketdata.market_utils import is_market_hours
 from shortcircuit.state.reconciliation import ReconciliationEngine
 from shortcircuit.marketdata.scanner import FyersScanner
 from shortcircuit.runtime.startup_recovery import StartupRecovery
-from shortcircuit.observability.telegram_bot import ShortCircuitBot
+from shortcircuit.observability.telegram import ShortCircuitBot
 from shortcircuit.execution.trade_manager import TradeManager
 from shortcircuit.eod import squareoff
 from shortcircuit.runtime import mode as run_mode
@@ -290,6 +290,7 @@ async def _initialize_runtime() -> RuntimeContext:
     
     bot.signal_manager = analyzer.signal_manager
     bot.market_session = market_session
+    bot.attach_strategies(analyzer.strategies)
 
 
     # The scanner watches the movers the active strategies ask for: gainers for

@@ -556,3 +556,44 @@ def test_the_runtime_image_can_import_the_package():
     assert '"-m", "shortcircuit"' in runtime
     assert "PYTHONPATH=/app/src" in shared, \
         "nothing installs the package, so ENTRYPOINT and HEALTHCHECK cannot import it"
+
+
+# ── operator controls from Telegram ──────────────────────────────────────────
+
+def test_a_paused_strategy_is_never_asked_and_the_next_one_runs(engine):
+    from shortcircuit.execution import strategy_switch
+    first = _strategy("first", _short)
+    second = _strategy("second", _short)
+    strategy_switch.pause(["first"])
+    try:
+        out, _, _ = engine(first, second)
+    finally:
+        strategy_switch.reset()
+    assert out["strategy"] == "second"
+    assert first.seen == [], "a paused strategy must not even be evaluated"
+
+
+def test_resuming_lets_a_strategy_trade_again(engine):
+    from shortcircuit.execution import strategy_switch
+    only = _strategy("only", _short)
+    strategy_switch.pause(["only"])
+    strategy_switch.resume(["only"])
+    out, _, _ = engine(only)
+    assert out["strategy"] == "only"
+
+
+def test_display_lines_ride_on_the_signal_for_the_telegram_card(engine):
+    s = _strategy("shown", lambda ctx: _short(ctx, display={"Range width": "1.8%", "Bars in range": 12}))
+    out, _, _ = engine(s)
+    assert out["display"] == {"Range width": "1.8%", "Bars in range": 12}
+
+
+def test_no_display_lines_leave_no_display_field(engine):
+    out, _, _ = engine(_strategy("plain", _short))
+    assert "display" not in out
+
+
+def test_the_example_strategy_describes_itself():
+    s = VwapStretchFade()
+    assert s.description
+    assert set(s.describe()) == {"Min day gain", "Min VWAP stretch", "Max spread"}

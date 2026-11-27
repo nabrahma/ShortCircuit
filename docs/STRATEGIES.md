@@ -201,6 +201,7 @@ pattern detection) are available for anything the context does not carry.
 | `stretch_score`, `vol_fade_ratio`, `oi_direction` | `0.0`, `0.0`, `"unknown"` | Quality scores logged for analysis |
 | `extra` | `{}` | Strategy-specific levels carried on the signal. Cannot overwrite engine fields |
 | `ml_features` | `{}` | Strategy-specific features written to the ML observation |
+| `display` | `{}` | Label → value lines shown on the signal's Telegram card, in order (up to 8). Display only: the engine never reads them |
 
 A `Signal` the engine cannot execute (a non-positive or non-finite stop, a
 trigger on the wrong side of it) is logged and treated as no setup.
@@ -248,6 +249,43 @@ ghost audit both apply the strategy's own parameters.
 | G9 higher-timeframe confirmation | after a signal | `requires_htf_confirmation = False` opts out |
 | G8 cooldown, daily target, loss pause | after a signal | — |
 | Validation gate, sizing, stop placement, reconciliation | execution | — |
+
+---
+
+## On Telegram
+
+The operator console knows nothing about any particular strategy. It shows
+what the contract carries, so a new plug-in appears in it with no Telegram code:
+
+| Shown | Comes from |
+|---|---|
+| `/strategies`: name, side, universe, HTF check, paused or running, today's armed / triggered / expired / invalidated | `name`, `direction`, `universe`, `requires_htf_confirmation`, and the engine's own counts |
+| The one-line blurb under each name | `description`, else the first line of the class docstring |
+| `/strategy <name>`: its settings | `describe()`, a mapping of label → value |
+| The signal card: pattern, trigger, stop, exit plan, square-off | the `Signal` and its `ExitPlan` |
+| Extra lines on the card | `Signal.display` |
+
+```python
+class MyFade(Strategy):
+    name = "my_fade"
+    direction = Direction.SHORT
+    description = "Fades a stretched top once the VWAP slope rolls over."
+
+    MIN_SD = 3.0
+
+    def describe(self):
+        return {"Min VWAP stretch": f"{self.MIN_SD:g} SD"}
+
+    def evaluate(self, ctx):
+        ...
+        return Signal(pattern="MY_FADE", stop_reference=ctx.day_high,
+                      display={"VWAP stretch": f"{ctx.vwap_sd:.1f} SD"})
+```
+
+`describe()` must be as cheap and side-effect free as `evaluate`; if it raises,
+the console says so and carries on. `/pause my_fade` stops the strategy taking
+new setups until `/resume my_fade` or a restart. It never touches a position or
+a setup already armed.
 
 ---
 

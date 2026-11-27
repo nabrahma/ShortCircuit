@@ -160,6 +160,7 @@ fires.
 | Situation | Action |
 |---|---|
 | Stop taking *new* trades, keep managing the open one | `/auto off` |
+| Stop one strategy taking new setups, keep the others | `/pause <strategy>` (`/resume` undoes it; a restart clears it) |
 | Stop everything, position is flat | `/stop`, or SIGTERM |
 | Stop everything, position is open | Close the position in the Fyers app **first**, then stop the process |
 

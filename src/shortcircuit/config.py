@@ -142,6 +142,13 @@ def minutes_since_market_open() -> float:
     return delta.total_seconds() / 60.0
 
 P81_TELEGRAM_MENU_ENABLED        = True
+# One Telegram card per signal, edited in place as the setup triggers, expires or
+# is invalidated. False sends a one-shot card when the setup arms.
+EDITABLE_SIGNAL_FLOW_ENABLED     = True
+# Extra Telegram command modules, by import path, each with register(registry).
+# For a deployment's own commands, e.g. ("strategies.my_commands",). See
+# observability/telegram/commands/__init__.py.
+TELEGRAM_COMMAND_MODULES: tuple  = ()
 P81_TELEGRAM_RATE_LIMIT_HZ       = 2
 
 # Local candle engine

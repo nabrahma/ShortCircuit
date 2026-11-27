@@ -307,6 +307,10 @@ class Signal:
     extra: dict[str, Any] = field(default_factory=dict)
     # Strategy-specific features written to the signal's ML observation.
     ml_features: dict[str, Any] = field(default_factory=dict)
+    # Label -> value lines shown on the signal's Telegram card, in this order
+    # (e.g. {"Range width": "1.8%", "Bars in range": 12}). Display only: the
+    # engine never reads them.
+    display: dict[str, Any] = field(default_factory=dict)
 
 
 class Strategy(ABC):
@@ -321,10 +325,23 @@ class Strategy(ABC):
     #: Run the engine's higher-timeframe exhaustion check (G9) on this
     #: strategy's signals before they reach the order path.
     requires_htf_confirmation: ClassVar[bool] = True
+    #: One line for the operator: what the strategy trades. Shown by Telegram's
+    #: /strategies. Empty falls back to the first line of the class docstring.
+    description: ClassVar[str] = ""
 
     @abstractmethod
     def evaluate(self, ctx: SetupContext) -> Optional[Signal]:
         """Return a Signal if there is a setup on `ctx.symbol`, else None."""
+
+    def describe(self) -> Mapping[str, Any]:
+        """
+        Label -> value pairs for Telegram's /strategy <name>: thresholds, stop
+        size, anything the operator should be able to check from the phone.
+
+        Must be cheap and side-effect free, like `evaluate`. The default shows
+        nothing beyond what the engine already knows about the strategy.
+        """
+        return {}
 
     def __repr__(self) -> str:
         return f"<Strategy {self.name} ({self.direction.value})>"

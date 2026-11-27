@@ -7,6 +7,21 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Telegram console for any strategy.** The bot is now a package
+  (`observability/telegram/`): a command registry that builds `/help` and the
+  command menu, one module per command group, pure card builders, and a
+  strategy book. Everything it shows about a strategy comes from the plug-in
+  contract, so a new plug-in needs no Telegram code.
+  - New commands: `/strategies`, `/strategy <name>`, `/pause <name>|all`,
+    `/resume <name>|all`, `/positions`, `/signals`.
+  - Signal cards name their strategy, side, trigger, stop, exit plan and
+    per-stock square-off, and are edited in place as the setup triggers,
+    expires or is invalidated (`EDITABLE_SIGNAL_FLOW_ENABLED`, now on by default).
+  - SDK: `Strategy.description`, `Strategy.describe()` and `Signal.display`.
+  - A deployment can add commands without touching the engine
+    (`TELEGRAM_COMMAND_MODULES`). Every command, built in or added, passes one
+    authorization gate.
+
 - `ExitProfile.STAGED_RSI` with `StagedRsiExit`: an RSI-timed partial exit with
   the stop moved to cost, then a trailing stop on the remainder above each
   completed bar's high. The trail only tightens, and a level price has already
@@ -35,6 +50,14 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Broker health alerts never reached Telegram. The broker called
+  `send_util_alert`, which the bot did not have; the AttributeError was
+  swallowed. The bot now has it.
+- With the edited-card flow off, a signal sent only `VALIDATION ALERT: <symbol>
+  <ltp>`. It now sends the full signal card.
+- `/stop` said pending orders would be cancelled and positions closed. Shutdown
+  does neither; the message now says that positions keep their broker-side
+  stops.
 - The backtest universe included ETFs, which share the `-EQ` suffix. It now
   takes stocks only, from the symbol master's instrument type.
 - **F&O positions were squared off by the broker, not the bot.** Since 3 Aug

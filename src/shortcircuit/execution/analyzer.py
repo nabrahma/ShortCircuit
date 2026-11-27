@@ -32,7 +32,7 @@ from shortcircuit.strategy.market_context import MarketContext
 from shortcircuit.strategy.market_profile import ProfileAnalyzer
 from shortcircuit.observability.ml_logger import get_ml_logger
 from shortcircuit.execution.signal_manager import get_signal_manager
-from shortcircuit.execution import directions
+from shortcircuit.execution import directions, strategy_switch
 from shortcircuit.strategy import registry
 from shortcircuit.strategy.sdk import Direction, ExitProfile, SetupContext, Signal, Strategy
 
@@ -520,13 +520,16 @@ class FyersAnalyzer:
         """
         Ask each active strategy in turn; return the first valid Signal.
 
-        A strategy is skipped when the direction filter (config.TRADE_DIRECTION,
-        switchable from Telegram) holds its side back, or when the candidate is
-        not one its universe asks for - a gainer is not offered to a strategy
-        that wants losers. An exception, or a Signal with unusable levels, counts
-        as "no setup" - fail closed, keep going.
+        A strategy is skipped when the operator has paused it (/pause), when
+        the direction filter (config.TRADE_DIRECTION, switchable from Telegram)
+        holds its side back, or when the candidate is not one its universe asks
+        for - a gainer is not offered to a strategy that wants losers. An
+        exception, or a Signal with unusable levels, counts as "no setup" - fail
+        closed, keep going.
         """
         for strategy in self.strategies:
+            if strategy_switch.is_paused(strategy.name):
+                continue
             if not directions.allowed(strategy.direction):
                 continue
             change = ctx.gain_pct if day_change_pct is None else day_change_pct
@@ -744,6 +747,9 @@ class FyersAnalyzer:
             signal_data['stop_pct'] = float(plan.stop_pct)
         for key, value in signal.extra.items():
             signal_data.setdefault(key, value)
+        # Operator-facing lines for the Telegram signal card, in the strategy's order.
+        if signal.display:
+            signal_data['display'] = {str(k): v for k, v in signal.display.items()}
 
         # The validation gate watches the trigger at 5Hz and enters the moment price
         # crosses it. A strategy that names its own trigger replaces the default

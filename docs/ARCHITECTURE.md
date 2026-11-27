@@ -53,7 +53,7 @@ The rest of the repository fetches data, asks the Brain for decisions, and pulls
 | `fyers_broker_interface.py` | Data/order WebSocket and complete Fyers API abstraction |
 | `fyers_connect.py` | Authentication and token management |
 | `reconciliation.py` | Broker/DB/internal-state truth reconciliation |
-| `telegram_bot.py` | Operator command and alert interface |
+| `telegram/` | Operator console: bot, command registry and commands, signal cards |
 | `database.py` | PostgreSQL access layer |
 | `signal_manager.py` | Daily signal caps, per-symbol cooldowns, consecutive loss tracking |
 | `gate_result_logger.py` | Gate audit trail, daily rejection summary, EOD analytics |
@@ -278,7 +278,9 @@ Telegram is the only operator interface. It handles:
 - Validation updates
 - Auto-mode control (`/auto on`, `/auto off`)
 - Direction filter (`/mode both`, `/mode long`, `/mode short`)
-- Position and P&L snapshots (`/status`)
+- Per-strategy pause (`/pause <name>|all`, `/resume`)
+- The active strategies and their day (`/strategies`, `/strategy <name>`)
+- Position and P&L snapshots (`/status`, `/positions`, `/signals`)
 - Broker health alerts
 - Trade notifications (entry, SL, TP, exit)
 - Risk alerts (circuit, spread, loss pause)
@@ -363,7 +365,7 @@ ShortCircuit/
 ├── capital_manager.py           Funds sync, sizing, capital slot
 ├── fyers_broker_interface.py    WebSocket + REST broker abstraction
 ├── fyers_connect.py             Authentication and token management
-├── telegram_bot.py              Operator command and alert interface
+├── telegram/                    Operator console: bot, commands/, cards, strategy book
 ├── database.py                  PostgreSQL access layer
 ├── signal_manager.py            Daily caps, cooldowns, loss tracking
 ├── gate_result_logger.py        Gate audit trail, rejection summary

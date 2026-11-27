@@ -209,10 +209,27 @@ The bot can scan continuously, but entry is blocked while capital is occupied.
 
 ## Operator surface
 
-Telegram is the only operator interface: startup and status alerts, signal
-discovery, validation updates, `/auto on|off`, `/mode both|long|short`, `/status`,
-`/health`, broker health alerts, trade notifications, risk alerts, and EOD
-reports.
+Telegram is the only operator interface, and it knows nothing about any one
+strategy: everything it shows comes from the plug-in contract.
+
+| Group | Commands |
+|---|---|
+| Trading | `/auto on\|off`, `/mode both\|long\|short`, `/pause <strategy>\|all`, `/resume <strategy>\|all` |
+| Strategies | `/strategies` (each plug-in's side, universe, state and today's counts), `/strategy <name>` (its own settings) |
+| Monitoring | `/status`, `/positions` (strategy, side, stop, exit plan, unrealised), `/signals` (setups waiting for a trigger), `/health` |
+| System | `/start`, `/help`, `/stop` (asks to confirm) |
+
+Each signal gets one card naming its strategy, side, trigger, stop, exit plan
+and square-off time, plus any lines the strategy adds (`Signal.display`). The
+card is edited in place as the setup triggers, expires or is invalidated. Broker
+health alerts, trade notifications, risk alerts and EOD reports arrive as before.
+
+`/pause` stops a strategy taking new setups without a restart; open positions
+and armed setups keep their stops and exits. `/help` and the command menu are
+built from a command registry, and a deployment can add its own commands
+without touching the engine: list modules in `config.TELEGRAM_COMMAND_MODULES`,
+each with a `register(registry)` function (see
+`src/shortcircuit/observability/telegram/commands/__init__.py`).
 
 There is no web UI in the runtime path. Fewer services, fewer sockets, one
 control plane ([ADR-001](docs/DECISIONS.md)).
