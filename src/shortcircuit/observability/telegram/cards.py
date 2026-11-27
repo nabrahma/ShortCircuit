@@ -8,6 +8,7 @@ lines. Nothing here knows any particular strategy.
 """
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
 from shortcircuit.execution import directions
@@ -198,7 +199,7 @@ def position_block(pos: Mapping[str, Any], ltp: Optional[float]) -> str:
         lines.append(f"  unrealised {fmt.money(pnl, signed=True)}")
     lines.append(f"  exit: {fmt.he(exits.describe(pos))} · square-off {exits.squareoff_at(symbol)}")
     started = pos.get("entry_time")
-    if hasattr(started, "strftime"):
+    if isinstance(started, datetime):
         lines.append(f"  since {started.strftime('%H:%M')}")
     return "\n".join(lines)
 

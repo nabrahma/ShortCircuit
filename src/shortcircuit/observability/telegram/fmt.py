@@ -59,8 +59,8 @@ def clock(dt: Optional[datetime] = None) -> str:
 
 
 def side_label(side: Any) -> str:
-    d = directions.normalise(side)
-    return {directions.SHORT: "🔴 SHORT", directions.LONG: "🟢 LONG"}.get(d, DASH)
+    labels = {directions.SHORT: "🔴 SHORT", directions.LONG: "🟢 LONG"}
+    return labels.get(directions.normalise(side) or "", DASH)
 
 
 def trigger_sign(side: Any) -> str:

@@ -391,7 +391,8 @@ class ShortCircuitBot:
             qty = int(signal.get("quantity") or 0)
             entry = float(signal.get("entry_price") or 0)
             if qty > 0 and entry > 0:
-                lev = getattr(self.capital_manager, "leverage", None) or getattr(config, "INTRADAY_LEVERAGE", 5.0)
+                lev = float(getattr(self.capital_manager, "leverage", None)
+                            or getattr(config, "INTRADAY_LEVERAGE", 5.0) or 5.0)
                 return f"{fmt.money(qty * entry / lev)} (qty {qty})"
             ltp = float(signal.get("ltp") or 0)
             if self.capital_manager and ltp > 0:

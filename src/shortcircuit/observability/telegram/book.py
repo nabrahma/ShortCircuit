@@ -77,7 +77,8 @@ class StrategyBook:
             return [], []
         if len(args) == 1 and args[0].lower() == "all":
             return list(self.names), []
-        known, unknown = [], []
+        known: list[str] = []
+        unknown: list[str] = []
         for a in args:
             s = self.find(a)
             (known if s else unknown).append(s.name if s else a)
