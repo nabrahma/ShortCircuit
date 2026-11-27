@@ -11,6 +11,7 @@ from datetime import datetime
 from typing import Optional, Dict, Any
 from zoneinfo import ZoneInfo
 from shortcircuit import config
+from shortcircuit.execution import directions
 from telegram import (
     Update,
     InlineKeyboardButton,
@@ -28,6 +29,21 @@ from telegram.ext import (
 logger = logging.getLogger(__name__)
 def _he(text: str) -> str:
     return str(text).replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
+
+
+def _mode_label() -> str:
+    """The direction filter for display: which sides may open positions."""
+    return {
+        directions.LONG: "🟢 LONG only (BUY)",
+        directions.SHORT: "🔴 SHORT only (SELL)",
+    }.get(directions.mode(), "🟢🔴 BOTH (each strategy its own side)")
+
+
+def _trigger_sign(side) -> str:
+    """HTML-escaped: '&gt;' for a long (enters on a break above), '&lt;' for a short."""
+    return "&gt;" if directions.is_long(side) else "&lt;"
+
+
 @dataclass
 class SignalMsgState:
     created_at: float
@@ -266,9 +282,10 @@ class ShortCircuitBot:
         )
     def _build_signal_discovery_text(self, signal: dict) -> str:
         symbol = signal.get('symbol', 'UNKNOWN')
-        side = signal.get('side', 'SHORT')
+        side = directions.of_signal(signal)
         ltp = signal.get('ltp', signal.get('entry_price', 0))
-        trigger = signal.get('signal_low', signal.get('entry_price', 0))
+        trigger = signal.get('signal_high' if directions.is_long(side) else 'signal_low',
+                             signal.get('entry_price', 0))
         
         # Calculate pre-trade margin utilization
         margin_str = "N/A"
@@ -281,7 +298,7 @@ class ShortCircuitBot:
             f"Symbol: <code>{_he(symbol)}</code>\n"
             f"Side: {side}\n"
             f"LTP: ₹{ltp:.2f}\n"
-            f"Trigger: &lt; ₹{trigger:.2f}\n"
+            f"Trigger: {_trigger_sign(side)} ₹{trigger:.2f}\n"
             f"Est. Margin: {margin_str}\n\n"
             f"<i>Waiting for Gate 12 validation...</i>"
         )
@@ -289,9 +306,10 @@ class ShortCircuitBot:
         details = details or {}
         symbol = signal.get('symbol', 'UNKNOWN')
         ltp = details.get('ltp', signal.get('ltp', signal.get('entry_price', 0)))
-        trigger = details.get('trigger_price', signal.get('signal_low', signal.get('entry_price', 0)))
+        side = directions.of_signal(signal)
+        trigger = details.get('trigger_price', signal.get(
+            'signal_high' if directions.is_long(side) else 'signal_low', signal.get('entry_price', 0)))
         reason = details.get('reason', 'N/A')
-        side = signal.get('side', 'SHORT')
         entry = signal.get('entry_price', 0)
         stop = signal.get('stop_loss', 0)
 
@@ -317,7 +335,7 @@ class ShortCircuitBot:
                 f"Symbol: <code>{_he(symbol)}</code>\n"
                 f"Side: {side}\n"
                 f"LTP: ₹{ltp:.2f}\n"
-                f"Trigger: &lt; ₹{trigger:.2f}\n"
+                f"Trigger: {_trigger_sign(side)} ₹{trigger:.2f}\n"
                 f"Est. Margin: {margin_str}\n"
                 f"Entry: ₹{entry:.2f} | SL: ₹{stop:.2f}\n"
                 f"Exit: SL or 15:10 square-off (no TP)\n"
@@ -330,7 +348,7 @@ class ShortCircuitBot:
                 f"⌛ <b>GATE 12 TIMEOUT</b>\n\n"
                 f"Symbol: <code>{_he(symbol)}</code>\n"
                 f"LTP: ₹{ltp:.2f}\n"
-                f"Trigger: &lt; ₹{trigger:.2f}\n"
+                f"Trigger: {_trigger_sign(side)} ₹{trigger:.2f}\n"
                 f"Reason: <code>{_he(reason)}</code>\n"
                 f"Timeout: {timeout_min} minute(s)"
             )
@@ -338,7 +356,7 @@ class ShortCircuitBot:
             f"⛔ <b>GATE 12 REJECTED</b>\n\n"
             f"Symbol: <code>{_he(symbol)}</code>\n"
             f"LTP: ₹{ltp:.2f}\n"
-            f"Trigger: &lt; ₹{trigger:.2f}\n"
+            f"Trigger: {_trigger_sign(side)} ₹{trigger:.2f}\n"
             f"Reason: <code>{_he(reason)}</code>"
         )
     async def _handle_signal_validation_update(
@@ -531,43 +549,39 @@ class ShortCircuitBot:
         )
 
     async def _cmd_mode(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """/mode buy|sell — Switch trade direction at runtime."""
+        """/mode both|long|short — which strategy directions may open positions."""
         if not self._is_authorized(update):
             await update.message.reply_text("⛔ Unauthorized.")
             return
+        usage = "Usage: `/mode both`, `/mode long` or `/mode short`"
         args = context.args
         if not args:
-            current = config.TRADE_DIRECTION
-            emoji = "🟢 LONG (BUY)" if current == 'LONG' else "🔴 SHORT (SELL)"
             await update.message.reply_text(
-                f"Current mode: *{emoji}*\n\n"
-                f"Usage: `/mode buy` or `/mode sell`",
+                f"Current mode: *{_mode_label()}*\n\n"
+                "Each strategy trades its own side; the mode only filters.\n\n"
+                f"{usage}",
                 parse_mode='Markdown'
             )
             return
         action = args[0].lower().strip()
-        if action in ('buy', 'long'):
-            config.TRADE_DIRECTION = 'LONG'
-            logger.critical("🟢 [MODE] Trade direction switched to LONG (BUY) via Telegram")
-            await update.message.reply_text(
-                "🟢 *Mode: LONG (BUY)*\n\n"
-                "Bot will now enter BUY positions.\n"
-                "SL flips below entry.\n"
-                "Exit remains SL or 15:10 square-off.\n\n"
-                "_All other logic unchanged._",
-                parse_mode='Markdown'
-            )
-        elif action in ('sell', 'short'):
-            config.TRADE_DIRECTION = 'SHORT'
-            logger.critical("🔴 [MODE] Trade direction switched to SHORT (SELL) via Telegram")
-            await update.message.reply_text(
-                "🔴 *Mode: SHORT (SELL)*\n\n"
-                "Bot will now enter SELL positions (default).\n\n"
-                "_All other logic unchanged._",
-                parse_mode='Markdown'
-            )
-        else:
-            await update.message.reply_text("Usage: `/mode buy` or `/mode sell`", parse_mode='Markdown')
+        new = {'both': 'BOTH', 'all': 'BOTH',
+               'buy': 'LONG', 'long': 'LONG',
+               'sell': 'SHORT', 'short': 'SHORT'}.get(action)
+        if new is None:
+            await update.message.reply_text(usage, parse_mode='Markdown')
+            return
+        config.TRADE_DIRECTION = new
+        logger.critical("[MODE] Trade direction filter switched to %s via Telegram", new)
+        detail = {
+            'BOTH': "Short strategies may sell and long strategies may buy.",
+            'LONG': "Only long strategies may open positions (BUY). Short setups are held back.",
+            'SHORT': "Only short strategies may open positions (SELL). Long setups are held back.",
+        }[new]
+        await update.message.reply_text(
+            f"*Mode: {_mode_label()}*\n\n{detail}\n"
+            "Open positions are unaffected: each keeps its own side, stop and exits.",
+            parse_mode='Markdown'
+        )
     async def _cmd_auto_off(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """/auto off — Disable auto trading."""
         if not self._is_authorized(update):
@@ -651,7 +665,7 @@ class ShortCircuitBot:
         mode_str = "🟢 AUTO" if self.is_auto_mode() else "🔴 ALERT ONLY"
         if self._scanning_paused:
             mode_str += " (⏸️ PAUSED)"
-        dir_str = "🟢 LONG (BUY)" if config.TRADE_DIRECTION == 'LONG' else "🔴 SHORT (SELL)"
+        dir_str = _mode_label()
         
         pnl_str = f"+₹{today_pnl:.2f}" if today_pnl >= 0 else f"-₹{abs(today_pnl):.2f}"
         unr_str = f"+₹{unrealised:.2f}" if unrealised >= 0 else f"-₹{abs(unrealised):.2f}"
@@ -683,8 +697,8 @@ class ShortCircuitBot:
             "⚡ <b>ShortCircuit Commands</b>\n\n"
             "<b>/auto on|off</b>\n"
             "↳ Arm auto-trading or set to alert-only.\n\n"
-            "<b>/mode buy|sell</b>\n"
-            "↳ Switch between LONG (buy) and SHORT (sell) mode.\n\n"
+            "<b>/mode both|long|short</b>\n"
+            "↳ Which strategy directions may open positions. Each strategy trades its own side.\n\n"
             "<b>/status</b>\n"
             "↳ System health &amp; capital snapshot.\n\n"
             "<b>/health</b>\n"
@@ -867,7 +881,7 @@ class ShortCircuitBot:
         else:
             auto_str = "OFF ❌"
 
-        dir_str = "🟢 LONG" if config.TRADE_DIRECTION == 'LONG' else "🔴 SHORT"
+        dir_str = _mode_label()
 
         # Daily quote
         quote_text = self._get_daily_quote()

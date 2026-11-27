@@ -50,6 +50,7 @@ class MarketContext:
         self.regime_change_time = None
         self.trend_duration_minutes = 0
         self._circuit_touched_today = set() # G3 Blacklist (Session-permanent)
+        self._lower_circuit_touched_today = set()  # the same, at the lower band
         self._circuit_blacklist_date = datetime.now(IST).date()
 
         if self._morning_high:
@@ -384,10 +385,21 @@ class MarketContext:
         self._refresh_circuit_blacklist_if_needed()
         return symbol in self._circuit_touched_today
 
+    def mark_lower_circuit_touched(self, symbol: str):
+        """A symbol that touched its LOWER circuit: the long-side twin of G3."""
+        self._refresh_circuit_blacklist_if_needed()
+        self._lower_circuit_touched_today.add(symbol)
+        logger.warning(f"[G3] Symbol {symbol} marked as LOWER CIRCUIT HITTER for the session.")
+
+    def is_lower_circuit_hitter(self, symbol: str) -> bool:
+        self._refresh_circuit_blacklist_if_needed()
+        return symbol in self._lower_circuit_touched_today
+
     def _refresh_circuit_blacklist_if_needed(self):
         """Resets the circuit blacklist if a new day has started."""
         today = datetime.now(IST).date()
         if self._circuit_blacklist_date != today:
             self._circuit_touched_today.clear()
+            self._lower_circuit_touched_today.clear()
             self._circuit_blacklist_date = today
             logger.info("[G3] Daily Circuit Blacklist cleared for new session.")

@@ -142,12 +142,14 @@ class ReconciliationEngine:
         Returns (reason, exit_price, pnl). PnL is always computed when entry,
         quantity and an exit price are known — "not tracked" is not an outcome.
         """
-        import shortcircuit.config as _cfg
         from shortcircuit.broker.fyers_broker_interface import FyersOrderStatus
+        from shortcircuit.execution import directions
 
         entry = float(pos.get('entry_price') or 0.0)
         qty = int(pos.get('qty') or 0)
-        direction = str(pos.get('side') or getattr(_cfg, 'TRADE_DIRECTION', 'SHORT')).upper()
+        # The position's own side. config.TRADE_DIRECTION is a filter that may
+        # read 'BOTH', which is no side at all.
+        direction = directions.of_signal(pos)
 
         exit_price = 0.0
         reason = None
@@ -1028,9 +1030,9 @@ class ReconciliationEngine:
                             entry_price = pos.get('entry_price', 0.0)
                             qty = pos.get('qty', 0)
                             if entry_price > 0 and qty > 0:
-                                # Direction-aware PnL
-                                import shortcircuit.config as _cfg
-                                _dir = pos.get('side', _cfg.TRADE_DIRECTION)
+                                # Direction-aware PnL, from the position's own side
+                                from shortcircuit.execution import directions
+                                _dir = directions.of_signal(pos)
                                 if _dir == 'LONG':
                                     pnl = (exit_price - entry_price) * qty
                                 else:

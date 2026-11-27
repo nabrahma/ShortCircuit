@@ -292,7 +292,9 @@ async def _initialize_runtime() -> RuntimeContext:
     bot.market_session = market_session
 
 
-    scanner = FyersScanner(fyers_client, broker=broker)
+    # The scanner watches the movers the active strategies ask for: gainers for
+    # shorts, losers for longs (see execution/directions.py).
+    scanner = FyersScanner(fyers_client, broker=broker, strategies=analyzer.strategies)
 
     # 2. Fetch NSE symbol universe synchronously (blocks executor, not event loop)
     scanner_symbols = await asyncio.get_event_loop().run_in_executor(
@@ -558,6 +560,7 @@ async def _trading_loop(shutdown_event: asyncio.Event, ctx: RuntimeContext):
                     cand.get("history_df_15m"),
                     _scan_id,
                     _data_tier,
+                    day_change_pct=cand.get("change"),
                 )
                 # Inject the scanner's tick_size into the signal
                 # The symbol master has the correct exchange tick (0.01/0.05/0.10).

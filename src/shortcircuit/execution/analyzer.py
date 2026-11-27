@@ -32,8 +32,9 @@ from shortcircuit.strategy.market_context import MarketContext
 from shortcircuit.strategy.market_profile import ProfileAnalyzer
 from shortcircuit.observability.ml_logger import get_ml_logger
 from shortcircuit.execution.signal_manager import get_signal_manager
+from shortcircuit.execution import directions
 from shortcircuit.strategy import registry
-from shortcircuit.strategy.sdk import ExitProfile, SetupContext, Signal, Strategy
+from shortcircuit.strategy.sdk import Direction, ExitProfile, SetupContext, Signal, Strategy
 
 logger = logging.getLogger(__name__)
 
@@ -298,10 +299,17 @@ class FyersAnalyzer:
         df_15m: Optional[pd.DataFrame] = None,
         scan_id: int = 0,
         data_tier: str = "UNKNOWN",
+        day_change_pct: Optional[float] = None,
     ) -> Optional[Dict[str, Any]]:
         """
         Public API — called by main.py trading loop.
         Signature intentionally unchanged from the original for backward compat.
+
+        `day_change_pct` is the scanner's own day change for the candidate, which
+        decides whether it is a gainer or a loser - the band it was admitted in.
+        Without it the analyzer's gain_pct is used, which falls back to the change
+        from the OPEN when no previous close is known: a stock that gapped up and
+        faded would read as a loser and stop being offered to a short strategy.
         """
         grl = get_gate_result_logger()
         gr = GateResult(symbol=symbol, scan_id=scan_id, data_tier=data_tier)
@@ -381,6 +389,8 @@ class FyersAnalyzer:
                 
                 if upper_circuit > 0 and ltp >= upper_circuit * 0.999:
                     self.market_context.mark_circuit_touched(symbol)
+                if lower_circuit > 0 and ltp <= lower_circuit * 1.001:
+                    self.market_context.mark_lower_circuit_touched(symbol)
                 
                 # Spread
                 ask = depth_data['ask'][0]['price'] if depth_data.get('ask') else ltp
@@ -404,6 +414,7 @@ class FyersAnalyzer:
             logger.debug("[DEPTH] %s no upper_ckt — C0 circuit branch inactive", symbol)
 
         is_circuit_hitter = self.market_context.is_circuit_hitter(symbol)
+        is_lower_circuit_hitter = self.market_context.is_lower_circuit_hitter(symbol)
 
         ctx = SetupContext(
             symbol=symbol,
@@ -415,6 +426,7 @@ class FyersAnalyzer:
             lower_circuit=lower_circuit,
             spread_pct=spread_pct,
             is_circuit_hitter=is_circuit_hitter,
+            is_lower_circuit_hitter=is_lower_circuit_hitter,
             **feats,
         )
 
@@ -422,7 +434,9 @@ class FyersAnalyzer:
         # strategy only ever sees candidates every earlier one turned down, so
         # adding one can never loosen another's gates. Everything downstream -
         # G9, G8, the stop, the order path - applies to every strategy alike.
-        strategy, signal = self._first_signal(ctx)
+        strategy, signal = self._first_signal(
+            ctx, ctx.gain_pct if day_change_pct is None else day_change_pct
+        )
         if signal is None:
             gr.g5_pass = False
             gr.verdict = "REJECTED"
@@ -447,6 +461,7 @@ class FyersAnalyzer:
                 _htf_future = _HTF_EXECUTOR.submit(
                     self.htf_confluence.check_trend_exhaustion,
                     symbol, df_15m=df_15m, vwap_sd=vwap_sd,
+                    direction=strategy.direction.value,
                 )
                 htf_ok, htf_msg = _htf_future.result(timeout=1.5)
             except concurrent.futures.TimeoutError:
@@ -488,6 +503,9 @@ class FyersAnalyzer:
         finalized = self._finalize_signal(strategy, signal, ctx)
         if finalized:
             finalized['_gate_result'] = gr
+            # The circuit band, for the protective stop's limit-price clamp.
+            finalized.setdefault('upper_circuit', upper_circuit)
+            finalized.setdefault('lower_circuit', lower_circuit)
         else:
             gr.verdict = "DATA_ERROR"
 
@@ -497,19 +515,22 @@ class FyersAnalyzer:
     # Strategy stage
 
     def _first_signal(
-        self, ctx: SetupContext
+        self, ctx: SetupContext, day_change_pct: Optional[float] = None,
     ) -> Tuple[Optional[Strategy], Optional[Signal]]:
         """
         Ask each active strategy in turn; return the first valid Signal.
 
-        A strategy whose direction is not the engine's current TRADE_DIRECTION is
-        skipped: the direction can be switched at runtime from Telegram, and a
-        short setup must never be executed as a buy. An exception, or a Signal
-        with unusable levels, counts as "no setup" - fail closed, keep going.
+        A strategy is skipped when the direction filter (config.TRADE_DIRECTION,
+        switchable from Telegram) holds its side back, or when the candidate is
+        not one its universe asks for - a gainer is not offered to a strategy
+        that wants losers. An exception, or a Signal with unusable levels, counts
+        as "no setup" - fail closed, keep going.
         """
-        direction = str(getattr(config, 'TRADE_DIRECTION', 'SHORT')).upper()
         for strategy in self.strategies:
-            if strategy.direction.value != direction:
+            if not directions.allowed(strategy.direction):
+                continue
+            change = ctx.gain_pct if day_change_pct is None else day_change_pct
+            if not directions.offered(strategy, change):
                 continue
             try:
                 signal = strategy.evaluate(ctx)
@@ -521,7 +542,7 @@ class FyersAnalyzer:
                 continue
             if signal is None:
                 continue
-            problem = signal_problem(signal)
+            problem = signal_problem(signal, strategy.direction)
             if problem:
                 logger.error(
                     "[STRATEGY] %s returned an unusable signal for %s (%s) - ignored",
@@ -539,16 +560,19 @@ class FyersAnalyzer:
         plan = signal.exit
         # Neither non-default profile exits at the VWAP target.
         holds_to_close = plan.profile is not ExitProfile.DEFAULT
+        is_long = strategy.direction is Direction.LONG
 
         # Stop: the strategy's reference level plus the engine's ATR buffer, or a
         # fixed percentage. The latter is measured from the fill by the order
         # path; the figure here, from the signal price, is the planning estimate.
+        # A short's stop sits above its setup high, a long's below its setup low.
         atr = ctx.atr
         buffer = max(atr * 0.5, 0.25)
-        setup_high = signal.stop_reference
-        sl_price = setup_high + buffer
+        setup_high = signal.stop_reference      # the setup's stop level, either side
+        sign = -1.0 if is_long else 1.0
+        sl_price = setup_high + sign * buffer
         if plan.stop_pct is not None:
-            sl_price = ltp * (1 + plan.stop_pct / 100.0)
+            sl_price = ltp * (1 + sign * plan.stop_pct / 100.0)
         pattern_desc = signal.pattern
         slope = ctx.slope_fast
 
@@ -565,7 +589,7 @@ class FyersAnalyzer:
                 self._episodes[episode_key] = (rearm_obs, now_ist)
 
         # Logging
-        logger.info(f"[OK] SIGNAL: {symbol} | {pattern_desc} [{strategy.name}]"
+        logger.info(f"[OK] SIGNAL: {symbol} {strategy.direction.value} | {pattern_desc} [{strategy.name}]"
                     + (" (re-arm)" if rearm_obs else ""))
 
         meta_str = f"Slope:{slope:.1f}, ATR:{atr:.2f}"
@@ -665,17 +689,36 @@ class FyersAnalyzer:
             except Exception as e:
                 logger.warning(f"   [ML] Logging error: {e}")
 
-        # Build signal dict
+        # Build signal dict. The gate reads its levels by side: a SHORT enters
+        # below signal_low and is abandoned above signal_high; a LONG enters
+        # above signal_high and is abandoned below signal_low. So for a short
+        # signal_high is the setup level and signal_low the trigger, and for a
+        # long the other way round.
+        if is_long:
+            levels = {
+                'signal_high': df.iloc[-2]['high'],
+                'signal_low': setup_high,
+                'setup_low': setup_high,
+            }
+        else:
+            levels = {
+                'signal_low': df.iloc[-2]['low'],
+                'setup_high': setup_high,
+                'signal_high': setup_high,
+            }
         signal_data = {
             'symbol': symbol,
             'strategy': strategy.name,
+            # Every downstream decision - the gate, the order side, the stop,
+            # the targets - reads this, never the global filter.
+            'direction': strategy.direction.value,
+            'side': strategy.direction.value,
             'ltp': ltp,
             'pattern': pattern_desc,
             'stop_loss': sl_price,
             'day_high': df['high'].max(),
-            'signal_low': df.iloc[-2]['low'],
-            'setup_high': setup_high,
-            'signal_high': setup_high,
+            'day_low': df['low'].min(),
+            **levels,
             'tick_size': 0.05,
             'atr': atr,
             'vwap': vwap,
@@ -702,12 +745,13 @@ class FyersAnalyzer:
         for key, value in signal.extra.items():
             signal_data.setdefault(key, value)
 
-        # The validation gate watches signal_low at 5Hz and enters the moment price
+        # The validation gate watches the trigger at 5Hz and enters the moment price
         # crosses it. A strategy that names its own trigger replaces the default
-        # (the previous bar's low): entering AT a level rather than after a
-        # confirming close was worth 0.23pp per trade on a measured setup.
+        # (the previous bar's low, or high for a long): entering AT a level rather
+        # than after a confirming close was worth 0.23pp per trade on a measured
+        # setup.
         if signal.trigger_price is not None:
-            signal_data['signal_low'] = float(signal.trigger_price)
+            signal_data['signal_high' if is_long else 'signal_low'] = float(signal.trigger_price)
             signal_data['trigger_price'] = float(signal.trigger_price)
 
         return signal_data
@@ -739,6 +783,7 @@ def derive_features(symbol: str, df: pd.DataFrame, ltp: float, prev_close: float
         )
 
     day_high = df['high'].max()
+    day_low = df['low'].min()
     open_price = df.iloc[0]['open']
     baseline = prev_close if prev_close and prev_close > 0 else open_price
     gain_pct = ((ltp - baseline) / baseline) * 100
@@ -755,15 +800,16 @@ def derive_features(symbol: str, df: pd.DataFrame, ltp: float, prev_close: float
         logger.warning(f"Profile/VolZ pre-calc error for {symbol}: {e}")
 
     return dict(
-        gain_pct=gain_pct, day_high=float(day_high), open_price=float(open_price),
+        gain_pct=gain_pct, day_high=float(day_high), day_low=float(day_low),
+        open_price=float(open_price),
         atr=atr, vwap_sd=vwap_sd, slope_fast=slope_5m, slope_slow=slope_30m,
         is_decaying=is_decaying, vol_z=vol_z, profile=profile,
         profile_rejection=profile_rejection,
     )
 
 
-def signal_problem(signal: Signal) -> Optional[str]:
-    """Why a Signal cannot be executed, or None if it can."""
+def signal_problem(signal: Signal, direction=Direction.SHORT) -> Optional[str]:
+    """Why a Signal from a `direction` strategy cannot be executed, or None if it can."""
 
     def bad(x) -> bool:
         return (isinstance(x, bool) or not isinstance(x, (int, float))
@@ -775,6 +821,11 @@ def signal_problem(signal: Signal) -> Optional[str]:
         return f"stop_reference={signal.stop_reference!r}"
     if signal.trigger_price is not None and bad(signal.trigger_price):
         return f"trigger_price={signal.trigger_price!r}"
-    if signal.trigger_price is not None and signal.trigger_price >= signal.stop_reference:
+    long_ = directions.is_long(direction)
+    if signal.trigger_price is not None and not long_ \
+            and signal.trigger_price >= signal.stop_reference:
         return "trigger_price must sit below stop_reference for a short"
+    if signal.trigger_price is not None and long_ \
+            and signal.trigger_price <= signal.stop_reference:
+        return "trigger_price must sit above stop_reference for a long"
     return None

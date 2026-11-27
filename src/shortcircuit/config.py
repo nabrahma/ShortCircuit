@@ -24,8 +24,11 @@ DAILY_TARGET_INR = -1       # -1 = dynamic 5%; a positive value overrides it.
                             # Once hit, only EXTREME/MAX_CONVICTION signals pass.
 INTRADAY_LEVERAGE = 5.0    # Fixed 5× leverage (NSE standard requirement)
 
-# Toggle at runtime with Telegram /mode buy | /mode sell.
-TRADE_DIRECTION = 'SHORT'  # 'SHORT' or 'LONG'
+# Which strategy directions may open positions. Every strategy declares its own
+# side (sdk.Direction) and its signals trade that side; this only filters.
+# 'BOTH' runs each active strategy in its own direction, 'SHORT' or 'LONG'
+# holds back the other side. Toggle at runtime with Telegram /mode.
+TRADE_DIRECTION = 'BOTH'  # 'BOTH', 'SHORT' or 'LONG'
 
 # A 46-trade replay put 45 ahead of no cap in every phase. 0 disables the exit.
 MAX_HOLD_TIME_MINUTES = 45
@@ -53,6 +56,12 @@ SCANNER_GAIN_MIN_PCT: float = 7.5  # Kept in sync with the G1 gate floor
 # from 11% to 41%, so where the band is tighter than 18% the circuit binds first
 # and this never applies.
 SCANNER_GAIN_MAX_PCT: float = 18.0
+# The losers band, scanned only while a LONG strategy is active (and the
+# direction filter allows longs): the mirror of the gain band, -18% to -7.5%.
+# Absolute values. A short goes limit-up at the upper circuit and a long goes
+# limit-down at the lower one, so the ceiling is a backstop for the same reason.
+SCANNER_LOSS_MIN_PCT: float = 7.5
+SCANNER_LOSS_MAX_PCT: float = 18.0
 # Lowered twice from 333,333: low-float movers cleared the old floor ~26 min
 # after the move. Admits thinner books, so watch slippage.
 SCANNER_MIN_VOLUME:   int   = 111111

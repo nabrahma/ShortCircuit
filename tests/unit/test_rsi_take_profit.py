@@ -1,5 +1,6 @@
 """
 The engine's RSI relief-rally cover for EOD_HOLD shorts (ExitPlan.rsi_cover).
+Longs run the mirror of it; see test_long_short.py.
 
 A strategy opts in by putting an RsiCover on its exit plan; the parameters ride
 on the position (`exit_params`) and on its ML row, so the live loop and the
@@ -149,7 +150,10 @@ def test_too_few_candles_leaves_the_position_alone():
 
 
 @pytest.mark.parametrize("over", [{'exit_profile': 'DEFAULT'}, {'direction': 'LONG'}])
-def test_only_eod_hold_shorts(over):
+def test_only_eod_hold_and_only_in_profit(over):
+    """A DEFAULT position never takes it. A long on these falling closes is not
+    in profit, so it is not sold either; the mirrored rule for longs (sell when
+    RSI rises above 100 - threshold) is pinned in test_long_short.py."""
     c, e = _candles(after=FALLING)
     assert _Engine(c)._rsi_take_profit_due("NSE:X-EQ", _trade(e, **over)) is None
 

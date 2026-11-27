@@ -43,6 +43,13 @@ G9: a strategy with `requires_htf_confirmation` is held to the analyzer's HTF
 check, on 15-minute bars built from the session (the last one forming, closing
 at the minute's open). `frame_bars` hands the strategy only the last N bars,
 as VWAP_ANCHOR_MODE='ROLLING' does live; the default is the whole session.
+
+Direction: every trade runs on its strategy's side. A LONG is the exact mirror
+of a SHORT - it enters on a break above the trigger, is abandoned on a drop
+below the setup low, stops below, takes profit above, reads its RSI exits as
+100 - RSI and trails under each bar's low - and every fill is moved against it.
+The scanner's admission is the live one: gainers for short strategies, losers
+for long ones, per each strategy's universe (execution/directions.py).
 """
 from __future__ import annotations
 
@@ -58,8 +65,9 @@ import pandas as pd
 
 from shortcircuit import config
 from shortcircuit.eod import squareoff
+from shortcircuit.execution import directions
 from shortcircuit.execution.analyzer import derive_features, signal_problem
-from shortcircuit.execution.focus_engine import completed_bars, compute_tp_levels
+from shortcircuit.execution.focus_engine import completed_bars, compute_tp_levels, side_rsi
 from shortcircuit.strategy import features as F
 from shortcircuit.strategy.htf_confluence import HTFConfluence
 from shortcircuit.strategy.market_context import MarketContext
@@ -72,7 +80,7 @@ IST = "Asia/Kolkata"
 FIRST_ENTRY = dt.time(9, 30)            # G7: no entries in the opening noise
 LAST_ENTRY = dt.time(15, 10)
 GATE_MINUTES = 15                       # validation gate expiry
-INVALIDATION = 1.002                    # gate abandons above setup high x this
+INVALIDATION = 1.002                    # gate abandons above setup high x this (below low / this, long)
 
 
 @dataclass
@@ -100,6 +108,7 @@ class Trade:
     stop_reference: float = 0.0
     # (time, stop) every time the stop moved, the first entry the initial stop.
     stop_path: list = field(default_factory=list)
+    direction: str = "SHORT"
 
     @property
     def exit_reason(self) -> str:
@@ -107,7 +116,8 @@ class Trade:
 
     @property
     def gross_pct(self) -> float:
-        return sum(f * (self.entry - px) / self.entry * 100 for f, px, _, _ in self.legs)
+        sign = 1.0 if self.direction == "LONG" else -1.0
+        return sum(f * sign * (px - self.entry) / self.entry * 100 for f, px, _, _ in self.legs)
 
     def net_pct(self, costs: Costs) -> float:
         return self.gross_pct - costs.cost_pct
@@ -115,6 +125,7 @@ class Trade:
     def row(self, costs: Costs) -> dict:
         return {
             "date": self.date.isoformat(), "symbol": self.symbol, "strategy": self.strategy,
+            "direction": self.direction,
             "pattern": self.pattern, "signal_time": self.signal_time.strftime("%H:%M"),
             "entry_time": self.entry_time.strftime("%H:%M"), "entry": round(self.entry, 2),
             "stop": round(self.stop, 2), "exit_reason": self.exit_reason,
@@ -167,13 +178,34 @@ def infer_upper_circuit(prev_close: float, day_high: float, fno: Optional[bool])
     return round(round(prev_close * (1 + band / 100) / 0.05) * 0.05, 2)
 
 
+def infer_lower_circuit(prev_close: float, day_low: float, fno: Optional[bool]) -> float:
+    """
+    The mirror of infer_upper_circuit: the day's lower circuit when the day's
+    low pinned it at -10% (banded at 10) or went beyond it (20); 0.0 otherwise.
+    """
+    if fno or prev_close <= 0 or day_low <= 0:
+        return 0.0
+    fall = (1 - day_low / prev_close) * 100
+    if 9.9 <= fall <= 10.1:
+        band = 10.0
+    elif 10.1 < fall <= 20.1:
+        band = 20.0
+    else:
+        return 0.0
+    return round(round(prev_close * (1 - band / 100) / 0.05) * 0.05, 2)
+
+
 def _tick_up(price: float, tick: float = 0.05) -> float:
     return round(math.ceil(round(price / tick, 6)) * tick, 2)
 
 
+def _tick_down(price: float, tick: float = 0.05) -> float:
+    return round(math.floor(round(price / tick, 6)) * tick, 2)
+
+
 def _candles(df: pd.DataFrame) -> list:
-    return [SimpleNamespace(epoch=int(e), high=float(h), close=float(c))
-            for e, h, c in zip(df["epoch"], df["high"], df["close"], strict=True)]
+    return [SimpleNamespace(epoch=int(e), high=float(h), low=float(lo), close=float(c))
+            for e, h, lo, c in zip(df["epoch"], df["high"], df["low"], df["close"], strict=True)]
 
 
 def _frame_at(day: pd.DataFrame, i: int, bars: Optional[int] = None) -> pd.DataFrame:
@@ -207,16 +239,17 @@ def htf_bars(frame: pd.DataFrame, minutes: int = 15) -> pd.DataFrame:
 _HTF = HTFConfluence(None)      # given its bars, the check fetches nothing
 
 
-def _first_signal(strategies: Sequence[Strategy], ctx: SetupContext):
+def _first_signal(strategies: Sequence[Strategy], ctx: SetupContext, change: float):
+    """The analyzer's strategy stage: direction filter, universe, then evaluate."""
     for s in strategies:
-        if s.direction.value != config.TRADE_DIRECTION:
+        if not directions.allowed(s.direction) or not directions.offered(s, change):
             continue
         try:
             sig = s.evaluate(ctx)
         except Exception as exc:
             logger.debug("[BACKTEST] %s raised on %s: %s", s.name, ctx.symbol, exc)
             continue
-        if sig is not None and signal_problem(sig) is None:
+        if sig is not None and signal_problem(sig, s.direction) is None:
             return s, sig
     return None, None
 
@@ -224,12 +257,13 @@ def _first_signal(strategies: Sequence[Strategy], ctx: SetupContext):
 def replay_day(symbol: str, day: pd.DataFrame, prev_close: float,
                strategies: Sequence[Strategy], costs: Costs = Costs(),
                max_trades: int = 1, upper_circuit: float = 0.0,
-               frame_bars: Optional[int] = None) -> DayResult:
+               frame_bars: Optional[int] = None, lower_circuit: float = 0.0) -> DayResult:
     """
     `day` is one session's 1-minute bars: epoch, datetime (IST), open, high,
-    low, close, volume — completed bars only. `upper_circuit` is the day's
-    band, 0.0 when unknown (see `infer_upper_circuit`). `frame_bars`: hand the
-    strategy only the last N bars (live ROLLING anchor); None = the session.
+    low, close, volume — completed bars only. `upper_circuit` / `lower_circuit`
+    are the day's bands, 0.0 when unknown (see `infer_upper_circuit`).
+    `frame_bars`: hand the strategy only the last N bars (live ROLLING anchor);
+    None = the session.
     """
     out = DayResult()
     if day is None or len(day) < 20:
@@ -237,6 +271,7 @@ def replay_day(symbol: str, day: pd.DataFrame, prev_close: float,
     day = day.reset_index(drop=True)
     profile, market = ProfileAnalyzer(), MarketContext(None)
     cutoff_time = squareoff.squareoff_time(symbol)
+    gainers, losers = directions.scan_bands(strategies)
 
     i = 0
     while i < len(day) and len(out.trades) < max_trades:
@@ -249,7 +284,7 @@ def replay_day(symbol: str, day: pd.DataFrame, prev_close: float,
         ltp = float(day["open"].iloc[i])
         # The scanner's admission filters, as they would read at this moment.
         gain = (ltp - prev_close) / prev_close * 100 if prev_close > 0 else 0.0
-        if not (config.SCANNER_GAIN_MIN_PCT <= gain <= config.SCANNER_GAIN_MAX_PCT) \
+        if not directions.in_band(gain, gainers, losers) \
                 or ltp < config.SCANNER_MIN_LTP \
                 or float(day["volume"].iloc[:i].sum()) < config.SCANNER_MIN_VOLUME:
             i += 1
@@ -258,20 +293,27 @@ def replay_day(symbol: str, day: pd.DataFrame, prev_close: float,
         frame = _frame_at(day, i, frame_bars)
         feats = derive_features(symbol, frame, ltp, prev_close, profile, market)
         high_so_far = max(float(day["high"].iloc[:i].max()), ltp)
+        low_so_far = min(float(day["low"].iloc[:i].min()), ltp)
         hitter = upper_circuit > 0 and high_so_far >= upper_circuit * 0.999
+        low_hitter = lower_circuit > 0 and low_so_far <= lower_circuit * 1.001
         ctx = SetupContext(symbol=symbol, ltp=ltp, now=t.to_pydatetime(), df=frame,
-                           df_15m=None, upper_circuit=upper_circuit, lower_circuit=0.0,
-                           spread_pct=0.0, is_circuit_hitter=hitter, **feats)
-        strategy, sig = _first_signal(strategies, ctx)
+                           df_15m=None, upper_circuit=upper_circuit, lower_circuit=lower_circuit,
+                           spread_pct=0.0, is_circuit_hitter=hitter,
+                           is_lower_circuit_hitter=low_hitter, **feats)
+        strategy, sig = _first_signal(strategies, ctx, gain)
         if sig is None:
             i += 1
             continue
 
+        long_ = directions.is_long(strategy.direction)
         out.signals += 1
-        trigger = float(sig.trigger_price) if sig.trigger_price is not None \
-            else float(frame["low"].iloc[-2])
+        if sig.trigger_price is not None:
+            trigger = float(sig.trigger_price)
+        else:
+            trigger = float(frame["high" if long_ else "low"].iloc[-2])
         event = {
             "date": t.date().isoformat(), "symbol": symbol, "strategy": strategy.name,
+            "direction": strategy.direction.value,
             "time": t.strftime("%H:%M"), "trigger": round(trigger, 2),
             "stop_reference": round(float(sig.stop_reference), 2),
         }
@@ -279,13 +321,15 @@ def replay_day(symbol: str, day: pd.DataFrame, prev_close: float,
         # from a REST fetch of the day, whatever the 1-minute frame's anchor.
         if strategy.requires_htf_confirmation:
             ok, _msg = _HTF.check_trend_exhaustion(
-                symbol, df_15m=htf_bars(_frame_at(day, i)), vwap_sd=feats["vwap_sd"])
+                symbol, df_15m=htf_bars(_frame_at(day, i)), vwap_sd=feats["vwap_sd"],
+                direction=strategy.direction.value)
             if not ok:
                 out.g9_blocked += 1
                 out.events.append({**event, "outcome": "G9_BLOCKED"})
                 i += 1
                 continue
-        entry_i, fill = _gate(day, i, trigger, float(sig.stop_reference) * INVALIDATION)
+        invalid = float(sig.stop_reference) * ((2 - INVALIDATION) if long_ else INVALIDATION)
+        entry_i, fill = _gate(day, i, trigger, invalid, long_)
         out.events.append({**event, "outcome": "ENTERED" if entry_i is not None else fill})
         if entry_i is None:
             out.invalidated += fill == "INVALIDATED"
@@ -294,7 +338,9 @@ def replay_day(symbol: str, day: pd.DataFrame, prev_close: float,
             continue
 
         vwap_target = float(frame["vwap"].iloc[-1]) if "vwap" in frame.columns else 0.0
-        trade = _run_trade(symbol, day, entry_i, float(fill) * (1 - costs.slippage_pct / 100),
+        slip = costs.slippage_pct / 100
+        entry = float(fill) * ((1 + slip) if long_ else (1 - slip))   # against the trade
+        trade = _run_trade(symbol, day, entry_i, entry,
                            sig, strategy, feats["atr"], t, costs, cutoff_time, vwap_target)
         trade.trigger = trigger
         out.trades.append(trade)
@@ -303,31 +349,44 @@ def replay_day(symbol: str, day: pd.DataFrame, prev_close: float,
     return out
 
 
-def _gate(day: pd.DataFrame, i: int, trigger: float, invalid_above: float):
-    """(bar index, fill price) on entry; (None, 'INVALIDATED' | 'EXPIRED') otherwise."""
+def _gate(day: pd.DataFrame, i: int, trigger: float, invalid: float, long_: bool = False):
+    """
+    (bar index, fill price) on entry; (None, 'INVALIDATED' | 'EXPIRED') otherwise.
+    A short enters on a break below `trigger` and is abandoned above `invalid`;
+    a long enters on a break above and is abandoned below.
+    """
     for j in range(i, min(i + GATE_MINUTES, len(day))):
         o, h, lo = (float(day[c].iloc[j]) for c in ("open", "high", "low"))
-        if o < trigger:
-            return j, o                         # opened through the trigger
-        if h > invalid_above:
-            return None, "INVALIDATED"          # assume the adverse move came first
-        if lo < trigger:
-            return j, trigger
+        if long_:
+            if o > trigger:
+                return j, o                     # opened through the trigger
+            if lo < invalid:
+                return None, "INVALIDATED"      # assume the adverse move came first
+            if h > trigger:
+                return j, trigger
+        else:
+            if o < trigger:
+                return j, o
+            if h > invalid:
+                return None, "INVALIDATED"
+            if lo < trigger:
+                return j, trigger
     return None, "EXPIRED"
 
 
-def _ladder(plan, entry: float, vwap_target: float):
+def _ladder(plan, entry: float, vwap_target: float, long_: bool = False):
     """
     The DEFAULT profile's take-profit levels as the focus engine sets them at
     entry: (mode, tp_1, tp_2, full-exit level). The VWAP target falls back to
-    1% below entry, as OrderManager.compute_take_profits does without a VWAP.
+    1% beyond entry (below for a short, above for a long), as
+    OrderManager.compute_take_profits does without a VWAP.
     """
     mode = str(getattr(config, "TP_MODE", "OFF")).upper()
     if plan.profile is not ExitProfile.DEFAULT or mode not in ("SCALE", "SINGLE"):
         return "OFF", None, None, None
-    target = vwap_target if vwap_target and vwap_target > 0 else entry * 0.99
+    target = vwap_target if vwap_target and vwap_target > 0 else entry * (1.01 if long_ else 0.99)
     target = round(round(target / 0.05) * 0.05, 2)
-    tp_1, tp_2 = compute_tp_levels(entry, target, 0.05, False)
+    tp_1, tp_2 = compute_tp_levels(entry, target, 0.05, long_)
     if tp_1 is None:
         return "OFF", None, None, None
     return mode, tp_1, tp_2, (tp_1 if mode == "SINGLE" else tp_2)
@@ -337,14 +396,19 @@ def _run_trade(symbol, day, j, entry, sig: Signal, strategy: Strategy, atr: floa
                signal_time, costs: Costs, cutoff_time: dt.time,
                vwap_target: float = 0.0) -> Trade:
     plan = sig.exit
+    long_ = directions.is_long(strategy.direction)
+    direction = directions.LONG if long_ else directions.SHORT
     slip = costs.slippage_pct / 100
+    buffer = max(atr * 0.5, 0.15)
     if plan.stop_pct is not None:
-        stop = _tick_up(entry * (1 + plan.stop_pct / 100))
+        stop = (_tick_down(entry * (1 - plan.stop_pct / 100)) if long_
+                else _tick_up(entry * (1 + plan.stop_pct / 100)))
     else:
-        stop = _tick_up(float(sig.stop_reference) + max(atr * 0.5, 0.15))
+        stop = (_tick_down(float(sig.stop_reference) - buffer) if long_
+                else _tick_up(float(sig.stop_reference) + buffer))
     staged = plan.staged_rsi if plan.profile is ExitProfile.STAGED_RSI else None
     cover = plan.rsi_cover if plan.profile is ExitProfile.EOD_HOLD else None
-    tp_mode, tp_1, _tp_2, full_level = _ladder(plan, entry, vwap_target)
+    tp_mode, tp_1, _tp_2, full_level = _ladder(plan, entry, vwap_target, long_)
     max_hold = int(getattr(config, "MAX_HOLD_TIME_MINUTES", 0) or 0) \
         if plan.profile is ExitProfile.DEFAULT else 0
     breakeven = bool(getattr(config, "P52_BREAKEVEN_AFTER_TP1", False))
@@ -358,6 +422,7 @@ def _run_trade(symbol, day, j, entry, sig: Signal, strategy: Strategy, atr: floa
         features={k: v for k, v in sig.ml_features.items() if isinstance(v, (int, float, str))},
         stop_reference=float(sig.stop_reference),
         stop_path=[(day["datetime"].iloc[j], stop)],
+        direction=direction,
     )
     remaining, scaled, trailing = 1.0, False, False
     rsi_seen, trail_seen = None, None
@@ -365,13 +430,30 @@ def _run_trade(symbol, day, j, entry, sig: Signal, strategy: Strategy, atr: floa
     candles = _candles(day)
     pending: Optional[str] = None                 # action decided at a close, done at the next open
 
+    # The trade's own terms, so every rule below reads the same on either side.
+    def adverse(px, level):       # px at or through `level` against the trade
+        return px <= level if long_ else px >= level
+
+    def favourable(px, level):    # px at or through `level` in its favour
+        return px >= level if long_ else px <= level
+
+    def in_profit(px):
+        return px > entry if long_ else px < entry
+
+    def better_fill(o, level):    # a level the bar opened through fills at the open
+        return max(o, level) if long_ else min(o, level)
+
+    def stop_behind_entry():      # moving the stop to cost would tighten it
+        return stop < entry if long_ else entry < stop
+
     def close(frac, px, reason, when):
         nonlocal remaining
-        trade.legs.append((frac, px * (1 + slip), reason, when))
+        trade.legs.append((frac, px * ((1 - slip) if long_ else (1 + slip)), reason, when))
         remaining -= frac
 
     for k in range(j, len(day)):
         o, h, lo, c = (float(day[x].iloc[k]) for x in ("open", "high", "low", "close"))
+        worst, best = (lo, h) if long_ else (h, lo)
         when = day["datetime"].iloc[k]
         if k > j:
             if when.time() >= cutoff_time:
@@ -386,48 +468,52 @@ def _run_trade(symbol, day, j, entry, sig: Signal, strategy: Strategy, atr: floa
                 close(remaining, o, "RSI_TP", when)
                 return trade
             if pending == "SCALE_OUT" and remaining > 0:
-                if o < entry:
+                if in_profit(o):
                     close(remaining * staged.scale_out_fraction, o, "RSI_SCALE_OUT", when)
                     scaled = True
-                    if staged.stop_to_cost and entry < stop:
+                    if staged.stop_to_cost and stop_behind_entry():
                         stop = entry
                         trade.stop_path.append((when, stop))
                 pending = None
             elif pending == "TRAIL_EXIT":
                 close(remaining, o, "TRAIL_STOP", when)
                 return trade
-            if o >= stop:
-                close(remaining, o, _stop_reason(scaled, trailing, stop, entry), when)
+            if adverse(o, stop):
+                close(remaining, o, _stop_reason(scaled, trailing, stop, entry, long_), when)
                 return trade
-        trade.mfe_pct = max(trade.mfe_pct, (entry - lo) / entry * 100)
-        trade.mae_pct = max(trade.mae_pct, (h - entry) / entry * 100)
-        if h >= stop:
-            close(remaining, stop, _stop_reason(scaled, trailing, stop, entry), when)
+        if long_:
+            trade.mfe_pct = max(trade.mfe_pct, (h - entry) / entry * 100)
+            trade.mae_pct = max(trade.mae_pct, (entry - lo) / entry * 100)
+        else:
+            trade.mfe_pct = max(trade.mfe_pct, (entry - lo) / entry * 100)
+            trade.mae_pct = max(trade.mae_pct, (h - entry) / entry * 100)
+        if adverse(worst, stop):
+            close(remaining, stop, _stop_reason(scaled, trailing, stop, entry, long_), when)
             return trade
 
-        # DEFAULT: the take-profit ladder. Not on the entry bar, whose low may
+        # DEFAULT: the take-profit ladder. Not on the entry bar, whose extreme may
         # have come before the fill. The full exit is tested first, as live.
         if tp_mode != "OFF" and k > j:
-            if lo <= full_level:
-                close(remaining, min(o, full_level), "TP_HIT", when)
+            if favourable(best, full_level):
+                close(remaining, better_fill(o, full_level), "TP_HIT", when)
                 return trade
-            if tp_mode == "SCALE" and not scaled and lo <= tp_1:
-                close(remaining * 0.5, min(o, tp_1), "TP1_PARTIAL", when)
+            if tp_mode == "SCALE" and not scaled and favourable(best, tp_1):
+                close(remaining * 0.5, better_fill(o, tp_1), "TP1_PARTIAL", when)
                 scaled = True
-                if breakeven and entry < stop:
+                if breakeven and stop_behind_entry():
                     stop = entry
                     trade.stop_path.append((when, stop))
                     # Which came first inside this bar is unknown: the stop.
-                    if h >= stop:
+                    if adverse(worst, stop):
                         close(remaining, stop, "COST_STOP", when)
                         return trade
 
         # EOD_HOLD: the RSI relief-rally cover, read on this completed bar and
         # done at the next open.
         if cover is not None and pending is None and k + 1 >= cover.min_candles \
-                and k - j >= cover.skip_minutes and c < entry:
+                and k - j >= cover.skip_minutes and in_profit(c):
             rsi = F.compute_rsi_wilder(day["close"].iloc[: k + 1].tolist(), cover.period)
-            if rsi == rsi and rsi < cover.threshold:
+            if rsi == rsi and side_rsi(rsi, direction) < cover.threshold:
                 pending = "RSI_TP"
 
         if staged is None:
@@ -440,20 +526,26 @@ def _run_trade(symbol, day, j, entry, sig: Signal, strategy: Strategy, atr: floa
             if bars[-1].epoch + staged.bar_minutes * 60 > entry_epoch:
                 rsi = F.compute_rsi_wilder([b.close for b in bars], staged.period)
                 if rsi == rsi:
-                    if not scaled and pending is None and rsi <= staged.scale_out_rsi \
-                            and bars[-1].close < entry:
+                    level = side_rsi(rsi, direction)
+                    if not scaled and pending is None and level <= staged.scale_out_rsi \
+                            and in_profit(bars[-1].close):
                         pending = "SCALE_OUT"
-                    if scaled and not trailing and rsi <= staged.trail_rsi:
+                    if scaled and not trailing and level <= staged.trail_rsi:
                         trailing = True
         if trailing:
             tb = completed_bars(done, staged.trail_bar_minutes, now_epoch)
             if tb and tb[-1].epoch != trail_seen:
                 trail_seen = tb[-1].epoch
-                level = _tick_up(tb[-1].high * (1 + staged.trail_buffer_pct / 100))
-                if level < stop:
+                if long_:
+                    level = _tick_down(tb[-1].low * (1 - staged.trail_buffer_pct / 100))
+                    tighter = level > stop
+                else:
+                    level = _tick_up(tb[-1].high * (1 + staged.trail_buffer_pct / 100))
+                    tighter = level < stop
+                if tighter:
                     # Live, the trail is decided on the price just after the
-                    # close: already above the level means the trail is hit.
-                    if c >= level:
+                    # close: already through the level means the trail is hit.
+                    if adverse(c, level):
                         pending = "TRAIL_EXIT"
                     else:
                         stop = level
@@ -464,10 +556,11 @@ def _run_trade(symbol, day, j, entry, sig: Signal, strategy: Strategy, atr: floa
     return trade
 
 
-def _stop_reason(scaled: bool, trailing: bool, stop: float, entry: float) -> str:
+def _stop_reason(scaled: bool, trailing: bool, stop: float, entry: float,
+                 long_: bool = False) -> str:
     if trailing:
         return "TRAIL_STOP"
-    if scaled and stop <= entry:
+    if scaled and ((stop >= entry) if long_ else (stop <= entry)):
         return "COST_STOP"
     return "SL_HIT"
 
@@ -493,4 +586,5 @@ def summarise(trades: Sequence[Trade], costs: Costs) -> dict:
     }
 
 
-__all__ = ["Costs", "DayResult", "Trade", "infer_upper_circuit", "replay_day", "summarise"]
+__all__ = ["Costs", "DayResult", "Trade", "infer_lower_circuit", "infer_upper_circuit",
+           "replay_day", "summarise"]

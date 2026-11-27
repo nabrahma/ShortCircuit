@@ -184,11 +184,13 @@ def prefetch_minutes(history: "History", wanted: Iterable[tuple[str, dt.date]],
 
 def gainer_days(history: History, symbols: Iterable[str], start: dt.date, end: dt.date,
                 min_gain_pct: float, min_price: float, min_volume: float,
-                progress_every: int = 100, workers: int = 1) -> list[tuple[str, dt.date, float]]:
+                progress_every: int = 100, workers: int = 1,
+                gainers: bool = True, losers: bool = False) -> list[tuple[str, dt.date, float]]:
     """
     (symbol, date, prev_close) for every session in which the stock traded at
-    least `min_gain_pct` above the previous close — the days a top-gainer scan
-    would have shown it.
+    least `min_gain_pct` above the previous close (`gainers`), or at least that
+    far below it (`losers`) — the days a top-gainer or top-loser scan would have
+    shown it. Gainers alone by default, as for a short strategy.
     """
     # One day earlier than `start` so the first session has a previous close.
     lead = start - dt.timedelta(days=10)
@@ -209,9 +211,11 @@ def gainer_days(history: History, symbols: Iterable[str], start: dt.date, end: d
         frames = pool.map(load, symbols)
         for n, (symbol, df) in enumerate(zip(symbols, frames, strict=True), 1):
             if df is not None and not df.empty:
+                up = df["high"] >= df["prev_close"] * (1 + min_gain_pct / 100)
+                down = df["low"] <= df["prev_close"] * (1 - min_gain_pct / 100)
+                moved = (up & gainers) | (down & losers)
                 hit = df[(df["date"] >= start) & (df["prev_close"] >= min_price)
-                         & (df["high"] >= df["prev_close"] * (1 + min_gain_pct / 100))
-                         & (df["volume"] >= min_volume)]
+                         & moved & (df["volume"] >= min_volume)]
                 out.extend((symbol, d, float(pc)) for d, pc in zip(hit["date"], hit["prev_close"], strict=True))
             if progress_every and n % progress_every == 0:
                 logger.info("[BACKTEST] universe: %d/%d symbols scanned, %d gainer-days so far",

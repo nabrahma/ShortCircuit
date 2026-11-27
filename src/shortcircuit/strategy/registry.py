@@ -38,7 +38,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import Iterable, Optional, Sequence
 
-from shortcircuit.strategy.sdk import Direction, Strategy
+from shortcircuit.strategy.sdk import Direction, Strategy, Universe
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +48,7 @@ ENV_PATH = "SHORTCIRCUIT_STRATEGY_PATH"
 ENV_ACTIVE = "SHORTCIRCUIT_STRATEGIES"
 
 _BUILTIN_PACKAGE = "shortcircuit.strategy.examples"
-_SUPPORTED_DIRECTIONS = frozenset({Direction.SHORT})
+_SUPPORTED_DIRECTIONS = frozenset({Direction.SHORT, Direction.LONG})
 
 
 class StrategyConfigError(RuntimeError):
@@ -207,6 +207,8 @@ def _validate(cls: type[Strategy]) -> None:
             f"strategy {cls.name!r} trades {direction.value}; the execution engine "
             f"supports {sorted(d.value for d in _SUPPORTED_DIRECTIONS)} only"
         )
+    if not isinstance(getattr(cls, "universe", Universe.AUTO), Universe):
+        raise StrategyConfigError(f"strategy {cls.name!r}: `universe` must be a Universe")
 
 
 def load(

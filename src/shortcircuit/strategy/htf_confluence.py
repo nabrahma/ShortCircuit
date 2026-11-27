@@ -64,23 +64,31 @@ class HTFConfluence:
         # On failure: return stale cache if we have it — beats returning None
         return self._htf_cache.get(cache_key)
     
-    def check_trend_exhaustion(self, symbol, df_15m=None, vwap_sd: float = 0.0):
+    def check_trend_exhaustion(self, symbol, df_15m=None, vwap_sd: float = 0.0,
+                               direction: str = "SHORT"):
         """
         Math-First G9:
         1. Alpha Strike (Bypass): If stretch is extreme, pass immediately.
-        2. Acceleration Guard: Reject if momentum is accelerating up.
-        3. Stall Check: Pass if momentum has slowed down at highs.
-        
+        2. Acceleration Guard: Reject if momentum is accelerating against the fade.
+        3. Stall Check: Pass if momentum has slowed down at the extreme.
+
+        Written for a SHORT fading a move up. A LONG fades a move down, so every
+        quantity is read with its sign flipped: the stretch is distance BELOW VWAP
+        and the move is the fall, against the same thresholds.
+
         Returns:
             tuple: (allowed, message)
         """
+        sign = -1.0 if str(getattr(direction, "value", direction)).upper() == "LONG" else 1.0
+        stretch = sign * vwap_sd
+
         # Step 1: Alpha Strike (Leung & Li Bypass)
-        if vwap_sd > config.P61_G9_BYPASS_SD_THRESHOLD:
+        if stretch > config.P61_G9_BYPASS_SD_THRESHOLD:
             return True, f"G9 PASS: Alpha Strike (Stretch={vwap_sd:.1f}SD)"
 
         # Step 2: data fetching
         df = df_15m if df_15m is not None else self._get_htf_history(symbol, interval="15")
-        
+
         if df is None or len(df) < 3:
             return False, "G9 BLOCK: HTF Data Unavailable"
 
@@ -95,28 +103,23 @@ class HTFConfluence:
             curr_c = df[close_col].iloc[-1]
             prev_c = df[close_col].iloc[-2]
             pprev_c = df[close_col].iloc[-3]
-            
+
             if prev_c == 0 or pprev_c == 0:
                 return True, "G9 SKIP: Zero price in candle data"
 
-            # move_pct in last 15 mins vs previous 15 mins
-            curr_move = ((curr_c - prev_c) / prev_c) * 100
-            prev_move = ((prev_c - pprev_c) / pprev_c) * 100
-            
-            # Acceleration: Are we going up faster now?
-            acceleration = curr_move - prev_move
-            
-            # ACCEL REJECT: Rocket Ship Guard
+            # move_pct in the last 15 mins, in the direction the fade is against
+            curr_move = sign * ((curr_c - prev_c) / prev_c) * 100
+
+            # ACCEL REJECT: Rocket Ship Guard (a falling knife, for a long)
             if curr_move > config.P61_G9_ACCEL_REJECT_THRESHOLD:
-                 return False, f"G9 BLOCK: Momentum Accel (+{curr_move:.2f}%)"
+                 return False, f"G9 BLOCK: Momentum Accel ({sign * curr_move:+.2f}%)"
 
             # STALL PASS: Rubber Band logic
             if curr_move < config.P61_G9_STALL_PASS_THRESHOLD:
-                 return True, f"G9 PASS: Momentum Stall (Move {curr_move:.2f}% < {config.P61_G9_STALL_PASS_THRESHOLD}%)"
+                 return True, f"G9 PASS: Momentum Stall (Move {sign * curr_move:.2f}% < {config.P61_G9_STALL_PASS_THRESHOLD}%)"
 
         except Exception as e:
             logger.debug(f"G9 Math Logic Error (non-fatal): {e}")
             return False, f"G9 BLOCK: Calculation Error ({e})"
 
-        return False, f"G9 BLOCK: Sustained Trend (Move {curr_move:.2f}%)"
-    
+        return False, f"G9 BLOCK: Sustained Trend (Move {sign * curr_move:.2f}%)"

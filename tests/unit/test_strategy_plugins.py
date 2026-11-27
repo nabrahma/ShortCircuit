@@ -20,7 +20,7 @@ from shortcircuit.execution import analyzer as an_mod
 from shortcircuit.strategy import registry
 from shortcircuit.strategy.examples.vwap_stretch_fade import VwapStretchFade
 from shortcircuit.strategy.sdk import (
-    Direction, ExitPlan, ExitProfile, RsiCover, Signal, Strategy,
+    Direction, ExitPlan, ExitProfile, RsiCover, Signal, Strategy, Universe,
 )
 
 REPO = Path(__file__).resolve().parents[2]
@@ -146,11 +146,19 @@ def test_listing_a_strategy_twice_is_an_error(tmp_path, clean_env):
         registry.load(["example_vwap_stretch_fade"] * 2, directories=[tmp_path])
 
 
-def test_a_long_strategy_is_refused_until_the_engine_supports_it(tmp_path, clean_env):
-    """The validation gate is short-only; a LONG plug-in would trade through it."""
+def test_a_long_strategy_loads_alongside_a_short_one(tmp_path, clean_env):
+    """The engine runs both sides; each strategy keeps its own."""
     _write(tmp_path / "longy.py", PLUGIN.format(cls="Longy", name="longy", direction="LONG"))
-    with pytest.raises(registry.StrategyConfigError, match="supports"):
-        registry.load(["longy"], directories=[tmp_path])
+    _write(tmp_path / "shorty.py", PLUGIN.format(cls="Shorty", name="shorty", direction="SHORT"))
+    loaded = registry.load(["longy", "shorty"], directories=[tmp_path])
+    assert [(s.name, s.direction) for s in loaded] == [("longy", Direction.LONG), ("shorty", Direction.SHORT)]
+
+
+def test_a_universe_that_is_not_a_universe_is_refused(tmp_path, clean_env):
+    _write(tmp_path / "odd.py", PLUGIN.format(cls="Odd", name="odd", direction="LONG")
+           + "\nOdd.universe = 'LOSERS'\n")
+    with pytest.raises(registry.StrategyConfigError, match="universe"):
+        registry.load(["odd"], directories=[tmp_path])
 
 
 # ── the pipeline ─────────────────────────────────────────────────────────────
@@ -191,6 +199,12 @@ class _Ctx:
     def is_circuit_hitter(self, s):
         return False
 
+    def mark_lower_circuit_touched(self, s):
+        pass
+
+    def is_lower_circuit_hitter(self, s):
+        return False
+
     def get_trend_label(self):
         return "UNKNOWN"
 
@@ -201,8 +215,11 @@ class _HTF:
     def __init__(self, *a, **k):
         pass
 
-    def check_trend_exhaustion(self, symbol, df_15m=None, vwap_sd=0.0):
+    directions: list = []
+
+    def check_trend_exhaustion(self, symbol, df_15m=None, vwap_sd=0.0, direction="SHORT"):
         _HTF.calls += 1
+        _HTF.directions.append(direction)
         return True, "ok"
 
 
@@ -238,6 +255,7 @@ def engine(monkeypatch):
     monkeypatch.setattr(an_mod, "get_signal_manager", lambda: _SM())
     monkeypatch.setattr(config, "TRADE_DIRECTION", "SHORT")
     _HTF.calls = 0
+    _HTF.directions = []
 
     def run(*strategies, df=None):
         a = an_mod.FyersAnalyzer(_Fyers(), strategies=list(strategies))
@@ -316,6 +334,112 @@ def test_a_strategy_of_the_other_direction_is_never_asked(engine, monkeypatch):
     s = _strategy("shorty", _short)
     out, _, _ = engine(s)
     assert out is None and s.seen == []
+
+
+# ── long strategies ──────────────────────────────────────────────────────────
+
+def _long(ctx, **over):
+    base = dict(pattern="TEST", stop_reference=ctx.day_low)
+    base.update(over)
+    return Signal(**base)
+
+
+def _falling():
+    """The rally's mirror: a steady slide, so the candidate is a loser."""
+    return _frame(step=-0.6)
+
+
+@pytest.fixture
+def both(monkeypatch):
+    monkeypatch.setattr(config, "TRADE_DIRECTION", "BOTH")
+
+
+def test_a_long_signal_trades_its_own_side(engine, both):
+    df = _falling()
+    out, _, ml = engine(_strategy("longy", _long, direction=Direction.LONG), df=df)
+    assert out["direction"] == out["side"] == "LONG"
+    # The gate buys the break above the previous bar's high and is abandoned
+    # below the setup low; the stop sits under that low by the ATR buffer.
+    assert out["signal_high"] == df.iloc[-2]["high"]
+    assert out["signal_low"] == out["setup_low"] == df["low"].min()
+    assert out["stop_loss"] == pytest.approx(df["low"].min() - max(out["atr"] * 0.5, 0.25))
+    assert "setup_high" not in out
+    assert ml[-1]["direction"] == "LONG"
+
+
+def test_a_long_named_trigger_replaces_the_previous_high(engine, both):
+    df = _falling()
+    trig = float(df["low"].min()) + 5.0
+    out, _, _ = engine(_strategy("l", lambda c: _long(c, trigger_price=trig),
+                                 direction=Direction.LONG), df=df)
+    assert out["signal_high"] == out["trigger_price"] == pytest.approx(trig)
+
+
+def test_a_long_trigger_must_sit_above_its_setup_low(engine, both):
+    df = _falling()
+    trig = float(df["low"].min()) - 1.0
+    out, gr, _ = engine(_strategy("l", lambda c: _long(c, trigger_price=trig),
+                                  direction=Direction.LONG), df=df)
+    assert out is None and gr.first_fail_gate == "G5_STRATEGY"
+
+
+def test_a_long_percentage_stop_sits_below_the_price(engine, both):
+    df = _falling()
+    plan = ExitPlan(stop_pct=2.0)
+    out, _, _ = engine(_strategy("l", lambda c: _long(c, exit=plan), direction=Direction.LONG), df=df)
+    assert out["stop_loss"] == pytest.approx(float(df.iloc[-1]["close"]) * 0.98)
+
+
+@pytest.mark.parametrize("mode, longs_asked, shorts_asked", [
+    ("BOTH", True, True), ("LONG", True, False), ("SHORT", False, True),
+])
+def test_the_direction_filter_decides_which_side_is_asked(engine, monkeypatch, mode,
+                                                          longs_asked, shorts_asked):
+    monkeypatch.setattr(config, "TRADE_DIRECTION", mode)
+    movers = Universe.MOVERS
+    lng, sht = _strategy("l", None, direction=Direction.LONG), _strategy("s", None)
+    type(lng).universe = type(sht).universe = movers
+    engine(lng, sht)
+    assert bool(lng.seen) is longs_asked and bool(sht.seen) is shorts_asked
+
+
+def test_each_strategy_is_offered_its_own_movers(engine, both):
+    """AUTO: a short is offered gainers, a long losers."""
+    lng, sht = _strategy("l", None, direction=Direction.LONG), _strategy("s", None)
+    engine(lng, sht)                                  # a rally: a gainer
+    assert lng.seen == [] and len(sht.seen) == 1
+    engine(lng, sht, df=_falling())                   # a slide: a loser
+    assert len(lng.seen) == 1 and len(sht.seen) == 1
+
+
+def test_a_movers_strategy_is_offered_both_sides(engine, both):
+    m = _strategy("m", None, direction=Direction.LONG)
+    type(m).universe = Universe.MOVERS
+    engine(m)
+    engine(m, df=_falling())
+    assert len(m.seen) == 2
+
+
+def test_the_scanners_band_decides_not_the_change_from_the_open(engine, both, monkeypatch):
+    """With no previous close the analyzer's gain is from the open, so a stock
+    that gapped up and faded reads as falling. The scanner's own day change says
+    it is a gainer, and that decides who is offered it."""
+    sht = _strategy("s", None)
+    a = an_mod.FyersAnalyzer(_Fyers(), strategies=[sht])
+    df = _falling()
+    a.check_setup("NSE:X-EQ", float(df.iloc[-1]["close"]), pre_fetched_df=df, day_change_pct=9.5)
+    assert len(sht.seen) == 1
+
+
+def test_g9_is_asked_about_the_strategys_own_side(engine, both):
+    engine(_strategy("l", _long, direction=Direction.LONG), df=_falling())
+    engine(_strategy("s", _short))
+    assert _HTF.directions == ["LONG", "SHORT"]
+
+
+def test_the_circuit_band_rides_on_the_signal(engine, both):
+    out, _, _ = engine(_strategy("s", _short))
+    assert out["upper_circuit"] == 0.0 and out["lower_circuit"] == 0.0
 
 
 def test_g9_runs_only_for_strategies_that_ask_for_it(engine):

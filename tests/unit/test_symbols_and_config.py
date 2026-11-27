@@ -170,7 +170,8 @@ def test_max_session_loss_is_a_positive_magnitude():
 
 
 def test_trade_direction_is_a_recognised_value():
-    assert config.TRADE_DIRECTION in ("SHORT", "LONG")
+    """A filter, not a side: each strategy trades its own direction."""
+    assert config.TRADE_DIRECTION in ("BOTH", "SHORT", "LONG")
 
 
 def test_time_stop_disabled_or_positive():

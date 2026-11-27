@@ -8,6 +8,7 @@ from concurrent.futures import (
 from shortcircuit.broker.fyers_connect import FyersConnect
 import time
 from shortcircuit import config
+from shortcircuit.execution import directions
 from shortcircuit.broker import transport
 
 logger = logging.getLogger(__name__)
@@ -26,9 +27,13 @@ _HISTORY_EXECUTOR = ThreadPoolExecutor(
 )
 
 class FyersScanner:
-    def __init__(self, fyers, broker=None):
+    def __init__(self, fyers, broker=None, strategies=None):
         self.fyers = fyers
         self.broker = broker
+        # The active strategies decide which movers are scanned: gainers for a
+        # short, losers for a long (directions.scan_bands). Read on every scan,
+        # so a Telegram /mode change takes effect on the next one.
+        self.strategies = list(strategies or [])
         self.symbols = {} # Cache for symbols
         # NOTE: Do NOT use TYPO_PATCHES to suppress symbols.
         # Zero-volume symbols are handled by quality_reject_counts blacklist.
@@ -304,6 +309,7 @@ class FyersScanner:
         # Batching (Symbols is now a Dict)
         symbol_list = list(self.symbols.keys()) # EXTRACT KEYS
         pre_candidates = []  # Pass gain/volume/price filter, pending quality
+        scan_gainers, scan_losers = directions.scan_bands(self.strategies)
         
         # Tiered Data Provider
         import time as _time
@@ -412,7 +418,7 @@ class FyersScanner:
                     gain   = quote.get('ch_oc', 0)
                     oi     = quote.get('oi', 0)
 
-                    if gain >= config.SCANNER_GAIN_MIN_PCT and gain <= config.SCANNER_GAIN_MAX_PCT and volume >= config.SCANNER_MIN_VOLUME and ltp >= config.SCANNER_MIN_LTP:
+                    if directions.in_band(gain, scan_gainers, scan_losers) and volume >= config.SCANNER_MIN_VOLUME and ltp >= config.SCANNER_MIN_LTP:
                         if self.quality_reject_counts.get(symbol, 0) >= 3:
                             logger.debug(f"BLACKLIST {symbol} — Quality rejected 3x today, skipping.")
                             continue
@@ -470,7 +476,7 @@ class FyersScanner:
                         if ltp is None or volume is None or change_p is None:
                             continue
 
-                        if config.SCANNER_GAIN_MIN_PCT <= change_p <= config.SCANNER_GAIN_MAX_PCT and volume > config.SCANNER_MIN_VOLUME and ltp > config.SCANNER_MIN_LTP:
+                        if directions.in_band(change_p, scan_gainers, scan_losers) and volume > config.SCANNER_MIN_VOLUME and ltp > config.SCANNER_MIN_LTP:
                             if self.quality_reject_counts.get(symbol, 0) >= 3:
                                 logger.debug(f"BLACKLIST {symbol} — Quality rejected 3x today, skipping history fetch.")
                                 continue
@@ -628,8 +634,9 @@ class FyersScanner:
                 done, len(futures), ", ".join(stragglers[:5]) or "none",
             )
 
-        # Sort by Change % Descending
-        filtered_candidates.sort(key=lambda x: x['change'], reverse=True)
+        # The biggest movers first, whichever way they moved. With only gainers
+        # scanned this is the old gain-descending order.
+        filtered_candidates.sort(key=lambda x: abs(x['change']), reverse=True)
         top_gainers = filtered_candidates[:20]
 
         logger.info(f"Scan Complete. Found {len(filtered_candidates)} candidates.")

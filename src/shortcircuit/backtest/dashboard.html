@@ -326,7 +326,7 @@ function header() {
   $("gen").textContent = "Generated " + (DATA.generated || "");
 
   const notes = [
-    ["What runs", "The strategy's own code, on every minute of every day a stock rose 10% or more" + (S.gainer_days ? ` (${S.gainer_days.toLocaleString("en-IN")} such days)` : "") + ". Only the minute's opening price is visible to it, never what came later."],
+    ["What runs", "The strategy's own code, on every minute of every day a stock " + ((S.bands || "gainers") === "gainers" ? "rose" : (S.bands === "losers" ? "fell" : "rose or fell")) + " 10% or more" + (S.gainer_days ? ` (${S.gainer_days.toLocaleString("en-IN")} such days)` : "") + ". Only the minute's opening price is visible to it, never what came later."],
     ["Fills", `Entry at the trigger price, or the open if price gapped through it. Every fill is moved ${S.slippage_pct_per_fill ?? "?"}% against the trade, and ${S.cost_pct_round_trip ?? "?"}% charges come off each round trip.`],
     ["Stops", "If one minute could have hit both the stop and a better exit, the stop is assumed to have come first. A gap through the stop fills at the open."],
     ["Exits", "Partial booking, the stop to cost, the trail and the square-off replay exactly as the live engine runs them."],
@@ -477,10 +477,13 @@ function showTrade(t, scroll) {
     }
     stopLine.setData(sd);
     const snap = x => { let best = B.t[0]; for (const v of B.t) { if (v <= x) best = v; else break; } return best; };
-    const marks = [{time: snap(t.signal_t), position: "aboveBar", color: C.mute, shape: "circle"},
-                   {time: snap(t.entry_t), position: "aboveBar", color: C.sel, shape: "arrowDown", text: "short"}];
-    for (const m of t.marks || []) marks.push({time: snap(m.t), position: "belowBar", color: C.mute, shape: "square"});
-    t.legs.forEach(l => marks.push({time: snap(l.t), position: "belowBar", color: C.ink, shape: "arrowUp",
+    const lng = t.direction === "LONG";
+    const marks = [{time: snap(t.signal_t), position: lng ? "belowBar" : "aboveBar", color: C.mute, shape: "circle"},
+                   {time: snap(t.entry_t), position: lng ? "belowBar" : "aboveBar", color: C.sel,
+                    shape: lng ? "arrowUp" : "arrowDown", text: lng ? "buy" : "short"}];
+    for (const m of t.marks || []) marks.push({time: snap(m.t), position: lng ? "aboveBar" : "belowBar", color: C.mute, shape: "square"});
+    t.legs.forEach(l => marks.push({time: snap(l.t), position: lng ? "aboveBar" : "belowBar", color: C.ink,
+      shape: lng ? "arrowDown" : "arrowUp",
       text: l.frac < 0.999 ? Math.round(l.frac * 100) + "%" : nice(l.reason).toLowerCase()}));
     marks.sort((a, b) => a.time - b.time);
     candles.setMarkers(marks);
@@ -498,7 +501,7 @@ function showTrade(t, scroll) {
     if ((t.marks || []).some(m => m.label === k) || typeof v !== "number") continue;
     fact(facts, k.replace(/_/g, " "), num(v, Math.abs(v) >= 100 ? 1 : 2));
   }
-  const steps = [[t.signal_t, "signal", ""], [t.entry_t, "short", num(t.entry)],
+  const steps = [[t.signal_t, "signal", ""], [t.entry_t, t.direction === "LONG" ? "buy" : "short", num(t.entry)],
                  ...(t.marks || []).map(m => [m.t, m.label.replace(/_/g, " "), ""]),
                  ...t.legs.map(l => [l.t, nice(l.reason).toLowerCase(), `${Math.round(l.frac * 100)}%@${num(l.px)}`])];
   steps.sort((a, b) => a[0] - b[0]);
@@ -582,7 +585,7 @@ function tables(sel) {
   const counts = sg.reduce((a, s) => (a[s.outcome] = (a[s.outcome] || 0) + 1, a), {});
   $("s-sub").textContent = Object.entries(counts).map(([k, v]) => `${v.toLocaleString("en-IN")} ${nice(k).toLowerCase()}`).join(" · ") || "none recorded";
   table("t-signals", [{k: "date", h: "Date", l: 1}, {k: "time", h: "Time"}, {k: "sym", h: "Symbol", l: 1, cls: () => "sym"},
-    {k: "trigger", h: "Trigger", f: v => num(v)}, {k: "stop_reference", h: "Day high", f: v => num(v)},
+    {k: "trigger", h: "Trigger", f: v => num(v)}, {k: "stop_reference", h: "Setup level", f: v => num(v)},
     {k: "outcome", h: "Outcome", l: 1, f: nice}], sg, {empty: "No signals recorded for this run."});
 }
 

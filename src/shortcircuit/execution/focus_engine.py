@@ -14,6 +14,7 @@ from shortcircuit.runtime import mode as run_mode
 from shortcircuit.strategy import features as F
 from shortcircuit.strategy.sdk import RsiCover, StagedRsiExit
 from shortcircuit.execution.order_manager import OrderManager
+from shortcircuit.execution import directions
 
 from shortcircuit.observability.gate_result_logger import get_gate_result_logger
 
@@ -54,6 +55,16 @@ class Bar:
     epoch: int          # bar open, epoch seconds
     high: float
     close: float
+    low: float = 0.0    # a long's trail follows the low; 0.0 when the candles had none
+
+
+def side_rsi(rsi: float, direction) -> float:
+    """
+    RSI as the exit rules read it. The rules are written for a short, where a
+    cooling RSI is the move running out; for a long the same levels apply to
+    100 - RSI, so one set of parameters means the same thing on either side.
+    """
+    return 100.0 - rsi if directions.is_long(direction) else rsi
 
 
 SESSION_OPEN_MINUTE = 9 * 60 + 15
@@ -72,14 +83,17 @@ def completed_bars(candles, minutes: int, now_epoch: float) -> list:
         ist_minute = ((epoch + 19800) // 60) % 1440          # +05:30
         offset = (ist_minute - SESSION_OPEN_MINUTE) // minutes * minutes
         start = epoch - (ist_minute - SESSION_OPEN_MINUTE - offset) * 60
+        low = float(getattr(c, "low", 0.0) or 0.0)
         b = buckets.get(start)
         if b is None:
-            buckets[start] = [float(c.high), float(c.close)]
+            buckets[start] = [float(c.high), float(c.close), low]
             order.append(start)
         else:
             b[0] = max(b[0], float(c.high))
             b[1] = float(c.close)
-    return [Bar(s, buckets[s][0], buckets[s][1]) for s in order
+            if low > 0:
+                b[2] = min(b[2], low) if b[2] > 0 else low
+    return [Bar(s, buckets[s][0], buckets[s][1], buckets[s][2]) for s in order
             if s + minutes * 60 <= now_epoch]
 
 
@@ -150,19 +164,32 @@ class FocusEngine:
     def add_pending_signal(self, signal_data):
         """
         Adds a signal to the Validation Gate.
-        It will ONLY be executed if Price breaks Signal Low (Short).
+        A SHORT is executed only if price breaks below its trigger (signal_low),
+        a LONG only if price breaks above its trigger (signal_high).
         """
         symbol = signal_data['symbol']
-        signal_low = signal_data.get('signal_low')
-        if not signal_low:
-            logger.error(f"Cannot validate {symbol}: Missing signal_low")
-            return
-
-        # A short arms when price breaks the signal candle's low, and is
-        # invalidated by a 0.2% push above its high.
-        entry_trigger = signal_low
-        signal_high = signal_data.get('signal_high', signal_low * 1.01)
-        invalidation_trigger = signal_high * 1.002
+        direction = directions.of_signal(signal_data)
+        signal_data['direction'] = direction
+        if direction == directions.LONG:
+            # A long arms when price breaks the signal candle's high, and is
+            # invalidated by a 0.2% drop below its setup low.
+            signal_high = signal_data.get('signal_high')
+            if not signal_high:
+                logger.error(f"Cannot validate {symbol}: Missing signal_high for a LONG")
+                return
+            entry_trigger = signal_high
+            signal_low = signal_data.get('signal_low', signal_high * 0.99)
+            invalidation_trigger = signal_low * 0.998
+        else:
+            signal_low = signal_data.get('signal_low')
+            if not signal_low:
+                logger.error(f"Cannot validate {symbol}: Missing signal_low")
+                return
+            # A short arms when price breaks the signal candle's low, and is
+            # invalidated by a 0.2% push above its high.
+            entry_trigger = signal_low
+            signal_high = signal_data.get('signal_high', signal_low * 1.01)
+            invalidation_trigger = signal_high * 1.002
 
         # Fixed 15-minute expiry.
         IST = pytz.timezone('Asia/Kolkata')
@@ -176,6 +203,7 @@ class FocusEngine:
             'timestamp': time.time(),
             'expires_at': expires_at, # dynamic timeout
             'queued_at': datetime.datetime.now(),  # for stale signal flush at 9:45
+            'direction': direction,
             'correlation_id': signal_data.get('correlation_id'),
             'last_evaluated_minute': None, # for candle-close validation
         }
@@ -188,7 +216,10 @@ class FocusEngine:
             except Exception as e:
                 logger.error(f"[GATE] Failed to set G8.3 cooldown for {symbol}: {e}")
 
-        logger.info(f"[GATE] Added {symbol} to Validation Gate. Trigger: < {entry_trigger}")
+        logger.info(
+            f"[GATE] Added {symbol} {direction} to Validation Gate. "
+            f"Trigger: {'>' if direction == directions.LONG else '<'} {entry_trigger}"
+        )
         
         if not self.monitoring_active:
             self.start_pending_monitor()
@@ -377,6 +408,7 @@ class FocusEngine:
             try:
                 trigger_price = pending['trigger']
                 inval_price = pending['invalidate']
+                is_long = pending.get('direction') == directions.LONG
                 
                 # G12 candle-close validation
                 use_close = getattr(config, 'P58_G12_USE_CANDLE_CLOSE', False)
@@ -446,8 +478,9 @@ class FocusEngine:
                             details=details or {}
                         ))
                 
-                # Trigger check: for a short, LTP below the signal low.
-                if ltp < trigger_price:
+                # Trigger check: for a short, LTP below the signal low; for a
+                # long, LTP above the signal high.
+                if (ltp > trigger_price) if is_long else (ltp < trigger_price):
                     # G10.1: Execution Precision (Spread Guard)
                     # Soft Gate: Downgrades to CAUTIOUS mode if spread is wide.
                     spread_pct = 0.0
@@ -467,9 +500,9 @@ class FocusEngine:
                     except Exception as e:
                         logger.warning(f"G10 Spread check failed (non-fatal) for {symbol}: {e}")
 
-                    # G10.2: Entry Price = signal_low - 1 tick
+                    # G10.2: Entry Price = one tick through the trigger
                     tick_size = pending['data'].get('tick_size', 0.05)
-                    adjusted_entry = trigger_price - tick_size
+                    adjusted_entry = trigger_price + tick_size if is_long else trigger_price - tick_size
                     pending['data']['adjusted_entry'] = adjusted_entry
                     # Carried to the fill log: slippage is only meaningful against
                     # the level that actually triggered the order.
@@ -481,7 +514,7 @@ class FocusEngine:
                         _gr.g10_pass  = True
                         _gr.g11_pass  = True   # Will re-evaluate below
                         _gr.g12_pass  = True
-                        _gr.g12_value = round(trigger_price - ltp, 4)
+                        _gr.g12_value = round(abs(trigger_price - ltp), 4)
 
                     _queue_validation_update(
                         outcome='VALIDATED',
@@ -543,7 +576,7 @@ class FocusEngine:
                                 f"📊 **SIGNAL PASSED — NOT TAKEN**\n\n"
                                 f"Symbol:   `{symbol}`\n"
                                 f"Trigger:  ₹{trigger_price} → LTP ₹{ltp}\n"
-                                f"Signal:   {sig_data.get('signal_type', 'SHORT')}\n"
+                                f"Signal:   {sig_data.get('direction', 'SHORT')}\n"
                                 f"Gain:     {sig_data.get('day_gain_pct', 0):.2f}%\n"
                                 f"RVOL:     {sig_data.get('rvol', 0):.1f}x\n\n"
                                 f"❌ *Not Executed — Capital Locked*\n"
@@ -671,8 +704,8 @@ class FocusEngine:
                     del self.pending_signals[symbol]
                     continue
                     
-                # Invalidation and timeout.
-                elif ltp > inval_price:
+                # Invalidation and timeout: price ran the wrong way first.
+                elif (ltp < inval_price) if is_long else (ltp > inval_price):
                     logger.info(f"🚫 [INVALIDATED] {symbol} hit G12 tighter buffer {inval_price}")
                     _queue_validation_update(outcome='REJECTED', details={'reason': 'G12_INVALIDATED_BUFFER', 'ltp': ltp})
                     del self.pending_signals[symbol]
@@ -772,6 +805,7 @@ class FocusEngine:
                     'entry_price': entry_price,
                     'stop_loss':   sl_price,
                     'qty':         abs(qty),
+                    'direction':   directions.SHORT if is_short else directions.LONG,
                     'tick_size':   0.05,
                     'trade_id_str': f"RECOVERY_{symbol}",
                 }
@@ -796,8 +830,9 @@ class FocusEngine:
 
     def _rsi_take_profit_due(self, symbol: str, t: dict):
         """
-        The relief-rally exit for EOD_HOLD shorts: once the trade is in profit,
-        cover when the 1-minute RSI closes below the threshold. Its parameters are
+        The relief-rally exit for EOD_HOLD positions: once the trade is in profit,
+        cover a short when the 1-minute RSI closes below the threshold, or sell a
+        long when it closes above 100 - threshold (side_rsi). Its parameters are
         the strategy's (ExitPlan.rsi_cover), carried on the position; a position
         without them never takes this exit.
 
@@ -811,8 +846,9 @@ class FocusEngine:
         rsi_cover = rsi_cover_of(t)
         if rsi_cover is None:
             return None
-        if t.get('exit_profile') != 'EOD_HOLD' or t.get('direction', 'SHORT') != 'SHORT':
+        if t.get('exit_profile') != 'EOD_HOLD':
             return None
+        direction = directions.of_signal(t)
         # An exit already decided but not yet completed is retried every 10s,
         # not re-decided: the rule fired on a closed bar, and a bounce since then
         # is exactly what it was taking profit ahead of.
@@ -842,11 +878,13 @@ class FocusEngine:
         bars_after_entry = sum(1 for c in done if int(c.epoch) >= entry_minute) - 1
         if bars_after_entry < rsi_cover.skip_minutes:
             return None
-        if not float(done[-1].close) < float(t.get('entry') or 0):
+        close, entry = float(done[-1].close), float(t.get('entry') or 0)
+        in_profit = close > entry if direction == directions.LONG else close < entry
+        if not in_profit:
             return None                           # not in profit: not a take-profit
 
         rsi = F.compute_rsi_wilder([c.close for c in done], rsi_cover.period)
-        if rsi == rsi and rsi < rsi_cover.threshold:   # rsi == rsi rejects NaN
+        if rsi == rsi and side_rsi(rsi, direction) < rsi_cover.threshold:   # rsi == rsi rejects NaN
             return rsi
         return None
 
@@ -864,9 +902,10 @@ class FocusEngine:
         5Hz: the usual cause of a failed order is a rate limit.
         """
         cfg = staged_rsi_of(t)
-        if cfg is None or t.get('exit_profile') != 'STAGED_RSI' \
-                or t.get('direction', 'SHORT') != 'SHORT':
+        if cfg is None or t.get('exit_profile') != 'STAGED_RSI':
             return None
+        direction = directions.of_signal(t)
+        is_long = direction == directions.LONG
         if not (self.order_manager and self._event_loop):
             return None
         broker = getattr(self.order_manager, 'broker', None)
@@ -892,17 +931,22 @@ class FocusEngine:
             # A bar that closed before the entry describes the setup, not the trade.
             closed_after_entry = last.epoch + cfg.bar_minutes * 60 > float(t.get('entry_ts') or 0)
             if rsi == rsi and closed_after_entry:                # rsi == rsi rejects NaN
-                in_profit = last.close < t['entry'] and 0 < ltp < t['entry']
-                if not st['scaled_out'] and rsi <= cfg.scale_out_rsi and in_profit:
+                if is_long:
+                    in_profit = last.close > t['entry'] and ltp > t['entry']
+                else:
+                    in_profit = last.close < t['entry'] and 0 < ltp < t['entry']
+                level = side_rsi(rsi, direction)
+                if not st['scaled_out'] and level <= cfg.scale_out_rsi and in_profit:
                     if self._staged_scale_out(symbol, t, cfg, rsi) == 'done':
                         return 'done'
-                if st['scaled_out'] and not st['trailing'] and rsi <= cfg.trail_rsi:
+                if st['scaled_out'] and not st['trailing'] and level <= cfg.trail_rsi:
                     st['trailing'] = True
                     logger.info(
-                        "🪢 [STAGED] %s %s-min RSI %.1f ≤ %.0f — trailing the stop on "
-                        "the last %s shares above each completed %s-min high",
-                        symbol, cfg.bar_minutes, rsi, cfg.trail_rsi,
-                        t['remaining_qty'], cfg.trail_bar_minutes,
+                        "🪢 [STAGED] %s %s-min RSI %.1f reached the trail level — trailing the "
+                        "stop on the last %s shares %s each completed %s-min %s",
+                        symbol, cfg.bar_minutes, rsi, t['remaining_qty'],
+                        'below' if is_long else 'above', cfg.trail_bar_minutes,
+                        'low' if is_long else 'high',
                     )
 
         if st['trailing']:
@@ -924,8 +968,8 @@ class FocusEngine:
             return None
 
         logger.info(
-            "🎯 [STAGED] %s %s-min RSI %.1f ≤ %.0f in profit — booking %s of %s",
-            symbol, cfg.bar_minutes, rsi, cfg.scale_out_rsi, exit_qty, remaining,
+            "🎯 [STAGED] %s %s-min RSI %.1f reached the scale-out level in profit — booking %s of %s",
+            symbol, cfg.bar_minutes, rsi, exit_qty, remaining,
         )
         filled = False
         try:
@@ -964,18 +1008,28 @@ class FocusEngine:
         last = bars[-1]
         st['trail_epoch'] = last.epoch
 
+        is_long = directions.of_signal(t) == directions.LONG
         tick = float(t.get('tick_size') or 0.05)
-        new_stop = OrderManager._round_sl_to_tick(
-            last.high * (1 + cfg.trail_buffer_pct / 100.0), 'SELL', tick
-        )
+        if is_long:
+            if not last.low > 0:
+                return None                              # no low to trail from
+            # Rounded down, away from the price: _round_sl_to_tick's 'BUY' is a
+            # long's stop below entry.
+            new_stop = OrderManager._round_sl_to_tick(
+                last.low * (1 - cfg.trail_buffer_pct / 100.0), 'BUY', tick
+            )
+        else:
+            new_stop = OrderManager._round_sl_to_tick(
+                last.high * (1 + cfg.trail_buffer_pct / 100.0), 'SELL', tick
+            )
         current = float(t.get('sl') or 0)
-        if current and new_stop >= current:
+        if current and ((new_stop <= current) if is_long else (new_stop >= current)):
             return None                                  # a trail only ever tightens
 
-        if ltp >= new_stop:
-            # Price is already back above the level the trail would use, so the
+        if (ltp <= new_stop) if is_long else (ltp >= new_stop):
+            # Price is already through the level the trail would use, so the
             # trail is hit. A stop placed there would be marketable on arrival.
-            logger.info("🪢 [STAGED] %s ltp ₹%.2f is above the trail level ₹%.2f — closing",
+            logger.info("🪢 [STAGED] %s ltp ₹%.2f is through the trail level ₹%.2f — closing",
                         symbol, ltp, new_stop)
             exited = False
             try:
@@ -1193,9 +1247,10 @@ class FocusEngine:
                            position_data.get('sl', 0)))
         actual_qty = position_data.get('qty', qty)
 
-        # Read direction from shortcircuit.config
-        direction = config.TRADE_DIRECTION  # 'SHORT' or 'LONG'
-        is_long = direction == 'LONG'
+        # The position's own side, from its signal or the broker - never the
+        # global filter, which can change while the position is open.
+        direction = directions.of_signal(position_data)
+        is_long = direction == directions.LONG
 
         # Soft SL: opposite side from entry
         # Provide fallback if DISCRETIONARY_CONFIG was removed
@@ -1661,10 +1716,10 @@ class FocusEngine:
                 _rsi_hit = None if manual_override else self._rsi_take_profit_due(symbol, t)
                 if _rsi_hit is not None:
                     logger.info(
-                        "🎯 [RSI-TP] %s 1-min RSI %.1f < %.0f while in profit "
-                        "(entry ₹%.2f, ltp ₹%.2f) — covering %s shares",
+                        "🎯 [RSI-TP] %s 1-min RSI %.1f past the cover level (%.0f, %s) while "
+                        "in profit (entry ₹%.2f, ltp ₹%.2f) — closing %s shares",
                         symbol, _rsi_hit,
-                        rsi_cover_of(t).threshold,
+                        rsi_cover_of(t).threshold, t.get('direction', 'SHORT'),
                         t['entry'], ltp, t['remaining_qty'],
                     )
                     if self.order_manager and self._event_loop:

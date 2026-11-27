@@ -14,7 +14,9 @@ import pandas as pd
 from shortcircuit import config
 from shortcircuit.backtest.history import History, gainer_days, nse_equities, prefetch_minutes
 from shortcircuit.backtest import report
-from shortcircuit.backtest.replay import Costs, infer_upper_circuit, replay_day, summarise
+from shortcircuit.backtest.replay import (Costs, infer_lower_circuit, infer_upper_circuit,
+                                          replay_day, summarise)
+from shortcircuit.execution import directions
 from shortcircuit.eod import squareoff
 from shortcircuit.paths import REPORTS_DIR
 from shortcircuit.runtime import mode as run_mode
@@ -38,7 +40,8 @@ def parse(argv=None) -> argparse.Namespace:
     p.add_argument("--symbols", help="comma-separated NSE:XYZ-EQ list; default: every NSE EQ stock")
     p.add_argument("--strategies", help="comma-separated names; default: the active set")
     p.add_argument("--min-gain", type=float, default=10.0,
-                   help="gainer-day threshold, %% over previous close, on the day's high (default 10)")
+                   help="mover-day threshold, %% from the previous close: the day's high for "
+                        "gainers (short strategies), its low for losers (long ones) (default 10)")
     p.add_argument("--slippage", type=float, default=Costs.slippage_pct,
                    help="%% per fill against the trade (default %(default)s)")
     p.add_argument("--cost", type=float, default=Costs.cost_pct,
@@ -98,9 +101,14 @@ def run(args, client, symbols_text=None) -> tuple[pd.DataFrame, dict, pd.DataFra
                if args.symbols else nse_equities(symbols_text))
     logger.info("[BACKTEST] %s on %d symbols, %s → %s", ", ".join(s.name for s in strategies),
                 len(symbols), args.start, args.end)
+    # Gainer days for short strategies, loser days for long ones, by the
+    # strategies' universes — the bands the live scanner would watch.
+    scan_up, scan_down = directions.scan_bands(strategies)
     days = gainer_days(history, symbols, args.start, args.end, args.min_gain,
-                       config.SCANNER_MIN_LTP, config.SCANNER_MIN_VOLUME, workers=args.workers)
-    logger.info("[BACKTEST] %d gainer-days to replay", len(days))
+                       config.SCANNER_MIN_LTP, config.SCANNER_MIN_VOLUME, workers=args.workers,
+                       gainers=scan_up, losers=scan_down)
+    bands = "+".join(b for b, on in (("gainers", scan_up), ("losers", scan_down)) if on)
+    logger.info("[BACKTEST] %d mover-days (%s) to replay", len(days), bands)
     prefetch_minutes(history, [(s, d) for s, d, _ in days], workers=args.workers)
 
     def minute(item):
@@ -112,7 +120,8 @@ def run(args, client, symbols_text=None) -> tuple[pd.DataFrame, dict, pd.DataFra
             return None
 
     def jobs():
-        """(symbol, bars, prev_close, costs, max_trades, upper_circuit, frame_bars), in day order."""
+        """(symbol, bars, prev_close, costs, max_trades, upper_circuit, frame_bars,
+        lower_circuit), in day order."""
         fetch = ThreadPoolExecutor(max_workers=max(1, args.workers))
         try:
             for n, ((symbol, _day, prev_close), bars) in enumerate(
@@ -121,9 +130,11 @@ def run(args, client, symbols_text=None) -> tuple[pd.DataFrame, dict, pd.DataFra
                     logger.info("[BACKTEST] minute bars: %d/%d days loaded", n, len(days))
                 if bars is None or bars.empty:
                     continue
-                uc = infer_upper_circuit(prev_close, float(bars["high"].max()),
-                                         squareoff.registry.is_fno(symbol))
-                yield symbol, bars, prev_close, costs, args.max_trades_per_day, uc, args.frame_bars
+                fno = squareoff.registry.is_fno(symbol)
+                uc = infer_upper_circuit(prev_close, float(bars["high"].max()), fno)
+                lc = infer_lower_circuit(prev_close, float(bars["low"].min()), fno)
+                yield (symbol, bars, prev_close, costs, args.max_trades_per_day, uc,
+                       args.frame_bars, lc)
         finally:
             fetch.shutdown(cancel_futures=True)
 
@@ -135,8 +146,9 @@ def run(args, client, symbols_text=None) -> tuple[pd.DataFrame, dict, pd.DataFra
         results = (f.result() for f in [procs.submit(parallel.replay, j) for j in jobs()])
     else:
         procs = None
-        results = (replay_day(sym, bars, pc, strategies, c, mt, upper_circuit=uc, frame_bars=fb)
-                   for sym, bars, pc, c, mt, uc, fb in jobs())
+        results = (replay_day(sym, bars, pc, strategies, c, mt, upper_circuit=uc, frame_bars=fb,
+                              lower_circuit=lc)
+                   for sym, bars, pc, c, mt, uc, fb, lc in jobs())
 
     trades, events, signals, invalidated, expired, g9_blocked = [], [], 0, 0, 0, 0
     try:
@@ -157,7 +169,8 @@ def run(args, client, symbols_text=None) -> tuple[pd.DataFrame, dict, pd.DataFra
     summary = {"strategies": [s.name for s in strategies],
                "from": args.start.isoformat(), "to": args.end.isoformat(),
                "symbols_scanned": len(symbols), "min_gain_pct": args.min_gain,
-               "gainer_days": len(days), "signals": signals, "gate_invalidated": invalidated,
+               "gainer_days": len(days), "bands": bands,
+               "signals": signals, "gate_invalidated": invalidated,
                "gate_expired": expired, "g9_blocked": g9_blocked,
                "frame": f"last {args.frame_bars} bars" if args.frame_bars else "session",
                **summarise(trades, costs),

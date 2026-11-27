@@ -19,6 +19,7 @@ import uuid
 from datetime import datetime, timedelta, UTC
 from typing import Dict, Optional, Any
 from shortcircuit import config
+from shortcircuit.execution import directions
 from shortcircuit.broker.fyers_connect import ASYNC_CALL_TIMEOUT, ASYNC_RETRIED_TIMEOUT
 from shortcircuit.broker.fyers_broker_interface import (
     FyersBrokerInterface,
@@ -192,10 +193,14 @@ class OrderManager:
         # A strategy that names a fixed-percentage stop (ExitPlan.stop_pct) gets it
         # measured from the FILL, which is the price actually at risk. The setup
         # level is not consulted, so the wrong-side case above cannot arise.
+        # The side is the signal's own (directions.of_signal), never the global
+        # filter: a long and a short can both be active.
+        direction = directions.of_signal(signal)
+
         stop_pct = signal.get('stop_pct')
         if stop_pct and ltp > 0:
             pct = float(stop_pct) / 100.0
-            if config.TRADE_DIRECTION == 'LONG':
+            if direction == 'LONG':
                 return self._round_sl_to_tick(ltp * (1 - pct), 'BUY', tick)
             return self._round_sl_to_tick(ltp * (1 + pct), 'SELL', tick)
 
@@ -207,7 +212,6 @@ class OrderManager:
         # merely "on the right side" but far enough to survive normal spread.
         min_gap = max(buffer, tick * getattr(config, 'SL_MIN_TICK_BUFFER', 3))
 
-        direction = config.TRADE_DIRECTION
         if direction == 'LONG':
             signal_low = signal.get('signal_low', ltp * 0.99)
             sl_price = signal_low - buffer
@@ -275,8 +279,7 @@ class OrderManager:
         if vwap is not None and vwap > 0:
             tp = vwap
         else:
-            direction = config.TRADE_DIRECTION
-            tp = entry * (1.01 if direction == 'LONG' else 0.99)
+            tp = entry * (1.01 if directions.of_signal(signal) == 'LONG' else 0.99)
 
         tick = signal.get('tick_size', 0.05)
         return {'tp': round(round(tp / tick) * tick, 2)}
@@ -780,10 +783,13 @@ class OrderManager:
             # transport would refuse the order anyway; this keeps it out of the
             # failure paths (cooldowns, alerts) and leaves a clean record.
             if run_mode.is_data_only():
+                _dir = directions.of_signal(signal)
                 logger.warning(
                     "🧪 [DATA-ONLY] would %s %s @ ₹%.2f [%s] trigger=%s stop=%s — no order sent",
-                    config.TRADE_DIRECTION, symbol, float(signal.get('ltp') or 0),
-                    signal.get('strategy'), signal.get('trigger_price') or signal.get('signal_low'),
+                    _dir, symbol, float(signal.get('ltp') or 0),
+                    signal.get('strategy'),
+                    signal.get('trigger_price')
+                    or signal.get('signal_high' if _dir == 'LONG' else 'signal_low'),
                     (f"{signal['stop_pct']}% from fill" if signal.get('stop_pct')
                      else signal.get('stop_loss')),
                 )
@@ -855,9 +861,10 @@ class OrderManager:
                 self._set_exec_cooldown(symbol, reason='ZERO_QTY', seconds=300)
                 return None
 
-            # Read direction from shortcircuit.config runtime switch
-            signal_type = config.TRADE_DIRECTION
-            side = 'SELL' if signal_type == 'SHORT' else 'BUY'
+            # The signal's own side. A filter change on Telegram decides which
+            # signals reach here; it never turns a short setup into a buy.
+            signal_type = directions.of_signal(signal)
+            side = directions.entry_side(signal_type)
 
             logger.info(
                 f"[PRE-EXEC] {symbol} {side} qty={qty} @ ₹{ltp:.2f} "

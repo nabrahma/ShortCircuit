@@ -47,7 +47,7 @@ LIBS = {
 _ENGINE_COLS = {
     "date", "symbol", "strategy", "pattern", "signal_time", "entry_time", "entry", "stop",
     "exit_reason", "exit_time", "legs", "gross_pct", "net_pct", "mfe_pct", "mae_pct",
-    "exit_model", "trigger", "stop_reference", "legs_json", "stop_path_json",
+    "exit_model", "trigger", "stop_reference", "legs_json", "stop_path_json", "direction",
 }
 
 
@@ -143,6 +143,8 @@ def payload(trades: pd.DataFrame, summary: dict, signals: pd.DataFrame, history,
             bars[key] = _bars(history, sym, date)
         rows.append({
             "id": n, "date": date, "symbol": sym, "strategy": r.get("strategy"),
+            # Runs from before per-strategy directions have no column: all shorts.
+            "direction": r.get("direction") if isinstance(r.get("direction"), str) else "SHORT",
             "pattern": r.get("pattern"), "key": key,
             "signal_t": _at(date, r["signal_time"]), "entry_t": entry_t, "exit_t": exit_t,
             "entry": _clean(r["entry"]), "stop": _clean(r["stop"]),
