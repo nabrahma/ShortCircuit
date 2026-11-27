@@ -5,8 +5,54 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.1.0] — 2026-11-27
+
+Strategies can now trade either side, and a short and a long can run at once.
+The engine can be measured without trading: a data-only mode runs the whole
+pipeline on live data with order writes refused, and a backtester replays years
+of history through the same feature and exit code, with a dashboard for every
+run. Telegram became a console that adapts to whatever strategies are plugged
+in.
+
+### Upgrading from 2.0.0
+
+- **A short-only deployment trades exactly as before.** A live short strategy
+  replayed over its last 120 trade days gives identical trades, fills, stop paths
+  and signal outcomes on 2.0.0 and 2.1.0.
+- **`TRADE_DIRECTION` is now a filter, not the side.** Each strategy declares its
+  own `direction`, and the setting only holds a side back: `'BOTH'` (the new
+  default), `'SHORT'` or `'LONG'`. If you set `'LONG'` to make the engine buy,
+  declare `direction = Direction.LONG` on the strategy instead.
+- **F&O stocks square off at 15:02**, ahead of Fyers' own 15:05 square-off of
+  intraday positions in closing-auction stocks. Every other stock keeps 15:10.
+  `CAS_SQUAREOFF_HHMM` sets the earlier time. If Fyers' F&O list cannot be
+  downloaded at startup, every position keeps 15:10.
+- **Signal cards are edited in place by default.** Set
+  `EDITABLE_SIGNAL_FLOW_ENABLED = False` for one card per signal.
+- `shortcircuit.observability.telegram_bot` still imports; the bot now lives in
+  `shortcircuit.observability.telegram`.
+
 ### Added
 
+- **Long and short strategies, side by side.** The registry accepts
+  `Direction.LONG`, and each signal carries its strategy's side through the
+  validation gate, the order path, the position, the focus loop and
+  reconciliation. A filter change on Telegram can never turn a short setup into
+  a buy, or change the side assumed for an open position. Everything written for
+  a short is mirrored for a long:
+  - the gate buys the break above the trigger;
+  - the stop sits below the setup low, or `stop_pct` below the fill;
+  - the take-profit ladder runs above entry;
+  - G9 is mirrored;
+  - RSI exits read 100 − RSI, and the trail follows each bar's low;
+  - recovery adopts a broker long as a LONG.
+
+  A test pins the symmetry: on a reflected price path, a long trades exactly the
+  reflection of the short.
+- `sdk.Universe` (`AUTO`, `GAINERS`, `LOSERS`, `MOVERS`): the movers a strategy
+  is offered. Losers (`SCANNER_LOSS_MIN_PCT`..`SCANNER_LOSS_MAX_PCT`) are
+  scanned only while a strategy wants them. `SetupContext` gains `day_low` and
+  `is_lower_circuit_hitter`.
 - **Telegram console for any strategy.** The bot is now a package
   (`observability/telegram/`): a command registry that builds `/help` and the
   command menu, one module per command group, pure card builders, and a
@@ -46,7 +92,20 @@ this project follows [Semantic Versioning](https://semver.org/).
   throttled or failed history request is retried instead of silently dropping
   its stock. Requests that still fail are counted in the summary and flagged on
   the dashboard. Long runs chart the most recent, best and worst trades only.
+- The backtest replays each exit profile as the focus engine runs it: the
+  `TP_MODE` ladder and the `MAX_HOLD_TIME_MINUTES` time stop for `DEFAULT`, and
+  the RSI cover for `EOD_HOLD`. It applies the G9 check to strategies that ask
+  for it, and `--frame-bars N` hands strategies the last N bars, as
+  `VWAP_ANCHOR_MODE = 'ROLLING'` does live. Long strategies replay on loser days,
+  with the lower circuit inferred.
 
+### Changed
+
+- `TRADE_DIRECTION` is a filter over each strategy's own side (see Upgrading).
+  `/mode both|long|short` sets it.
+- The Telegram bot is a package (`observability/telegram/`): `bot.py`,
+  `commands/` (one module per group, built into `/help` and the menu),
+  `cards.py`, `book.py`. The engine-facing API is unchanged.
 
 ### Fixed
 
@@ -68,6 +127,13 @@ this project follows [Semantic Versioning](https://semver.org/).
   never fired. It now reads IST.
 - A failed stop resize after a partial with no TP-1 level would have raised
   while building its alert, on the path that flattens an oversized stop.
+- Signals now carry the circuit band, so the protective stop's limit-price
+  clamp, which never had it, applies.
+
+### Security
+
+- Docker image: `libzstd1` upgraded for CVE-2026-124851 ahead of the
+  `python:3.12-slim` rebuild.
 
 ## [2.0.0] — 2026-11-22
 
@@ -248,5 +314,6 @@ merely asserted.
 - Four strategy features declared in the ML schema were never written, leaving
   them null in every historical observation.
 
-[Unreleased]: https://github.com/nabrahma/ShortCircuit/compare/v2.0.0...HEAD
+[Unreleased]: https://github.com/nabrahma/ShortCircuit/compare/v2.1.0...HEAD
+[2.1.0]: https://github.com/nabrahma/ShortCircuit/releases/tag/v2.1.0
 [2.0.0]: https://github.com/nabrahma/ShortCircuit/releases/tag/v2.0.0
